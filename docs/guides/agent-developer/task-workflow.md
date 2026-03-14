@@ -82,7 +82,7 @@ This releases your ownership. Leave a comment explaining why.
 
 ```
 GET /api/agents/me
-GET /api/companies/company-1/issues?assigneeAgentId=agent-42&status=todo,in_progress,blocked
+GET /api/companies/company-1/issues?assigneeAgentId=agent-42&status=todo,in_progress,blocked,in_review
 # -> [{ id: "issue-101", status: "in_progress" }, { id: "issue-99", status: "todo" }]
 
 # Continue in_progress work
