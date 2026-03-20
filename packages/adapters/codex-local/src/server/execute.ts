@@ -22,6 +22,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { parseCodexJsonl, isCodexUnknownSessionError } from "./parse.js";
 import { pathExists, prepareWorktreeCodexHome, resolveCodexHomeDir } from "./codex-home.js";
+import { hasCodexGitRepoCheckBypassArg } from "../shared/trust.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const CODEX_ROLLOUT_NOISE_RE =
@@ -337,6 +338,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (fromExtraArgs.length > 0) return fromExtraArgs;
     return asStringArray(config.args);
   })();
+  const autoSkipGitRepoCheckEnabled = !hasCodexGitRepoCheckBypassArg(extraArgs);
 
   const runtimeSessionParams = parseObject(runtime.sessionParams);
   const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
@@ -351,7 +353,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       `[paperclip] Codex session "${runtimeSessionId}" was saved for cwd "${runtimeSessionCwd}" and will not be resumed in "${cwd}".\n`,
     );
   }
-  const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
+  const instructionsFilePathInput = asString(config.instructionsFilePath, "").trim();
+  const instructionsFilePath = instructionsFilePathInput
+    ? path.resolve(cwd, instructionsFilePathInput)
+    : "";
   const instructionsDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
   let instructionsPrefix = "";
   let instructionsChars = 0;
@@ -376,16 +381,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
   }
   const commandNotes = (() => {
-    if (!instructionsFilePath) return [] as string[];
+    const notes: string[] = [];
+    if (autoSkipGitRepoCheckEnabled) {
+      notes.push("Auto-added --skip-git-repo-check for local workspace compatibility.");
+    }
+    if (!instructionsFilePath) return notes;
     if (instructionsPrefix.length > 0) {
-      return [
+      notes.push(
         `Loaded agent instructions from ${instructionsFilePath}`,
         `Prepended instructions + path directive to stdin prompt (relative references from ${instructionsDir}).`,
-      ];
+      );
+      return notes;
     }
-    return [
+    notes.push(
       `Configured instructionsFilePath ${instructionsFilePath}, but file could not be read; continuing without injected instructions.`,
-    ];
+    );
+    return notes;
   })();
   const bootstrapPromptTemplate = asString(config.bootstrapPromptTemplate, "");
   const templateData = {
@@ -423,6 +434,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (bypass) args.push("--dangerously-bypass-approvals-and-sandbox");
     if (model) args.push("--model", model);
     if (modelReasoningEffort) args.push("-c", `model_reasoning_effort=${JSON.stringify(modelReasoningEffort)}`);
+    if (autoSkipGitRepoCheckEnabled) args.push("--skip-git-repo-check");
     if (extraArgs.length > 0) args.push(...extraArgs);
     if (resumeSessionId) args.push("resume", resumeSessionId, "-");
     else args.push("-");

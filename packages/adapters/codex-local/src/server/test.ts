@@ -15,6 +15,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import path from "node:path";
 import { parseCodexJsonl } from "./parse.js";
+import { hasCodexGitRepoCheckBypassArg } from "../shared/trust.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -143,6 +144,7 @@ export async function testEnvironment(
         if (fromExtraArgs.length > 0) return fromExtraArgs;
         return asStringArray(config.args);
       })();
+      const autoSkipGitRepoCheckEnabled = !hasCodexGitRepoCheckBypassArg(extraArgs);
 
       const args = ["exec", "--json"];
       if (search) args.unshift("--search");
@@ -151,6 +153,7 @@ export async function testEnvironment(
       if (modelReasoningEffort) {
         args.push("-c", `model_reasoning_effort=${JSON.stringify(modelReasoningEffort)}`);
       }
+      if (autoSkipGitRepoCheckEnabled) args.push("--skip-git-repo-check");
       if (extraArgs.length > 0) args.push(...extraArgs);
       args.push("-");
 
