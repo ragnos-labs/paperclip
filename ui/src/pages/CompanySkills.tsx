@@ -1298,6 +1298,12 @@ export function DiscoveryGrid({
               />
             </div>
           ) : null}
+          {onCreateFolder && !showFolderRail ? (
+            <Button variant="outline" size="sm" onClick={onCreateFolder}>
+              <Plus className="mr-1 h-3.5 w-3.5" />
+              New folder
+            </Button>
+          ) : null}
           {onToggleSelectMode ? (
             <Button variant="ghost" size="sm" onClick={onToggleSelectMode}>
               {selectMode ? "Done" : "Select"}

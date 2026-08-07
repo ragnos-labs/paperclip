@@ -408,6 +408,22 @@ describe("DiscoveryGrid Studio entry points", () => {
     expect(props.onCreateFolder).not.toHaveBeenCalled();
   });
 
+  it("keeps folder creation available when no folder rail exists", async () => {
+    const onCreateFolder = vi.fn();
+    const node = await renderDiscoveryGrid({
+      ...projectFolderGridProps(),
+      folderResult: { ...projectFolderResult, folders: [] },
+      onCreateFolder,
+    });
+    const createButton = buttonsNamed(node, "New folder")[0] as HTMLButtonElement;
+
+    expect(createButton).toBeDefined();
+
+    await click(createButton);
+
+    expect(onCreateFolder).toHaveBeenCalledOnce();
+  });
+
   it("refreshes only the project represented by the active project folder", async () => {
     const onScan = vi.fn();
     const node = await renderDiscoveryGrid({
