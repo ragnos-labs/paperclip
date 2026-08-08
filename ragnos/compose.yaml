@@ -1,0 +1,104 @@
+name: paperclip-ragnos-local
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: paperclip
+      POSTGRES_PASSWORD: "${PAPERCLIP_DB_PASSWORD:?render ragnos/.runtime/compose.env first}"
+      POSTGRES_USER: paperclip
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperclip -d paperclip"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - paperclip_pg17:/var/lib/postgresql/data
+    networks:
+      - paperclip_internal
+
+  fleet-broker:
+    build:
+      context: ..
+      dockerfile: ragnos/fake-fleet-broker/Dockerfile
+    restart: unless-stopped
+    environment:
+      FLEET_FAKE_KEYS_JSON: "${FLEET_FAKE_KEYS_JSON:?render ragnos/.runtime/compose.env first}"
+      HOST: 0.0.0.0
+      PORT: "8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    cap_drop:
+      - ALL
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    networks:
+      - paperclip_internal
+
+  paperclip:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      fleet-broker:
+        condition: service_healthy
+    environment:
+      AIBL_PAPERCLIP_HMAC_KEY_B64: "${AIBL_PAPERCLIP_HMAC_KEY_B64:?render ragnos/.runtime/compose.env first}"
+      BETTER_AUTH_SECRET: "${PAPERCLIP_SESSION_SECRET:?render ragnos/.runtime/compose.env first}"
+      DATABASE_URL: "postgres://paperclip:${PAPERCLIP_DB_PASSWORD}@db:5432/paperclip"
+      DO_NOT_TRACK: "1"
+      HOST: 0.0.0.0
+      PAPERCLIP_AGENT_JWT_SECRET: "${PAPERCLIP_AGENT_JWT_SECRET:?render ragnos/.runtime/compose.env first}"
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: private
+      PAPERCLIP_DEPLOYMENT_MODE: authenticated
+      PAPERCLIP_HOME: /paperclip
+      PAPERCLIP_INSTANCE_ID: default
+      PAPERCLIP_PUBLIC_URL: http://127.0.0.1:3100
+      PAPERCLIP_TELEMETRY_DISABLED: "1"
+      PAPERCLIP_TOOL_ACTION_SIGNING_SECRET: "${PAPERCLIP_TOOL_SIGNING_SECRET:?render ragnos/.runtime/compose.env first}"
+      PORT: "3100"
+      RAGNOS_PAPERCLIP_HMAC_KEY_B64: "${RAGNOS_PAPERCLIP_HMAC_KEY_B64:?render ragnos/.runtime/compose.env first}"
+      SERVE_UI: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3100/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "127.0.0.1:3100:3100"
+    cap_drop:
+      - ALL
+    user: "1000:1000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=128m,nosuid,nodev
+    volumes:
+      - paperclip_data:/paperclip
+      - ./adapter-plugins.json:/paperclip/adapter-plugins.json:ro
+      - ./packages/ragnos-fleet:/opt/ragnos-fleet-adapter:ro
+    networks:
+      - paperclip_edge
+      - paperclip_internal
+
+networks:
+  paperclip_edge: {}
+  paperclip_internal:
+    internal: true
+
+volumes:
+  paperclip_data: {}
+  paperclip_pg17: {}

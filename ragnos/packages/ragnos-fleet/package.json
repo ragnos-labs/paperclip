@@ -1,0 +1,17 @@
+{
+  "name": "@ragnos/paperclip-fleet-adapter",
+  "version": "0.1.0",
+  "description": "Standalone Paperclip adapter for the RAGnos Fleet Broker gateway",
+  "type": "module",
+  "license": "UNLICENSED",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "main": "./src/index.js",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,3302 @@
+{
+  "schema_version": "paperclip_ragnos_hermes_roster/v1",
+  "source": {
+    "repository": "ragnos",
+    "path": "config/hermes_profiles.yaml",
+    "commit": "f8a2ebb33fb5af486ce2269f0dd9bd05d04f899e",
+    "sha256": "24290aa3e895a385e019ae256dc4f820a7e5f0b76bb52f92bdaa107934de0272",
+    "registry_schema_version": "hermes-profile-registry.v1"
+  },
+  "expected_live_count": 36,
+  "internal_reporting_link_count": 35,
+  "external_reporting_links": [
+    {
+      "profile_id": "keez_request_router",
+      "reports_to": "hunter"
+    }
+  ],
+  "profiles": [
+    {
+      "profile_id": "agent_conversation_knowledge_curator",
+      "label": "Agent Conversation Knowledge Curator",
+      "description": "Live read-only agent-conversation knowledge-flow health + quality curator.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "conversation_knowledge_curator",
+        "hub": "rd",
+        "team": "knowledge_pipeline",
+        "reports_to": "r_and_d_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "agent_conversation_knowledge_curator_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "read_knowledge_artifacts",
+          "emit_evidence_packet"
+        ],
+        "allowed_adapters": [],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge",
+          "knowledge_base_mutation",
+          "cairn_ingest_apply"
+        ],
+        "scopes": {
+          "surfaces": [
+            "agent_conversations",
+            "knowledge_pipeline"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.hermes-agent-conversation-lanes",
+        "source": "systems/launchd/io.ragnos.hermes-agent-conversation-lanes.plist",
+        "cadence": "governed_periodic"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/agent_conversation_knowledge_curator/SOUL.md",
+        "evidence_sources": [
+          "agent_conversation_mining_watermark",
+          "card_ingest_gate_report",
+          "agent_conversation_producer_readiness",
+          "transcript_extractions"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "prometheus_textfile",
+          "otel"
+        ]
+      }
+    },
+    {
+      "profile_id": "alert_route_classifier",
+      "label": "Alert Route Classifier",
+      "description": "Live preview-only alert de-noising and routing verdict lane.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "alert_route_classifier",
+        "hub": "engineering",
+        "team": "observability",
+        "reports_to": "engineering_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "alert_route_classifier_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "classify_alert",
+          "suppress_alert",
+          "route_alert",
+          "emit_health_observation",
+          "propose_review_packet",
+          "mirror_review_task"
+        ],
+        "allowed_adapters": [
+          "health_reader",
+          "clickup_mirror"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "alert_intake",
+            "alert_routing",
+            "noise_suppression"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 5,
+        "max_runtime_seconds": 60
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": true,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT15M"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/alert_route_classifier/SOUL.md",
+        "evidence_sources": [
+          "alertmanager",
+          "alert_payload",
+          "prometheus",
+          "drainq_file",
+          "health_observations"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "prometheus_textfile"
+        ]
+      }
+    },
+    {
+      "profile_id": "backlog_hygiene_curator",
+      "label": "Backlog Hygiene Curator",
+      "description": "Backlog hygiene curator. Reports close-candidate, missing/duplicate External ID, and priority-mismatch findings from the /backlog audit tool and executes governed safe writes (status -> 'pending closeout', priority -> 'low'); External IDs stay proposal-only. Manual weekly cadence.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "backlog_hygiene_curator",
+        "hub": "ops",
+        "team": "backlog_governance",
+        "reports_to": "operations_department_rollup",
+        "stakes_tier": "medium",
+        "accountability_signal": "backlog_hygiene_curator_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "read_backlog_tree",
+          "propose_write",
+          "update_backlog_status",
+          "update_backlog_priority"
+        ],
+        "allowed_adapters": [
+          "ai_ops_backlog"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "ai_ops_backlog"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 20,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "scoped_field_write",
+        "live_writes_allowed": true,
+        "outbox_writes_allowed": false,
+        "operator_approval_required": false
+      },
+      "schedule": {
+        "mode": "manual",
+        "cadence": "weekly"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/backlog_hygiene_curator/SOUL.md",
+        "evidence_sources": [
+          "ai_ops_backlog"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events"
+        ]
+      }
+    },
+    {
+      "profile_id": "cairn_decay_provenance_monitor",
+      "label": "Cairn Decay Provenance Monitor",
+      "description": "Live preview-only Cairn decay and provenance health monitor.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "decay_provenance_monitor",
+        "hub": "rd",
+        "team": "cairns_governance",
+        "reports_to": "r_and_d_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "cairn_decay_provenance_monitor_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "emit_health_observation",
+          "propose_reingest",
+          "propose_cod_resynth",
+          "propose_source_refresh",
+          "propose_deprecation",
+          "add_review_comment"
+        ],
+        "allowed_adapters": [
+          "cairn_health_reader",
+          "graphrag_reingest"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "cairn_layer",
+            "system_health"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 300
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.cairn-health-monitor",
+        "source": "systems/launchd/io.ragnos.cairn-health-monitor.plist",
+        "cadence": "every_30m"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/cairn_decay_provenance_monitor/SOUL.md",
+        "evidence_sources": [
+          "cairn_staleness_index",
+          "doc_tracking_table",
+          "cod_failure_log",
+          "cairn_provenance_index"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "prometheus_textfile",
+          "otel_traces",
+          "langfuse_traces"
+        ]
+      }
+    },
+    {
+      "profile_id": "content_creative_review",
+      "label": "Content Creative Review",
+      "description": "Live Hermes creative-review team generating and persisting Content Hub creative proposals on a schedule.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "creative_review",
+        "hub": "engineering",
+        "team": "content_engine",
+        "reports_to": "engineering_department_rollup",
+        "stakes_tier": "medium",
+        "accountability_signal": "content_creative_review_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "generate_creative_proposal",
+          "persist_creative_proposal",
+          "emit_health_observation"
+        ],
+        "allowed_adapters": [
+          "hermes_hub"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge",
+          "content_body_edit",
+          "live_publish",
+          "clickup_write"
+        ],
+        "scopes": {
+          "surfaces": [
+            "keez_content_hub",
+            "content_engine",
+            "staged_content"
+          ],
+          "projects": {
+            "content_engine": {
+              "source_table": "runtime.staged_content"
+            }
+          }
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 1,
+        "max_writes": 10,
+        "max_runtime_seconds": 900
+      },
+      "write_policy": {
+        "mode": "scoped_field_write",
+        "live_writes_allowed": true,
+        "outbox_writes_allowed": false,
+        "operator_approval_required": false
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.content-creative-review",
+        "source": "systems/launchd/io.ragnos.content-creative-review.plist",
+        "cadence": "hourly"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/content_creative_review/SOUL.md",
+        "evidence_sources": [
+          "content_engine.staged_content",
+          "hermes_hub"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "otel_spans",
+          "langfuse_traces"
+        ]
+      }
+    },
+    {
+      "profile_id": "content_engine_review_projector",
+      "label": "Content Engine Review Projector",
+      "description": "Governed Hermes preview projection lane for Content Engine staged-content review.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "review_projector",
+        "hub": "engineering",
+        "team": "content_engine",
+        "reports_to": "engineering_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "content_engine_review_projector_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "create_review_preview",
+          "group_review_rows"
+        ],
+        "allowed_adapters": [
+          "hermes_hub"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "content_engine",
+            "staged_content",
+            "hermes_hub"
+          ],
+          "projects": {
+            "content_engine": {
+              "allowed_queues": [
+                "ready-seed",
+                "investigate-seed",
+                "ready-draft",
+                "pending-publish"
+              ]
+            }
+          }
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 60
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT2H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/content_engine_review_projector/SOUL.md",
+        "evidence_sources": [
+          "content_engine.staged_content",
+          "hermes_hub",
+          "clickup_routing"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events"
+        ]
+      }
+    },
+    {
+      "profile_id": "crm_operations_monitor",
+      "label": "CRM Operations Monitor",
+      "description": "Live CRM operations input/output monitor and governed cleanup proposal lane.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "operations_monitor",
+        "hub": "revenue",
+        "team": "crm_governance",
+        "reports_to": "revenue_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "crm_operations_monitor_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "read_crm_health",
+          "classify_crm_automation",
+          "emit_status_packet",
+          "propose_review_packet"
+        ],
+        "allowed_adapters": [
+          "crm_read",
+          "launchd_read",
+          "hermes_hub"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge",
+          "crm_mutation",
+          "clickup_mutation",
+          "instantly_mutation",
+          "webhook_delete",
+          "launchd_unload",
+          "campaign_launch",
+          "cairns_publish"
+        ],
+        "scopes": {
+          "surfaces": [
+            "twenty_crm",
+            "crm_webhooks",
+            "outreach_pipeline",
+            "cairns_twenty_crm",
+            "instantly"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 180
+      },
+      "write_policy": {
+        "mode": "read_only_governed_proposals",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT6H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/crm_operations_monitor/SOUL.md",
+        "evidence_sources": [
+          "twenty_crm_api",
+          "launchd_status",
+          "outreach_monitor",
+          "crm_webhook_logs",
+          "outreach_outbox",
+          "cairns_twenty_crm"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "prometheus_textfile"
+        ]
+      }
+    },
+    {
+      "profile_id": "deferred_queue_slo_monitor",
+      "label": "Deferred Queue SLO Monitor",
+      "description": "Live preview-only deferred queue SLO and stale job monitor.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "queue_slo_monitor",
+        "hub": "ops",
+        "team": "drainq_governance",
+        "reports_to": "operations_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "deferred_queue_slo_monitor_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "emit_health_observation",
+          "propose_manual_drain_review",
+          "escalate_slo_breach",
+          "add_review_comment"
+        ],
+        "allowed_adapters": [
+          "drainq_reader"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "drainq_health",
+            "system_health"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0.1,
+        "max_writes": 1,
+        "max_runtime_seconds": 300
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.drainq-monitor",
+        "source": "systems/launchd/io.ragnos.drainq-monitor.plist",
+        "cadence": "every_15m"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/deferred_queue_slo_monitor/SOUL.md",
+        "evidence_sources": [
+          "defer_overnight_queue",
+          "drain_truth_report",
+          "drainq_depth_slo",
+          "drainq_stale_jobs",
+          "dead_letter_queue",
+          "drain_coverage_audit"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "prometheus_textfile"
+        ]
+      }
+    },
+    {
+      "profile_id": "engineering_department_rollup",
+      "label": "Engineering Department Rollup",
+      "description": "Live scheduled zero-effect Engineering chief rollup over eligible published work.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "department_chief",
+        "hub": "engineering",
+        "team": "engineering_governance",
+        "reports_to": "keez_request_router",
+        "stakes_tier": "low",
+        "accountability_signal": "engineering_department_rollup_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "summarize_department_rollup"
+        ],
+        "allowed_adapters": [
+          "rollup_builder"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "work_registry",
+            "canonical_publications",
+            "department_rollups"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT1H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/engineering_department_rollup/SOUL.md",
+        "evidence_sources": [
+          "hermes_work_registry",
+          "canonical_publications"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "finance_coordinator",
+      "label": "Finance Coordinator",
+      "description": "Read-only finance and accounting close evidence coordinator.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "finance_close_coordinator",
+        "hub": "money",
+        "team": "finance_governance",
+        "reports_to": "money_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "finance_coordinator_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "read_accounting_artifacts",
+          "emit_evidence_packet",
+          "read_finance_ledger"
+        ],
+        "allowed_adapters": [],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge",
+          "clickup_timesheet_write",
+          "invoice_send",
+          "payment_collection",
+          "portal_invoice_mutation",
+          "stripe_invoice_mutation"
+        ],
+        "scopes": {
+          "surfaces": [
+            "accounting_daily",
+            "finance_postgres"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 60
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT6H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/finance_coordinator/SOUL.md",
+        "evidence_sources": [
+          "accounting",
+          "finance"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "prometheus_textfile"
+        ]
+      }
+    },
+    {
+      "profile_id": "git_estate_health_monitor",
+      "label": "Git Estate Health Monitor",
+      "description": "Live deterministic read-only Git estate loss-exposure and drift monitor.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "git_estate_health_monitor",
+        "hub": "engineering",
+        "team": "dependency_governance",
+        "reports_to": "engineering_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "git_estate_health_monitor_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "read_git_estate_registry",
+          "read_local_git_state",
+          "read_remote_git_refs",
+          "read_github_repository_state",
+          "emit_git_estate_transition_signal",
+          "recommend_operator_review"
+        ],
+        "allowed_adapters": [
+          "git",
+          "github_cli",
+          "home_agent",
+          "hermes_hub"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge",
+          "git_write",
+          "clickup_write",
+          "launchd_mutation",
+          "runtime_profile_mutation"
+        ],
+        "scopes": {
+          "surfaces": [
+            "git_estate_registry",
+            "local_git_checkouts",
+            "github_remote_truth",
+            "pull_request_hygiene"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 300
+      },
+      "write_policy": {
+        "mode": "read_only_git_estate_monitor",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.git-estate-health",
+        "source": "systems/launchd/io.ragnos.git-estate-health.plist.template"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/git_estate_health_monitor/SOUL.md",
+        "evidence_sources": [
+          "config/git_estate.yaml",
+          "local_git_read_commands",
+          "git_ls_remote",
+          "github_read_api",
+          "hermes_hub"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "otel",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "hermes_profile_documentation_monitor",
+      "label": "Hermes Profile Documentation Monitor",
+      "description": "Live read-only Hermes profile documentation drift monitor.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "documentation_drift_monitor",
+        "hub": "security",
+        "team": "registry_governance",
+        "reports_to": "security_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "hermes_profile_documentation_monitor_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "read_profile_registry",
+          "read_profile_soul_docs",
+          "read_hermes_agent_docs",
+          "read_durable_map_inventory",
+          "emit_documentation_status",
+          "recommend_doc_update"
+        ],
+        "allowed_adapters": [
+          "home_agent",
+          "hermes_hub"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge",
+          "clickup_write",
+          "launchd_mutation",
+          "runtime_profile_mutation"
+        ],
+        "scopes": {
+          "surfaces": [
+            "hermes_profiles",
+            "hermes_agent_docs",
+            "profile_soul_docs",
+            "durable_maps"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "read_only_documentation_monitor",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT24H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/hermes_profile_documentation_monitor/SOUL.md",
+        "evidence_sources": [
+          "profile_registry",
+          "profile_soul_docs",
+          "hermes_agent_docs",
+          "durable_map_inventory",
+          "merged_pr_metadata"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "hub_signal_task_promoter",
+      "label": "Hub Signal Task Promoter",
+      "description": "Live allowlisted Hermes Hub signal to ClickUp review task promoter.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "signal_task_promoter",
+        "hub": "ops",
+        "team": "backlog_governance",
+        "reports_to": "operations_department_rollup",
+        "stakes_tier": "medium",
+        "accountability_signal": "hub_signal_task_promoter_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "create_task",
+          "claim_kanban_task",
+          "complete_kanban_task",
+          "block_kanban_task",
+          "heartbeat_kanban_task"
+        ],
+        "allowed_adapters": [
+          "hermes_hub",
+          "clickup_mirror"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "hermes_hub",
+            "clickup_mirror"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 20,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "governed_outbox_only",
+        "live_writes_allowed": true,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.cos-promoter",
+        "source": "scripts/launchd/io.ragnos.cos-promoter.plist",
+        "cadence": "daily_0645"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/hub_signal_task_promoter/SOUL.md",
+        "evidence_sources": [
+          "hermes_hub",
+          "request_ledger"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "request_ledger"
+        ]
+      }
+    },
+    {
+      "profile_id": "kanban_hub_mirror",
+      "label": "Kanban Hub Mirror",
+      "description": "Live upstream Hermes Kanban to Hermes Hub review queue mirror.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "hub_mirror",
+        "hub": "ops",
+        "team": "kanban_governance",
+        "reports_to": "operations_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "kanban_hub_mirror_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "read_kanban_board",
+          "enqueue_review_task",
+          "emit_kanban_mirror_status"
+        ],
+        "allowed_adapters": [
+          "home_agent",
+          "hermes_hub"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "upstream_hermes_kanban",
+            "hermes_hub_review_queue"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 50,
+        "max_runtime_seconds": 180
+      },
+      "write_policy": {
+        "mode": "governed_review_queue_outbox",
+        "live_writes_allowed": true,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.hermes-kanban-mirror",
+        "source": "systems/launchd/io.ragnos.hermes-kanban-mirror.plist",
+        "cadence": "governed_periodic"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/kanban_hub_mirror/SOUL.md",
+        "evidence_sources": [
+          "~/.hermes/kanban.db",
+          "hermes_hub_outbox"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub",
+          "otel",
+          "langfuse"
+        ]
+      }
+    },
+    {
+      "profile_id": "keez_clickup_task_writer",
+      "label": "Keez Clickup Task Writer",
+      "description": "Live governed ClickUp task write lane for Keez requests.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "task_writer",
+        "hub": "keez",
+        "team": "keez_core",
+        "reports_to": "keez_request_router",
+        "stakes_tier": "medium",
+        "accountability_signal": "keez_clickup_task_writer_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "create_task",
+          "update_status",
+          "add_comment",
+          "claim_kanban_task",
+          "complete_kanban_task",
+          "block_kanban_task",
+          "heartbeat_kanban_task"
+        ],
+        "allowed_adapters": [
+          "hermes_hub"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "keez",
+            "home_agent"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 10,
+        "max_runtime_seconds": 30
+      },
+      "write_policy": {
+        "mode": "governed_outbox_only",
+        "live_writes_allowed": true,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT1H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/keez_clickup_task_writer/SOUL.md",
+        "evidence_sources": [
+          "request_ledger",
+          "hermes_hub"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "request_ledger"
+        ]
+      }
+    },
+    {
+      "profile_id": "keez_request_router",
+      "label": "Keez Request Router",
+      "description": "Live Keez/Home Agent request router and Hermes Hub registration guard.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "chief_of_staff",
+        "hub": "keez",
+        "team": "keez_core",
+        "reports_to": "hunter",
+        "stakes_tier": "critical",
+        "accountability_signal": "keez_request_router_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "route_preview",
+          "draft_response",
+          "add_review_comment",
+          "read_code",
+          "read_hermes_state",
+          "read_telemetry",
+          "read_secrets_status",
+          "search_backlog",
+          "read_drive",
+          "github_write",
+          "file_edit",
+          "slack_dm",
+          "crm_write",
+          "mail_send",
+          "approve_proposal",
+          "decline_proposal",
+          "grant_capability",
+          "revoke_capability",
+          "fleet_halt"
+        ],
+        "allowed_adapters": [
+          "home_agent",
+          "hermes_hub",
+          "github",
+          "gws",
+          "slack",
+          "clickup",
+          "twenty_crm_api",
+          "codex_doer",
+          "capability_registry"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "keez",
+            "home_agent"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 5,
+        "max_writes": 100,
+        "max_runtime_seconds": 600
+      },
+      "write_policy": {
+        "mode": "governed_live",
+        "live_writes_allowed": true,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.hermes-upstream-update-monitor",
+        "source": "systems/launchd/io.ragnos.hermes-upstream-update-monitor.plist",
+        "cadence": "governed_periodic"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/keez_request_router/SOUL.md",
+        "evidence_sources": [
+          "request_ledger",
+          "home_agent_receipts",
+          "hermes_hub"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "request_ledger"
+        ]
+      }
+    },
+    {
+      "profile_id": "marketing_department_rollup",
+      "label": "Marketing Department Rollup",
+      "description": "Live scheduled zero-effect Marketing chief rollup over eligible published work.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "department_chief",
+        "hub": "marketing",
+        "team": "marketing_governance",
+        "reports_to": "keez_request_router",
+        "stakes_tier": "low",
+        "accountability_signal": "marketing_department_rollup_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "summarize_department_rollup"
+        ],
+        "allowed_adapters": [
+          "rollup_builder"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "work_registry",
+            "canonical_publications",
+            "department_rollups"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT1H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/marketing_department_rollup/SOUL.md",
+        "evidence_sources": [
+          "hermes_work_registry",
+          "canonical_publications"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "meeting_action_task_writer",
+      "label": "Meeting Action Task Writer",
+      "description": "Live governed ClickUp task write lane for parsed Zoom meeting action items.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "action_task_writer",
+        "hub": "ops",
+        "team": "meeting_pipeline",
+        "reports_to": "operations_department_rollup",
+        "stakes_tier": "medium",
+        "accountability_signal": "meeting_action_task_writer_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "create_meeting_action_task",
+          "update_meeting_action_task",
+          "create_review_queue_proposal",
+          "claim_kanban_task",
+          "complete_kanban_task",
+          "block_kanban_task",
+          "heartbeat_kanban_task"
+        ],
+        "allowed_adapters": [
+          "hermes_hub",
+          "clickup_task_factory"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "zoom_ingest",
+            "clickup",
+            "meeting_notes"
+          ],
+          "projects": {
+            "meeting_actions": {
+              "allowed_route_keys": [
+                "meeting_notes",
+                "tasks",
+                "sales",
+                "aibl_triage",
+                "blacksburg_law",
+                "tandem_people",
+                "hermes_review_queue"
+              ]
+            }
+          }
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 50,
+        "max_runtime_seconds": 60
+      },
+      "write_policy": {
+        "mode": "governed_outbox_only",
+        "live_writes_allowed": true,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT1H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/meeting_action_task_writer/SOUL.md",
+        "evidence_sources": [
+          "zoom_ingest",
+          "meeting_route_decision",
+          "hermes_outbox",
+          "clickup_task_factory"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "hermes_outbox_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "meeting_coverage_monitor",
+      "label": "Meeting Coverage Monitor",
+      "description": "Live meeting coverage and pipeline health monitor.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "coverage_monitor",
+        "hub": "ops",
+        "team": "meeting_pipeline",
+        "reports_to": "operations_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "meeting_coverage_monitor_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "detect_coverage_gap",
+          "emit_health_observation",
+          "propose_backfill",
+          "add_review_comment"
+        ],
+        "allowed_adapters": [
+          "meeting_replay_reader",
+          "calendar_window_reader",
+          "gmail_reader",
+          "blue_loop_store"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "meeting_intake",
+            "transcript_intelligence",
+            "system_health"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 300
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.meeting-pipeline-health",
+        "source": "systems/launchd/io.ragnos.meeting-pipeline-health.plist",
+        "cadence": "every_30m"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/meeting_coverage_monitor/SOUL.md",
+        "evidence_sources": [
+          "calendar_snapshot",
+          "gmail_search",
+          "zoom_my_notes",
+          "meeting_reconcile_log",
+          "canonical_meeting_index",
+          "blue_feedback_observations"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "prometheus_textfile"
+        ]
+      }
+    },
+    {
+      "profile_id": "money_department_rollup",
+      "label": "Money Department Rollup",
+      "description": "Live scheduled zero-effect Money chief rollup over eligible published work.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "department_chief",
+        "hub": "money",
+        "team": "money_governance",
+        "reports_to": "keez_request_router",
+        "stakes_tier": "low",
+        "accountability_signal": "money_department_rollup_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "summarize_department_rollup"
+        ],
+        "allowed_adapters": [
+          "rollup_builder"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "work_registry",
+            "canonical_publications",
+            "department_rollups"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT1H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/money_department_rollup/SOUL.md",
+        "evidence_sources": [
+          "hermes_work_registry",
+          "canonical_publications"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "observability_stack_heartbeat",
+      "label": "Observability Stack Heartbeat",
+      "description": "Live observability stack heartbeat and canary signal lane.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "stack_heartbeat",
+        "hub": "engineering",
+        "team": "observability",
+        "reports_to": "engineering_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "observability_stack_heartbeat_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "probe_observability_stack",
+          "emit_health_observation",
+          "propose_review_packet"
+        ],
+        "allowed_adapters": [
+          "health_reader"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "observability_stack",
+            "alert_delivery_chain",
+            "exporter_freshness",
+            "synthetic_canary",
+            "telemetry_integrity"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 2,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.otel-heartbeat",
+        "source": "systems/launchd/io.ragnos.otel-heartbeat.plist",
+        "cadence": "every_5m"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/observability_stack_heartbeat/SOUL.md",
+        "evidence_sources": [
+          "prometheus",
+          "pushgateway",
+          "alertmanager",
+          "tempo",
+          "langfuse_api",
+          "collector_config",
+          "drainq_file",
+          "drain_receipts",
+          "launchd"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "prometheus_textfile"
+        ]
+      }
+    },
+    {
+      "profile_id": "operations_department_rollup",
+      "label": "Operations Department Rollup",
+      "description": "Live scheduled zero-effect Operations chief rollup over eligible published work.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "department_chief",
+        "hub": "ops",
+        "team": "ops_governance",
+        "reports_to": "keez_request_router",
+        "stakes_tier": "low",
+        "accountability_signal": "operations_department_rollup_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "summarize_department_rollup"
+        ],
+        "allowed_adapters": [
+          "rollup_builder"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "work_registry",
+            "canonical_publications",
+            "department_rollups"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT1H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/operations_department_rollup/SOUL.md",
+        "evidence_sources": [
+          "hermes_work_registry",
+          "canonical_publications"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "output_quality_evaluator",
+      "label": "Output Quality Evaluator",
+      "description": "Preview-only lane that scores sampled production agent output against versioned rubrics and files scored improvement proposals.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "output_quality_evaluator",
+        "hub": "engineering",
+        "team": "observability",
+        "reports_to": "engineering_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "output_quality_evaluator_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "score_run_against_rubric",
+          "publish_eval_score",
+          "emit_runtime_learning_event",
+          "propose_review_packet"
+        ],
+        "allowed_adapters": [
+          "health_reader"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "output_quality_scoring",
+            "eval_score_ledger"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 120,
+        "max_runtime_seconds": 900
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "systemd",
+        "unit": "ragnos-output-quality-evaluator.timer",
+        "source": "infrastructure/aws/observability-host/systemd/ragnos-output-quality-evaluator.timer",
+        "cadence": "nightly_qwen_window"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/output_quality_evaluator/SOUL.md",
+        "evidence_sources": [
+          "langfuse_traces",
+          "langfuse_scores",
+          "eval_registry",
+          "runtime_learning_events"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "langfuse",
+          "prometheus_textfile"
+        ]
+      }
+    },
+    {
+      "profile_id": "personal_assistant_department_rollup",
+      "label": "Personal Assistant Department Rollup",
+      "description": "Live scheduled zero-effect Personal Assistant chief rollup over eligible published work.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "department_chief",
+        "hub": "personal_assistant",
+        "team": "personal_assistant_governance",
+        "reports_to": "keez_request_router",
+        "stakes_tier": "low",
+        "accountability_signal": "personal_assistant_department_rollup_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "summarize_department_rollup"
+        ],
+        "allowed_adapters": [
+          "rollup_builder"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "update_custom_field_value",
+          "create_custom_field_schema",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "work_registry",
+            "canonical_publications",
+            "department_rollups"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT1H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/personal_assistant_department_rollup/SOUL.md",
+        "evidence_sources": [
+          "hermes_work_registry",
+          "canonical_publications"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "project_status_clickup_reviewer",
+      "label": "Project Status Clickup Reviewer",
+      "description": "Live source-backed project status and ClickUp review update lane.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "project_status_reviewer",
+        "hub": "ops",
+        "team": "backlog_governance",
+        "reports_to": "operations_department_rollup",
+        "stakes_tier": "medium",
+        "accountability_signal": "project_status_clickup_reviewer_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "add_comment",
+          "pending_closeout_status",
+          "claim_kanban_task",
+          "complete_kanban_task",
+          "block_kanban_task",
+          "heartbeat_kanban_task"
+        ],
+        "allowed_adapters": [
+          "clickup_read",
+          "clickup_comment",
+          "clickup_pending_closeout"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "clickup",
+            "project_status"
+          ],
+          "projects": {
+            "north_star": {
+              "clickup_list_keys": [
+                "ai_ops_backlog"
+              ],
+              "max_writes": 3
+            },
+            "keez": {
+              "clickup_list_keys": [
+                "keez_roadmap"
+              ],
+              "max_writes": 3
+            },
+            "hermes_hub": {
+              "clickup_list_keys": [
+                "hermes_review_queue",
+                "hermes_system_backlog",
+                "hermes_archive_receipts"
+              ],
+              "anchor_task_ids": [
+                "86ahha2r7"
+              ],
+              "max_writes": 3
+            },
+            "aibl": {
+              "clickup_list_keys": [
+                "aibl_tasks"
+              ],
+              "max_writes": 3
+            },
+            "backlog": {
+              "clickup_list_keys": [
+                "ai_ops_backlog",
+                "agent_inbox"
+              ],
+              "max_writes": 3
+            },
+            "self_healing_knowledge": {
+              "clickup_list_keys": [
+                "self_healing",
+                "agent_proposals",
+                "infra_loop_review",
+                "telemetry"
+              ],
+              "max_writes": 3
+            },
+            "video_pipeline": {
+              "clickup_list_keys": [
+                "video_pipeline_roadmap"
+              ],
+              "max_writes": 3
+            }
+          }
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 5,
+        "max_runtime_seconds": 300
+      },
+      "write_policy": {
+        "mode": "capped_review_writes",
+        "live_writes_allowed": true,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.hermes-pm-daily",
+        "source": "systems/launchd/io.ragnos.hermes-pm-daily.plist",
+        "cadence": "daily_0700"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/project_status_clickup_reviewer/SOUL.md",
+        "evidence_sources": [
+          "clickup_agent_plane",
+          "home_agent",
+          "hermes",
+          "tk",
+          "meta_log",
+          "overnight",
+          "knowledge",
+          "self_heal",
+          "system_health",
+          "meeting_intake"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "prometheus_textfile"
+        ]
+      }
+    },
+    {
+      "profile_id": "r_and_d_department_rollup",
+      "label": "R And D Department Rollup",
+      "description": "Live scheduled zero-effect R&D chief rollup over eligible published work.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "department_chief",
+        "hub": "rd",
+        "team": "research_governance",
+        "reports_to": "keez_request_router",
+        "stakes_tier": "low",
+        "accountability_signal": "r_and_d_department_rollup_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "summarize_department_rollup"
+        ],
+        "allowed_adapters": [
+          "rollup_builder"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "work_registry",
+            "canonical_publications",
+            "department_rollups"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT1H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/r_and_d_department_rollup/SOUL.md",
+        "evidence_sources": [
+          "hermes_work_registry",
+          "canonical_publications"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "recurring_failure_self_heal",
+      "label": "Recurring Failure Self Heal",
+      "description": "Read-only legacy recurring-failure audit surface. It inspects the retired raw queue for compatibility and health evidence but cannot create previews, worktrees, PRs, merges, or effects. The unified refinement self-heal promoter over meta_log.live_self_heal_clusters is the sole promotion authority. m2m and merge remain universally forbidden write classes for this profile like every other profile in this registry.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "self_heal_executor",
+        "hub": "engineering",
+        "team": "reliability_governance",
+        "reports_to": "engineering_department_rollup",
+        "stakes_tier": "high",
+        "accountability_signal": "recurring_failure_self_heal_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "emit_health_observation"
+        ],
+        "allowed_adapters": [
+          "recurring_failure_self_heal_lane"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "meta_log",
+            "system_health"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0.5,
+        "max_writes": 0,
+        "max_runtime_seconds": 1800
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "outbox_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.recurring-failure-self-heal",
+        "source": "systems/launchd/io.ragnos.recurring-failure-self-heal.plist",
+        "cadence": "every_30m"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/recurring_failure_self_heal/SOUL.md",
+        "evidence_sources": [
+          "meta_log_recurring_failure_queue",
+          "heal_attempt_ledger"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "otel_traces",
+          "langfuse_traces"
+        ]
+      }
+    },
+    {
+      "profile_id": "red_team_review_lead",
+      "label": "Red Team Review Lead",
+      "description": "Live scheduled zero-effect Red Team chief rollup over eligible published work.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "department_chief",
+        "hub": "red_team",
+        "team": "red_team_governance",
+        "reports_to": "keez_request_router",
+        "stakes_tier": "low",
+        "accountability_signal": "red_team_review_lead_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "summarize_department_rollup"
+        ],
+        "allowed_adapters": [
+          "rollup_builder"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "work_registry",
+            "canonical_publications",
+            "department_rollups"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT1H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/red_team_review_lead/SOUL.md",
+        "evidence_sources": [
+          "hermes_work_registry",
+          "canonical_publications"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "revenue_department_rollup",
+      "label": "Revenue Department Rollup",
+      "description": "Live scheduled zero-effect Revenue chief rollup over eligible published work.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "department_chief",
+        "hub": "revenue",
+        "team": "revenue_governance",
+        "reports_to": "keez_request_router",
+        "stakes_tier": "low",
+        "accountability_signal": "revenue_department_rollup_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "summarize_department_rollup"
+        ],
+        "allowed_adapters": [
+          "rollup_builder"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "work_registry",
+            "canonical_publications",
+            "department_rollups"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT1H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/revenue_department_rollup/SOUL.md",
+        "evidence_sources": [
+          "hermes_work_registry",
+          "canonical_publications"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "security_department_rollup",
+      "label": "Security Department Rollup",
+      "description": "Live scheduled zero-effect Security chief rollup over eligible published work.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "department_chief",
+        "hub": "security",
+        "team": "security_governance",
+        "reports_to": "keez_request_router",
+        "stakes_tier": "low",
+        "accountability_signal": "security_department_rollup_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "summarize_department_rollup"
+        ],
+        "allowed_adapters": [
+          "rollup_builder"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "work_registry",
+            "canonical_publications",
+            "department_rollups"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT1H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/security_department_rollup/SOUL.md",
+        "evidence_sources": [
+          "hermes_work_registry",
+          "canonical_publications"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "security_review_triage",
+      "label": "Security Review Triage",
+      "description": "Live read-only security triage lane for agent-transcript secret exposures.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "security_triage",
+        "hub": "security",
+        "team": "security_governance",
+        "reports_to": "security_department_rollup",
+        "stakes_tier": "medium",
+        "accountability_signal": "security_review_triage_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "read_security_findings",
+          "emit_review_proposal"
+        ],
+        "allowed_adapters": [],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge",
+          "credential_rotation_apply",
+          "security_control_mutation"
+        ],
+        "scopes": {
+          "surfaces": [
+            "security",
+            "hermes_hub"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 60
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.hermes-agent-conversation-lanes",
+        "source": "systems/launchd/io.ragnos.hermes-agent-conversation-lanes.plist",
+        "cadence": "governed_periodic"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/security_review_triage/SOUL.md",
+        "evidence_sources": [
+          "secret_exposure_signals",
+          "hermes_hub"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "prometheus_textfile"
+        ]
+      }
+    },
+    {
+      "profile_id": "token_burn_monitor",
+      "label": "Token Burn Monitor",
+      "description": "Live deterministic read-only agent token burn rate and gate monitor.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "token_burn_monitor",
+        "hub": "money",
+        "team": "agent_cost_governance",
+        "reports_to": "money_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "token_burn_monitor_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "read_agent_efficiency_snapshot",
+          "read_root_guidance_bytes",
+          "read_skill_catalog",
+          "evaluate_burn_rate_gates",
+          "emit_burn_rate_observation",
+          "recommend_operator_review"
+        ],
+        "allowed_adapters": [
+          "home_agent",
+          "hermes_hub",
+          "blue_loop_store"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge",
+          "git_write",
+          "clickup_write",
+          "launchd_mutation",
+          "runtime_profile_mutation",
+          "agent_efficiency_snapshot_write",
+          "llm_invocation",
+          "subagent_spawn",
+          "session_rollover"
+        ],
+        "scopes": {
+          "surfaces": [
+            "agent_efficiency_snapshot",
+            "burn_rate_gates",
+            "root_guidance_byte_ceiling",
+            "auto_exposed_skill_catalog",
+            "subagent_fanout_ratio"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "read_only_token_burn_monitor",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.burn-rate-monitor",
+        "source": "systems/launchd/io.ragnos.burn-rate-monitor.plist.template"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/token_burn_monitor/SOUL.md",
+        "evidence_sources": [
+          "runtime://agent-efficiency/latest.json",
+          "config/burn_rate_gates.yaml",
+          "config/skill_catalog.yaml",
+          "AGENTS.md",
+          "CLAUDE.md",
+          "blue_feedback_observations"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "otel",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "twenty_crm_operator",
+      "label": "Twenty CRM Operator",
+      "description": "Live tiered full Twenty CRM operator for governed CRM reads, writes, merges, archives, webhooks, and metadata operations.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "crm_operator",
+        "hub": "revenue",
+        "team": "crm_governance",
+        "reports_to": "revenue_department_rollup",
+        "stakes_tier": "high",
+        "accountability_signal": "twenty_crm_operator_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "record.read",
+          "record.search",
+          "record.create",
+          "record.update",
+          "record.upsert",
+          "record.update_stage",
+          "record.merge",
+          "record.archive",
+          "record.unarchive",
+          "record.delete",
+          "note.create",
+          "relation.link",
+          "relation.unlink",
+          "webhook.read",
+          "webhook.create",
+          "webhook.update",
+          "webhook.delete",
+          "metadata.schema_read",
+          "metadata.schema_update",
+          "metadata.schema_delete",
+          "batch.create",
+          "batch.update",
+          "batch.delete",
+          "claim_kanban_task",
+          "complete_kanban_task",
+          "block_kanban_task",
+          "heartbeat_kanban_task"
+        ],
+        "allowed_adapters": [
+          "hermes_hub",
+          "twenty_crm_api"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge",
+          "launchd_mutation",
+          "campaign_mutation",
+          "clickup_write",
+          "clickup_mutation",
+          "instantly_mutation",
+          "listmonk_mutation",
+          "cairns_publish"
+        ],
+        "scopes": {
+          "surfaces": [
+            "twenty_crm",
+            "crm_operations_team",
+            "twenty_crm_operator",
+            "outreach_pipeline",
+            "tidycal",
+            "zoom_ingest"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 25,
+        "max_runtime_seconds": 120
+      },
+      "write_policy": {
+        "mode": "tiered_full_twenty_operator",
+        "live_writes_allowed": true,
+        "outbox_writes_allowed": true,
+        "operator_approval_required": "tiered",
+        "approval_required_risk_tiers": [
+          "high"
+        ]
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT6H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/twenty_crm_operator/SOUL.md",
+        "evidence_sources": [
+          "hermes_hub",
+          "hermes_outbox",
+          "twenty_crm_api",
+          "crm_operations_monitor",
+          "outreach_outbox"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "hermes_outbox",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "upstream_dependency_monitor",
+      "label": "Upstream Dependency Monitor",
+      "description": "Live read-only project manager for upstream dependency release and fold-in relevance monitoring.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "dependency_relevance_monitor",
+        "hub": "engineering",
+        "team": "dependency_governance",
+        "reports_to": "engineering_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "upstream_dependency_monitor_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "read_upstream_registry",
+          "read_release_tags",
+          "read_local_clone_head",
+          "emit_upstream_fold_in_signal",
+          "recommend_fold_in_review"
+        ],
+        "allowed_adapters": [
+          "github_cli",
+          "git",
+          "hermes_hub",
+          "morning_brief"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge",
+          "clickup_write",
+          "launchd_mutation",
+          "runtime_profile_mutation",
+          "git_write",
+          "dependency_update_apply"
+        ],
+        "scopes": {
+          "surfaces": [
+            "upstream_source_registry",
+            "upstream_dependency_releases",
+            "upstream_dependency_drift",
+            "upstream_fold_in_digest",
+            "morning_brief"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 180
+      },
+      "write_policy": {
+        "mode": "read_only_upstream_dependency_monitor",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.upstream-source-watch",
+        "source": "systems/launchd/io.ragnos.upstream-source-watch.plist.template"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/upstream_dependency_monitor/SOUL.md",
+        "evidence_sources": [
+          "config/upstream_sources.yaml",
+          "github_release_tags",
+          "local_clone_heads",
+          "logs/upstream-source-watch/latest.json",
+          "hermes_hub"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "otel",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "upstream_update_monitor",
+      "label": "Upstream Update Monitor",
+      "description": "Live read-only upstream Hermes release update and go/no-go recommendation monitor.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "upstream_update_monitor",
+        "hub": "engineering",
+        "team": "dependency_governance",
+        "reports_to": "engineering_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "upstream_update_monitor_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "read_upstream_git_log",
+          "read_upstream_release_tags",
+          "emit_upstream_update_status",
+          "recommend_re_baseline"
+        ],
+        "allowed_adapters": [
+          "home_agent",
+          "hermes_hub"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge",
+          "clickup_write",
+          "launchd_mutation",
+          "runtime_profile_mutation",
+          "git_write"
+        ],
+        "scopes": {
+          "surfaces": [
+            "upstream_hermes_fork",
+            "hermes_release_tags"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 180
+      },
+      "write_policy": {
+        "mode": "read_only_upstream_monitor",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "registry",
+        "cadence": "PT24H"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/upstream_update_monitor/SOUL.md",
+        "evidence_sources": [
+          "upstream_git_log",
+          "upstream_release_tags",
+          "photon_conflict_surface"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "profile_health_receipts"
+        ]
+      }
+    },
+    {
+      "profile_id": "worktree_auto_cleanup_monitor",
+      "label": "Worktree Auto Cleanup Monitor",
+      "description": "Observation and review profile for the launchd-owned bounded Happy Trees worktree, local-ref, and remote-ref executor, its three-hour threshold heartbeat, and its immediate and morning HITL packets.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "worktree_cleanup_monitor",
+        "hub": "engineering",
+        "team": "fleet_hygiene",
+        "reports_to": "engineering_department_rollup",
+        "stakes_tier": "medium",
+        "accountability_signal": "worktree_auto_cleanup_monitor_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "scan_worktrees",
+          "observe_cleanup_receipts",
+          "propose_review_packet",
+          "emit_residual_signal",
+          "scan_branches",
+          "scan_remote_branches",
+          "scan_ship_state",
+          "observe_threshold_heartbeat",
+          "request_existing_cleanup_owner"
+        ],
+        "allowed_adapters": [
+          "git_read",
+          "gh_read",
+          "clickup_read"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "workspace_isolation",
+            "git_worktrees",
+            "git_branches"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 0,
+        "max_runtime_seconds": 600
+      },
+      "write_policy": {
+        "mode": "governed",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "launchd",
+        "label": "io.ragnos.happy-trees-nightly",
+        "source": "systems/launchd/io.ragnos.happy-trees-nightly.plist",
+        "cadence": "daily_0310"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/worktree_auto_cleanup_monitor/SOUL.md",
+        "evidence_sources": [
+          "git_worktrees",
+          "git_branches",
+          "pr_state",
+          "clickup_ship_train",
+          "m2m_state",
+          "happy_trees_autonomous_receipt",
+          "happy_trees_morning_hitl",
+          "happy_trees_owner_leases",
+          "happy_trees_remote_archive_receipt",
+          "happy_trees_threshold_state",
+          "happy_trees_threshold_request",
+          "happy_trees_threshold_receipt"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "prometheus_textfile"
+        ]
+      }
+    }
+  ],
+  "excluded_profiles": [
+    {
+      "profile_id": "camp_personal_operating_pilot",
+      "lifecycle": [
+        "operator_gated"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "camp_triage_reply",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "clear",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "content_governance_lane",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "external_pattern_update_monitor",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "failure_pattern_reviewer",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "finance_plaid_pull_coordinator",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "archived",
+      "archived_status": "archived",
+      "replacement_profile": null,
+      "source_section": "archived_profiles"
+    },
+    {
+      "profile_id": "finance_plaid_pull_effectiveness_monitor",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "archived",
+      "archived_status": "archived",
+      "replacement_profile": null,
+      "source_section": "archived_profiles"
+    },
+    {
+      "profile_id": "gigawatt",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "health_remediation_triage",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "hermes_profile_eval_runner",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "home_runtime_safety_reader",
+      "lifecycle": [
+        "pilot_read_only"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "kanban_fleet_orchestrator",
+      "lifecycle": [
+        "pilot"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "keez_calendar_write",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "keez_execution_orchestrator",
+      "lifecycle": [
+        "pilot"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "keez_proactive_message_scorer",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "librarian_gap_cairn_curator",
+      "lifecycle": [
+        "pilot"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "meeting_source_reconciler",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "memory_candidate_reviewer",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "observability_incident_summarizer",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "output_quality_shadow_week_monitor",
+      "lifecycle": [
+        "pilot_preview_only"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "outreach_pipeline_governor",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "outreach_pipeline_signal_executor",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "planning_pattern_governance",
+      "lifecycle": [
+        "pilot_preview_only"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "priority_decision_rollup",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "profile_contract_gap_reviewer",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "project_snapshot_curator",
+      "lifecycle": [
+        "pilot_preview_only"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "red_team_run_review",
+      "lifecycle": [
+        "pilot_read_only"
+      ],
+      "governance_lifecycle": "archived",
+      "archived_status": "archived",
+      "replacement_profile": "hermes_profile_eval_runner",
+      "source_section": "archived_profiles"
+    },
+    {
+      "profile_id": "research_finding_task_reviewer",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "research_to_cos_canary_publisher",
+      "lifecycle": [
+        "operator_gated"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "scratch",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "skill_candidate_reviewer",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "skills_router_governor",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "stack_architecture_drift_reviewer",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "system_map_curator",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "timekeeper_evidence_reader",
+      "lifecycle": [
+        "pilot_read_only"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "triage_loop",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "triage_loop_shadow_projection",
+      "lifecycle": [
+        "pilot_live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "triage_loop_surface",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    },
+    {
+      "profile_id": "verified_self_heal_resolution_writer",
+      "lifecycle": [
+        "preview"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "source_section": "governance_lanes"
+    }
+  ]
+}
