@@ -3,6 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const manifest = JSON.parse(readFileSync(new URL("../hermes-roster.json", import.meta.url), "utf8"));
+const dockerignore = readFileSync(new URL("../../.dockerignore", import.meta.url), "utf8");
+
+test("excludes nested runtime material from the Docker build context", () => {
+  assert.match(dockerignore, /^\*\*\/\.runtime\/$/m);
+});
 
 test("selects exactly the frozen live Hermes roster without duplicates", () => {
   assert.equal(manifest.schema_version, "paperclip_ragnos_hermes_roster/v1");
