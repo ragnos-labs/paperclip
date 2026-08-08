@@ -67,6 +67,39 @@ approval. Proposers return bounded identifiers to the responsible human in
 `in_review`; appliers require an approved linked Paperclip approval and a
 structured `proposal_id` before they can reach `done`.
 
+## Canonical Hermes roster
+
+`hermes-roster.json` is a deterministic, sanitized projection of the canonical
+RAGnos `config/hermes_profiles.yaml` registry. The builder verifies that the
+source bytes are exactly the file stored at the named Git commit:
+
+```bash
+node ragnos/scripts/build-hermes-roster.mjs \
+  --source /path/to/ragnos/config/hermes_profiles.yaml \
+  --source-commit <exact-40-character-sha> \
+  --output ragnos/hermes-roster.json
+```
+
+The projection includes the 36 live profile IDs, labels, organization,
+reporting links, lifecycle, policy, budget caps, stakes, accountability, and
+source pointers. It excludes runtime homes, credentials, secrets, receipts,
+unrestricted logs, and ClickUp mirror configuration. Archived and other
+non-live profile IDs stay in an exclusion set so a replay never imports or
+deletes them by accident.
+
+After the two companies have been seeded, sync the live roster into only the
+RAGnos company:
+
+```bash
+./ragnos/scripts/sync-hermes-roster.sh
+```
+
+The sync is idempotent and fails closed on duplicates, name collisions, or any
+managed Hermes row in AIBL. Every imported profile uses the built-in Hermes
+Gateway adapter without credentials, has all Paperclip execution permissions
+disabled, and is paused after each replay. Paperclip is the visibility and
+approval surface; RAGnos Hermes remains execution and credential authority.
+
 The adapter and fake broker tests exercise signature, stale timestamp, nonce,
 body, actor, idempotency, cross-tenant, polling, cancellation, timeout,
 duplicate, outage recovery, proposal, approval, and apply behavior without a
