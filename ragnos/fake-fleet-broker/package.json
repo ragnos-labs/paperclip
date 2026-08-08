@@ -1,0 +1,14 @@
+{
+  "name": "@ragnos/fake-fleet-broker",
+  "version": "0.1.0",
+  "description": "Deterministic no-production Fleet Broker test double",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
