@@ -21,6 +21,8 @@ services:
       - paperclip_internal
 
   fleet-broker:
+    profiles:
+      - fake
     build:
       context: ..
       dockerfile: ragnos/fake-fleet-broker/Dockerfile
@@ -52,9 +54,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      fleet-broker:
-        condition: service_healthy
     environment:
+      AIBL_FLEET_KEY_ID: "${AIBL_FLEET_KEY_ID:-aibl-deck-service-v1}"
       AIBL_PAPERCLIP_HMAC_KEY_B64: "${AIBL_PAPERCLIP_HMAC_KEY_B64:?render ragnos/.runtime/compose.env first}"
       BETTER_AUTH_SECRET: "${PAPERCLIP_SESSION_SECRET:?render ragnos/.runtime/compose.env first}"
       DATABASE_URL: "postgres://paperclip:${PAPERCLIP_DB_PASSWORD}@db:5432/paperclip"
@@ -63,12 +64,16 @@ services:
       PAPERCLIP_AGENT_JWT_SECRET: "${PAPERCLIP_AGENT_JWT_SECRET:?render ragnos/.runtime/compose.env first}"
       PAPERCLIP_DEPLOYMENT_EXPOSURE: private
       PAPERCLIP_DEPLOYMENT_MODE: authenticated
+      PAPERCLIP_FLEET_APPLY_ENABLED: "${PAPERCLIP_FLEET_APPLY_ENABLED:-false}"
+      PAPERCLIP_FLEET_GATEWAY_URL: "${PAPERCLIP_FLEET_GATEWAY_URL:-http://host.docker.internal:8771}"
+      PAPERCLIP_FLEET_MODE: "${PAPERCLIP_FLEET_MODE:-real}"
       PAPERCLIP_HOME: /paperclip
       PAPERCLIP_INSTANCE_ID: default
       PAPERCLIP_PUBLIC_URL: http://127.0.0.1:3100
       PAPERCLIP_TELEMETRY_DISABLED: "1"
       PAPERCLIP_TOOL_ACTION_SIGNING_SECRET: "${PAPERCLIP_TOOL_SIGNING_SECRET:?render ragnos/.runtime/compose.env first}"
       PORT: "3100"
+      RAGNOS_FLEET_KEY_ID: "${RAGNOS_FLEET_KEY_ID:-ragnos-mission-control-service-v1}"
       RAGNOS_PAPERCLIP_HMAC_KEY_B64: "${RAGNOS_PAPERCLIP_HMAC_KEY_B64:?render ragnos/.runtime/compose.env first}"
       SERVE_UI: "true"
     healthcheck:
@@ -78,6 +83,8 @@ services:
       retries: 30
     ports:
       - "127.0.0.1:3100:3100"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     cap_drop:
       - ALL
     user: "1000:1000"
