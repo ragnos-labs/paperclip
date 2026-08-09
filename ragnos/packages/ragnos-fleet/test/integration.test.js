@@ -121,7 +121,13 @@ test("executes propose polling and exact duplicate replay end to end", async () 
   assert.equal(first.exitCode, 0);
   assert.equal(first.resultJson.status, "succeeded");
   assert.match(first.resultJson.job_id, /^job_/);
+  assert.match(first.resultJson.pipeline_run_id, /^paperclip-fleet-/);
+  assert.equal(first.resultJson.trace_id.length, 32);
   assert.match(first.resultJson.proposal_id, /^proposal_/);
+  assert.match(first.resultJson.cleanup_receipt_id, /^cleanup_/);
+  assert.deepEqual(first.resultJson.result.changed_files, ["fixtures/proposal.txt"]);
+  assert.match(first.resultJson.result.diff_sha256, /^[a-f0-9]{64}$/);
+  assert.match(first.resultJson.result.diff_preview, /synthetic governed proposal/);
   assert.equal(replay.resultJson.job_id, first.resultJson.job_id);
   assert.equal(firstContext.events[0]?.eventType, "fleet.lifecycle");
   assert.equal(issuePatches.length, 1);
@@ -129,6 +135,9 @@ test("executes propose polling and exact duplicate replay end to end", async () 
   assert.equal(issuePatches[0].assigneeAgentId, null);
   assert.equal(issuePatches[0].assigneeUserId, "local-human-reviewer");
   assert.match(issuePatches[0].comment, /proposal_/);
+  assert.match(issuePatches[0].comment, /run-propose-duplicate/);
+  assert.match(issuePatches[0].comment, /fixtures\/proposal\.txt/);
+  assert.match(issuePatches[0].comment, /synthetic governed proposal/);
 });
 
 test("executes an approval-gated apply with a structured proposal id", async () => {

@@ -10,21 +10,33 @@ import {
 } from "./protocol.js";
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled", "canceled", "timeout"]);
+const MAX_CHANGED_FILES = 256;
+const MAX_DIFF_PREVIEW_BYTES = 8 * 1024;
+const SAFE_REVIEW_TEXT_FIELDS = new Set(["base_revision", "repo_id", "revision"]);
 const SAFE_PUBLIC_FIELDS = new Set([
   "agent_run_id",
+  "base_revision",
   "cancel_requested",
+  "changed_files",
+  "cleanup_receipt_id",
   "created_at",
   "delivery_group",
+  "diff_bytes",
+  "diff_preview",
+  "diff_sha256",
   "error",
   "finalizer_state",
   "idempotency_key",
   "job_id",
   "operation",
   "ownership_keys",
+  "pipeline_run_id",
   "plan_ref",
   "poll_after_ms",
   "proposal_id",
   "receipt_id",
+  "repo_id",
+  "revision",
   "right_size_decision_id",
   "right_size_tier",
   "status",
@@ -163,6 +175,40 @@ function submission(ctx, op, key) {
   return { ...base, confirmation: "apply", proposal_id: proposalId };
 }
 
+function safeReviewField(key, value) {
+  if (key === "changed_files") {
+    if (!Array.isArray(value) || value.length > MAX_CHANGED_FILES) return undefined;
+    const paths = value.map(nonEmpty);
+    if (paths.some((path) => (
+      path === null
+      || Buffer.byteLength(path, "utf8") > 512
+      || path.startsWith("/")
+      || path.split("/").includes("..")
+    ))) return undefined;
+    return paths;
+  }
+  if (key === "diff_bytes") {
+    return Number.isSafeInteger(value) && value >= 0 && value <= 1024 * 1024
+      ? value
+      : undefined;
+  }
+  if (key === "diff_preview") {
+    return typeof value === "string" && Buffer.byteLength(value, "utf8") <= MAX_DIFF_PREVIEW_BYTES
+      ? value
+      : undefined;
+  }
+  if (key === "diff_sha256") {
+    return typeof value === "string" && /^[a-f0-9]{64}$/.test(value)
+      ? value
+      : undefined;
+  }
+  if (SAFE_REVIEW_TEXT_FIELDS.has(key)) {
+    const text = nonEmpty(value);
+    return text && Buffer.byteLength(text, "utf8") <= 256 ? text : undefined;
+  }
+  return value;
+}
+
 function safePublicResult(value) {
   const source = asObject(value);
   const result = {};
@@ -170,7 +216,8 @@ function safePublicResult(value) {
     if (key === "result") {
       result.result = safePublicResult(entry);
     } else if (SAFE_PUBLIC_FIELDS.has(key)) {
-      result[key] = entry;
+      const safe = safeReviewField(key, entry);
+      if (safe !== undefined) result[key] = safe;
     }
   }
   return result;
@@ -250,31 +297,88 @@ async function paperclipRunCancelled(ctx, state) {
   }
 }
 
-function dispositionComment(result, op) {
+function publicField(result, key) {
+  if (result.result?.[key] !== undefined) return result.result[key];
+  return result[key];
+}
+
+function markdownFence(value) {
+  const runs = [...String(value).matchAll(/`+/g)];
+  const longest = Math.max(0, ...runs.map((match) => match[0].length));
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
+function dispositionComment(result, op, paperclipRunId = null) {
   const safe = safePublicResult(result);
   const payload = {};
   for (const key of [
     "agent_run_id",
+    "base_revision",
+    "changed_files",
+    "cleanup_receipt_id",
+    "diff_bytes",
+    "diff_preview",
+    "diff_sha256",
+    "finalizer_state",
     "idempotency_key",
     "job_id",
+    "pipeline_run_id",
     "proposal_id",
     "receipt_id",
+    "repo_id",
+    "revision",
     "status",
     "trace_id",
     "workspace_id",
   ]) {
-    if (safe[key] !== undefined) payload[key] = safe[key];
-    if (safe.result?.[key] !== undefined) payload[key] = safe.result[key];
+    const value = publicField(safe, key);
+    if (value !== undefined) payload[key] = value;
   }
-  return [
+  const runId = nonEmpty(paperclipRunId);
+  if (runId) payload.paperclip_run_id = runId;
+  const identifiers = [
+    ["Paperclip run", payload.paperclip_run_id],
+    ["Pipeline run", payload.pipeline_run_id],
+    ["Fleet job", payload.job_id],
+    ["Trace", payload.trace_id],
+    ["Agent run", payload.agent_run_id],
+    ["Workspace", payload.workspace_id],
+    ["Proposal", payload.proposal_id],
+    ["Execution receipt", payload.receipt_id],
+    ["Cleanup receipt", payload.cleanup_receipt_id],
+  ].filter(([, value]) => value !== undefined);
+  const review = [];
+  if (payload.repo_id) review.push(`- Repository: ${JSON.stringify(payload.repo_id)}`);
+  if (payload.base_revision || payload.revision) {
+    review.push(
+      `- Revision: ${JSON.stringify(payload.base_revision ?? "unknown")} -> ${JSON.stringify(payload.revision ?? "unknown")}`,
+    );
+  }
+  if (payload.changed_files) {
+    review.push(`- Changed files (${payload.changed_files.length}): ${payload.changed_files.map((path) => JSON.stringify(path)).join(", ")}`);
+  }
+  if (payload.diff_sha256 || payload.diff_bytes !== undefined) {
+    review.push(`- Diff: ${payload.diff_bytes ?? "unknown"} bytes; SHA-256 ${payload.diff_sha256 ?? "unknown"}`);
+  }
+  const lines = [
     op === "propose"
       ? "Fleet proposal is ready for human review."
       : "Approved Fleet proposal was applied.",
     "",
+    ...identifiers.map(([label, value]) => `- ${label}: ${JSON.stringify(value)}`),
+  ];
+  if (review.length) lines.push("", "Review summary", "", ...review);
+  if (payload.diff_preview) {
+    const fence = markdownFence(payload.diff_preview);
+    lines.push("", "Bounded diff preview", "", `${fence}diff`, payload.diff_preview, fence);
+  }
+  lines.push(
+    "",
     "```ragnos-fleet",
     JSON.stringify(payload),
     "```",
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 async function paperclipJson(ctx, state, method, path, body) {
@@ -318,7 +422,7 @@ async function publishPaperclipDisposition(ctx, state, op, result) {
     `/api/issues/${encodeURIComponent(issue)}`,
     {
       status: targetStatus,
-      comment: dispositionComment(result, op),
+      comment: dispositionComment(result, op, ctx.runId),
       ...(reviewerId ? { assigneeAgentId: null, assigneeUserId: reviewerId } : {}),
     },
   );

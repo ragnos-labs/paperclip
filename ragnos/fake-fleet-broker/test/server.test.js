@@ -43,6 +43,7 @@ after(async () => {
 function payload(scenario, operation = "propose", idempotency = `test-${scenario}-${operation}`) {
   const common = {
     context: {
+      pipeline_run_id: `pipeline-${idempotency}`,
       revision: "paperclip:test",
       test_scenario: scenario,
       trace_id: "a".repeat(32),
@@ -204,7 +205,38 @@ test("cancels timeout jobs and exposes bounded public identifiers", async () => 
   assert.equal(cancelled.response.status, 200);
   assert.equal(cancelled.payload.status, "cancelled");
   assert.match(cancelled.payload.agent_run_id, /^agent_run_/);
+  assert.equal(cancelled.payload.pipeline_run_id, request.context.pipeline_run_id);
+  assert.equal(cancelled.payload.trace_id, request.context.trace_id);
   assert.match(cancelled.payload.workspace_id, /^workspace_/);
   assert.equal("credentials" in cancelled.payload, false);
   assert.equal("logs" in cancelled.payload, false);
+});
+
+test("successful proposals expose bounded review metadata and complete receipts", async () => {
+  const request = payload("succeeded", "propose", "review-fields-1");
+  request.context.pipeline_run_id = "pipeline-review-fields-1";
+  const accepted = await signedCall({
+    body: request,
+    idempotency: request.idempotency_key,
+    method: "POST",
+    path: "/propose",
+  });
+  const status = await signedCall({
+    idempotency: "review-fields-status-1",
+    method: "GET",
+    path: `/jobs/${accepted.payload.job_id}`,
+  });
+
+  assert.equal(status.response.status, 200);
+  assert.equal(status.payload.pipeline_run_id, "pipeline-review-fields-1");
+  assert.equal(status.payload.trace_id, request.context.trace_id);
+  assert.match(status.payload.result.receipt_id, /^receipt_/);
+  assert.match(status.payload.cleanup_receipt_id, /^cleanup_/);
+  assert.deepEqual(status.payload.result.changed_files, ["fixtures/proposal.txt"]);
+  assert.equal(
+    status.payload.result.diff_bytes,
+    Buffer.byteLength(status.payload.result.diff_preview, "utf8"),
+  );
+  assert.match(status.payload.result.diff_sha256, /^[a-f0-9]{64}$/);
+  assert.equal("proposal_patch" in status.payload.result, false);
 });

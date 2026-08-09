@@ -103,7 +103,15 @@ function validateSubmission(operation, payload, idempotency) {
     throw new Error("validation_error");
   }
   const context = asObject(payload.context);
-  if (!String(context.revision ?? "").trim() || hasForbiddenAuthority(payload)) {
+  const pipelineRunId = String(context.pipeline_run_id ?? "").trim();
+  const traceId = String(context.trace_id ?? "").trim();
+  if (
+    !String(context.revision ?? "").trim()
+    || !pipelineRunId
+    || !/^[a-f0-9]{32}$/.test(traceId)
+    || /^0+$/.test(traceId)
+    || hasForbiddenAuthority(payload)
+  ) {
     throw new Error("authoritative_field_forbidden");
   }
   if (operation === "propose") {
@@ -127,11 +135,13 @@ function publicJob(job) {
     job_id: job.jobId,
     operation: job.operation,
     ownership_keys: [`tenant:${job.tenantId}`],
+    pipeline_run_id: job.pipelineRunId,
     plan_ref: "paperclip-local-fake",
     poll_after_ms: job.pollAfterMs,
     right_size_decision_id: deterministicId("rs", job.jobId),
     right_size_tier: "T3",
     status: job.status,
+    trace_id: job.traceId,
     updated_at: job.updatedAt,
     workspace_id: job.workspaceId,
     workspace_state: TERMINAL.has(job.status) ? "cleaned" : "pending",
@@ -148,6 +158,26 @@ function publicJob(job) {
       trace_id: job.traceId,
       workspace_id: job.workspaceId,
     };
+    payload.cleanup_receipt_id = deterministicId("cleanup", job.jobId);
+    if (job.operation === "propose") {
+      const diffPreview = [
+        "diff --git a/fixtures/proposal.txt b/fixtures/proposal.txt",
+        "new file mode 100644",
+        "--- /dev/null",
+        "+++ b/fixtures/proposal.txt",
+        "@@ -0,0 +1 @@",
+        "+synthetic governed proposal",
+      ].join("\n");
+      Object.assign(payload.result, {
+        base_revision: sha256(`base:${job.jobId}`).slice(0, 40),
+        changed_files: ["fixtures/proposal.txt"],
+        diff_bytes: Buffer.byteLength(diffPreview, "utf8"),
+        diff_preview: diffPreview,
+        diff_sha256: sha256(diffPreview),
+        repo_id: "ragnos-workspace",
+        revision: sha256(`revision:${job.jobId}`).slice(0, 40),
+      });
+    }
   }
   return payload;
 }
@@ -248,6 +278,7 @@ export function createFakeFleetBroker(options = {}) {
           jobId,
           keyId: auth.keyId,
           operation,
+          pipelineRunId: String(asObject(payload.context).pipeline_run_id),
           pollAfterMs: options.pollAfterMs ?? 50,
           polls: 0,
           proposalId,
