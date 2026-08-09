@@ -33,8 +33,12 @@ test("real local Compose excludes the fake broker and uses only loopback host bi
 
 test("real Fleet employees allow bounded Codex jobs to outlive fake-broker polling", () => {
   assert.match(seedText, /local timeout_ms="5000"/);
+  assert.match(seedText, /local poll_after_ms="50"/);
   assert.match(seedText, /if \[\[ "\$fleet_mode" == "real" \]\]; then\s+timeout_ms="900000"/);
+  assert.match(seedText, /timeout_ms="900000"\s+poll_after_ms="4000"/);
+  assert.match(seedText, /--argjson poll_after_ms "\$poll_after_ms"/);
   assert.match(seedText, /--argjson timeout_ms "\$timeout_ms"/);
+  assert.match(seedText, /pollAfterMs:\$poll_after_ms/);
   assert.match(seedText, /timeoutMs:\$timeout_ms/);
 });
 

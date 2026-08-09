@@ -174,3 +174,13 @@ test("recovers after a deterministic unavailable response", async () => {
   assert.equal(recovered.exitCode, 0);
   assert.equal(recovered.resultJson.status, "succeeded");
 });
+
+test("keeps polling after bounded gateway quota responses", async () => {
+  const context = adapterContext({ runId: "run-rate-limited", scenario: "rate_limited" });
+  const result = await execute(context);
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.resultJson.status, "succeeded");
+  assert.ok(context.events.some((event) => event.message === "Fleet polling rate limited; retrying."));
+  assert.ok(context.events.some((event) => event.message === "Fleet polling recovered."));
+});

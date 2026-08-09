@@ -178,9 +178,11 @@ ensure_agent() {
   local adapter_config
   local payload
   local timeout_ms="5000"
+  local poll_after_ms="50"
 
   if [[ "$fleet_mode" == "real" ]]; then
     timeout_ms="900000"
+    poll_after_ms="4000"
   fi
 
   agents_json="$(pc agent list -C "$company_id")"
@@ -192,6 +194,7 @@ ensure_agent() {
       --arg key_id "$key_id" \
       --arg operation "$operation" \
       --arg secret_id "$secret_id" \
+      --argjson poll_after_ms "$poll_after_ms" \
       --argjson timeout_ms "$timeout_ms" \
       '{
         gatewayBaseUrl:$gateway_base_url,
@@ -199,6 +202,7 @@ ensure_agent() {
         hmacKeyB64:{type:"secret_ref",secretId:$secret_id,version:"latest"},
         operation:$operation,
         paperclipApiUrl:"http://127.0.0.1:3100",
+        pollAfterMs:$poll_after_ms,
         timeoutMs:$timeout_ms,
         allowPrivateHttp:true
       }'

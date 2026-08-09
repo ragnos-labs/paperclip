@@ -48,6 +48,12 @@ function positiveInt(value, fallback, min, max) {
   return Math.min(max, Math.max(min, parsed));
 }
 
+function isQuotaExceeded(error) {
+  return error instanceof Error
+    && error.status === 429
+    && error.responseCode === "quota_exceeded";
+}
+
 function operation(config) {
   const value = nonEmpty(config.operation);
   if (value !== "propose" && value !== "apply") throw new Error("fleet_operation_invalid");
@@ -359,8 +365,10 @@ export async function execute(ctx) {
   });
 
   const timeoutMs = positiveInt(config.timeoutMs, 10 * 60_000, 500, 60 * 60_000);
+  const configuredPollAfterMs = positiveInt(config.pollAfterMs, 4_000, 50, 30_000);
   const startedAt = Date.now();
   let priorStatus = nonEmpty(accepted.status) ?? "queued";
+  let pollingRateLimited = false;
   while (Date.now() - startedAt < timeoutMs) {
     if (await paperclipRunCancelled(ctx, state)) {
       const cancelled = await cancelUpstream(state, jobId, "paperclip_cancelled");
@@ -369,16 +377,43 @@ export async function execute(ctx) {
         ...cancelled,
       });
     }
-    const waitMs = positiveInt(accepted.poll_after_ms, positiveInt(config.pollAfterMs, 1_000, 50, 30_000), 50, 30_000);
+    const waitMs = Math.max(
+      configuredPollAfterMs,
+      positiveInt(accepted.poll_after_ms, configuredPollAfterMs, 50, 30_000),
+    );
     await delay(waitMs);
     const statusKey = `pcf-status:${sha256(`${key}\n${jobId}\n${Date.now()}`)}`;
-    const current = await signedFetch(
-      state,
-      "GET",
-      `/jobs/${encodeURIComponent(jobId)}`,
-      null,
-      statusKey,
-    );
+    let current;
+    try {
+      current = await signedFetch(
+        state,
+        "GET",
+        `/jobs/${encodeURIComponent(jobId)}`,
+        null,
+        statusKey,
+      );
+    } catch (error) {
+      if (!isQuotaExceeded(error)) throw error;
+      if (!pollingRateLimited) {
+        await ctx.onEvent?.({
+          eventType: "fleet.lifecycle",
+          level: "warn",
+          message: "Fleet polling rate limited; retrying.",
+          payload: safePublicResult(accepted),
+        });
+      }
+      pollingRateLimited = true;
+      continue;
+    }
+    if (pollingRateLimited) {
+      pollingRateLimited = false;
+      await ctx.onEvent?.({
+        eventType: "fleet.lifecycle",
+        level: "info",
+        message: "Fleet polling recovered.",
+        payload: safePublicResult(current),
+      });
+    }
     const status = nonEmpty(current.status) ?? "unknown";
     if (status !== priorStatus) {
       priorStatus = status;

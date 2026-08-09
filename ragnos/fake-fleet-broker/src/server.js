@@ -6,6 +6,7 @@ const ALLOWED_SCENARIOS = new Set([
   "delayed",
   "failed",
   "queued",
+  "rate_limited",
   "running",
   "succeeded",
   "timeout",
@@ -48,7 +49,7 @@ function scenario(payload) {
   const direct = String(asObject(payload.context).test_scenario ?? "").trim().toLowerCase();
   if (ALLOWED_SCENARIOS.has(direct)) return direct;
   const prompt = String(payload.prompt ?? "");
-  const match = prompt.match(/\[fleet-scenario:([a-z]+)\]/i);
+  const match = prompt.match(/\[fleet-scenario:([a-z_]+)\]/i);
   const fromPrompt = match?.[1]?.toLowerCase();
   return ALLOWED_SCENARIOS.has(fromPrompt) ? fromPrompt : "succeeded";
 }
@@ -163,6 +164,8 @@ function advance(job) {
     job.status = "cancelled";
   } else if (job.scenario === "delayed") {
     job.status = job.polls === 1 ? "queued" : job.polls === 2 ? "running" : "succeeded";
+  } else if (job.scenario === "rate_limited" && job.polls >= 3) {
+    job.status = "succeeded";
   } else if (job.scenario === "running" || job.scenario === "timeout") {
     job.status = "running";
   } else {
@@ -270,6 +273,10 @@ export function createFakeFleetBroker(options = {}) {
         return safeError(response, 404, "job_not_found");
       }
       if (statusMatch) {
+        if (job.scenario === "rate_limited" && job.polls < 2) {
+          job.polls += 1;
+          return safeError(response, 429, "quota_exceeded");
+        }
         advance(job);
         return json(response, 200, publicJob(job));
       }
