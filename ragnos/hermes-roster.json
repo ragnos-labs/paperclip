@@ -3,12 +3,12 @@
   "source": {
     "repository": "ragnos",
     "path": "config/hermes_profiles.yaml",
-    "commit": "f8a2ebb33fb5af486ce2269f0dd9bd05d04f899e",
-    "sha256": "24290aa3e895a385e019ae256dc4f820a7e5f0b76bb52f92bdaa107934de0272",
+    "commit": "2392b4748d806278a5f400bad46da3f5cc9a02b7",
+    "sha256": "7b769495fb0e6cf42af3899109ce4cc76f71ad2736977559acc1543fc61fadb3",
     "registry_schema_version": "hermes-profile-registry.v1"
   },
-  "expected_live_count": 36,
-  "internal_reporting_link_count": 35,
+  "expected_live_count": 37,
+  "internal_reporting_link_count": 36,
   "external_reporting_links": [
     {
       "profile_id": "keez_request_router",
@@ -1302,6 +1302,85 @@
         "telemetry_sinks": [
           "hermes_hub_events",
           "request_ledger"
+        ]
+      }
+    },
+    {
+      "profile_id": "langfuse_health_learning_loop",
+      "label": "Langfuse Health Learning Loop",
+      "description": "Live lane that reads the eval score ledger and files below-floor repair candidates as governed Health Team signals.",
+      "lifecycle": [
+        "live"
+      ],
+      "governance_lifecycle": "active_advisory",
+      "org": {
+        "role": "learning_loop_runner",
+        "hub": "engineering",
+        "team": "observability",
+        "reports_to": "engineering_department_rollup",
+        "stakes_tier": "low",
+        "accountability_signal": "langfuse_health_learning_loop_lane_health",
+        "escalation_owner": "hunter"
+      },
+      "permissions": {
+        "allowed_actions": [
+          "build_repair_candidate",
+          "emit_governance_signal",
+          "stage_prompt_experiment",
+          "apply_through_hh_gate"
+        ],
+        "allowed_adapters": [
+          "health_reader"
+        ],
+        "forbidden_actions": [
+          "delete",
+          "terminal_status",
+          "assignee_change",
+          "due_date_change",
+          "custom_field_write",
+          "source_doc_edit",
+          "ship",
+          "m2m",
+          "canonical_memory_import",
+          "merge"
+        ],
+        "scopes": {
+          "surfaces": [
+            "eval_score_ledger",
+            "health_repair_candidates"
+          ],
+          "projects": {}
+        }
+      },
+      "budgets": {
+        "max_spend_usd": 0,
+        "max_writes": 60,
+        "max_runtime_seconds": 900
+      },
+      "write_policy": {
+        "mode": "preview_only",
+        "live_writes_allowed": false,
+        "operator_approval_required": true
+      },
+      "schedule": {
+        "mode": "systemd",
+        "unit": "ragnos-langfuse-health-learning-loop.timer",
+        "source": "infrastructure/aws/observability-host/systemd/ragnos-langfuse-health-learning-loop.timer",
+        "cadence": "daily_1825_utc"
+      },
+      "source_pointers": {
+        "soul_doc": "docs/ops/core/hermes/agents/profiles/langfuse_health_learning_loop/SOUL.md",
+        "evidence_sources": [
+          "eval_score_ledger",
+          "langfuse_traces",
+          "langfuse_generations",
+          "rubric_resolution_map",
+          "hermes_hub_approvals"
+        ],
+        "telemetry_sinks": [
+          "hermes_hub_events",
+          "langfuse",
+          "prometheus_textfile"
         ]
       }
     },

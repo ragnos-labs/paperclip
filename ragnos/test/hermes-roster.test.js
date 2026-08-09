@@ -11,10 +11,10 @@ test("excludes nested runtime material from the Docker build context", () => {
 
 test("selects exactly the frozen live Hermes roster without duplicates", () => {
   assert.equal(manifest.schema_version, "paperclip_ragnos_hermes_roster/v1");
-  assert.equal(manifest.expected_live_count, 36);
-  assert.equal(manifest.profiles.length, 36);
+  assert.equal(manifest.expected_live_count, 37);
+  assert.equal(manifest.profiles.length, 37);
   const ids = manifest.profiles.map((profile) => profile.profile_id);
-  assert.equal(new Set(ids).size, 36);
+  assert.equal(new Set(ids).size, 37);
   assert.ok(manifest.profiles.every((profile) => profile.lifecycle.includes("live")));
 });
 
@@ -43,11 +43,24 @@ test("preserves the canonical reporting tree and external human root", () => {
   const internal = manifest.profiles.filter((profile) => live.has(profile.org.reports_to));
   const external = manifest.profiles.filter((profile) =>
     profile.org.reports_to && !live.has(profile.org.reports_to));
-  assert.equal(internal.length, 35);
+  assert.equal(internal.length, 36);
   assert.deepEqual(external.map((profile) => [profile.profile_id, profile.org.reports_to]), [
     ["keez_request_router", "hunter"],
   ]);
-  assert.equal(manifest.internal_reporting_link_count, 35);
+  assert.equal(manifest.internal_reporting_link_count, 36);
+});
+
+test("preserves one Chief of Staff, nine chiefs, their workers, and the direct staff writer", () => {
+  const chiefOfStaff = manifest.profiles.filter((profile) => profile.org.role === "chief_of_staff");
+  const chiefs = manifest.profiles.filter((profile) => profile.org.role === "department_chief");
+  const chiefIds = new Set(chiefs.map((profile) => profile.profile_id));
+  const workers = manifest.profiles.filter((profile) => chiefIds.has(profile.org.reports_to));
+  const directStaff = manifest.profiles.filter((profile) =>
+    profile.org.reports_to === chiefOfStaff[0]?.profile_id && profile.org.role !== "department_chief");
+  assert.equal(chiefOfStaff.length, 1);
+  assert.equal(chiefs.length, 9);
+  assert.equal(workers.length, 26);
+  assert.deepEqual(directStaff.map((profile) => profile.profile_id), ["keez_clickup_task_writer"]);
 });
 
 test("contains policy visibility but no execution homes or credential material", () => {
