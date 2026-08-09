@@ -97,6 +97,13 @@ approval. Proposers return bounded identifiers to the responsible human in
 `in_review`; appliers require an approved linked Paperclip approval and a
 structured `proposal_id` before they can reach `done`.
 
+Successful proposal dispositions include the Paperclip run, Fleet pipeline,
+job, trace, agent-run, workspace, proposal, execution receipt, and cleanup
+receipt identifiers. They also show the repository, revisions, changed-file
+summary, diff byte count, diff SHA-256, and an at-most 8 KiB diff preview. The
+adapter deliberately drops the private proposal patch, credentials, logs,
+prompts, unrestricted output, and receipt payloads.
+
 ## Canonical Hermes roster
 
 `hermes-roster.json` is a deterministic, sanitized projection of the canonical

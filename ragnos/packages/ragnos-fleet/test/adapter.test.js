@@ -80,6 +80,7 @@ test("gateway context contains references but no caller-selected authority", () 
 test("result projection drops credentials, patches, receipts, and unrestricted logs", () => {
   const result = testExports.safePublicResult({
     agent_run_id: "agent-run-1",
+    pipeline_run_id: "pipeline-1",
     credentials: "secret",
     job_id: "job-1",
     logs: "private log",
@@ -94,6 +95,7 @@ test("result projection drops credentials, patches, receipts, and unrestricted l
   assert.deepEqual(result, {
     agent_run_id: "agent-run-1",
     job_id: "job-1",
+    pipeline_run_id: "pipeline-1",
     result: {
       receipt_id: "receipt-1",
       workspace_id: "workspace-1",
@@ -113,14 +115,45 @@ test("Paperclip disposition is loopback-only and contains bounded identifiers", 
     /paperclip_api_url_not_loopback/,
   );
   const comment = testExports.dispositionComment({
+    agent_run_id: "agent-run-1",
+    base_revision: "a".repeat(40),
+    changed_files: ["src/example.js"],
+    cleanup_receipt_id: "cleanup-1",
     credentials: "secret",
+    diff_bytes: 41,
+    diff_preview: "diff --git a/src/example.js b/src/example.js\n+safe change",
+    diff_sha256: "b".repeat(64),
     job_id: "job-1",
     logs: "private logs",
+    pipeline_run_id: "pipeline-1",
     proposal_id: "proposal_1234567890abcdef",
     receipt_payload: "private receipt",
+    receipt_id: "receipt-1",
+    repo_id: "ragnos-workspace",
+    revision: "c".repeat(40),
     status: "succeeded",
-  }, "propose");
+    trace_id: "d".repeat(32),
+    workspace_id: "workspace-1",
+  }, "propose", "paperclip-run-1");
   assert.match(comment, /job-1/);
+  assert.match(comment, /paperclip-run-1/);
+  assert.match(comment, /pipeline-1/);
+  assert.match(comment, /cleanup-1/);
+  assert.match(comment, /src\/example\.js/);
+  assert.match(comment, /safe change/);
   assert.match(comment, /proposal_1234567890abcdef/);
   assert.doesNotMatch(comment, /secret|private logs|private receipt/);
+});
+
+test("review projection drops oversized or malformed review fields", () => {
+  const result = testExports.safePublicResult({
+    changed_files: ["../escape"],
+    diff_bytes: -1,
+    diff_preview: "x".repeat(8 * 1024 + 1),
+    diff_sha256: "not-a-hash",
+    proposal_patch: "private patch",
+    repo_id: "ragnos-workspace",
+  });
+
+  assert.deepEqual(result, { repo_id: "ragnos-workspace" });
 });
