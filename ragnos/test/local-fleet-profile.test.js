@@ -14,6 +14,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 const composeText = readFileSync(new URL("../compose.yaml", import.meta.url), "utf8");
+const seedText = readFileSync(new URL("../scripts/seed-companies.sh", import.meta.url), "utf8");
 
 function parseEnv(text) {
   return Object.fromEntries(text.trim().split("\n").map((line) => {
@@ -28,6 +29,13 @@ test("real local Compose excludes the fake broker and uses only loopback host bi
   assert.match(composeText, /PAPERCLIP_FLEET_GATEWAY_URL:[^\n]*host\.docker\.internal:8771/);
   assert.match(composeText, /"127\.0\.0\.1:3100:3100"/);
   assert.doesNotMatch(composeText, /(?:^|\s)8771:8771/);
+});
+
+test("real Fleet employees allow bounded Codex jobs to outlive fake-broker polling", () => {
+  assert.match(seedText, /local timeout_ms="5000"/);
+  assert.match(seedText, /if \[\[ "\$fleet_mode" == "real" \]\]; then\s+timeout_ms="900000"/);
+  assert.match(seedText, /--argjson timeout_ms "\$timeout_ms"/);
+  assert.match(seedText, /timeoutMs:\$timeout_ms/);
 });
 
 test("local Fleet render preserves Paperclip state and imports only canonical HMAC credentials", (t) => {
