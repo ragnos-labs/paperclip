@@ -60,8 +60,10 @@ PostgreSQL, reconciles the two companies, syncs the canonical roster, and emits
 a secret-free status receipt. The real profile uses canonical key IDs
 `ragnos-mission-control-service-v1` and `aibl-deck-service-v1` and reaches the
 host-loopback gateway through Docker Desktop's `host.docker.internal` bridge.
-Real Fleet employees use a bounded 15-minute polling window so a normal Codex
-proposal can finish; the fake profile keeps its 5-second test window.
+Real Fleet employees use a bounded 15-minute polling window and a 4-second
+minimum polling interval so a normal Codex proposal stays within its service
+request quota. A bounded quota response keeps the job pending and is retried;
+the fake profile keeps its 5-second test window and fast polling interval.
 
 If the local Fleet runtime has no valid existing GitHub App binding, both
 appliers remain paused and proposal execution remains available. No credential

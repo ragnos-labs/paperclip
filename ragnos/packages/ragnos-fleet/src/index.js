@@ -58,6 +58,13 @@ export function getConfigSchema() {
         hint: "Loopback Paperclip URL used for cancellation and bounded issue disposition.",
       },
       {
+        key: "pollAfterMs",
+        label: "Minimum polling interval milliseconds",
+        type: "number",
+        default: 4000,
+        hint: "Use a value compatible with the Fleet service request quota.",
+      },
+      {
         key: "timeoutMs",
         label: "Job timeout milliseconds",
         type: "number",
