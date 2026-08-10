@@ -22,7 +22,6 @@ import {
   AppWindow,
   MessagesSquare,
   GanttChartSquare,
-  PanelsTopLeft,
 } from "lucide-react";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -200,7 +199,6 @@ export function Sidebar() {
               newTaskButton
             );
           })()}
-          <SidebarNavItem to="/board" label="Operator Board" icon={PanelsTopLeft} />
           <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
           <SidebarNavItem
             to="/inbox"
