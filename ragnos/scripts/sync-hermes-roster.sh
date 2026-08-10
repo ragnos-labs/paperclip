@@ -35,10 +35,10 @@ pc() {
 
 pc whoami >/dev/null
 companies_json="$(pc company list)"
-ragnos_company_id="$(jq -r '[.[] | select(.name == "RAGnos")][0].id // empty' <<<"$companies_json")"
+ragnos_company_id="$(jq -r '[.[] | select(.name == "RAGnos Labs")][0].id // empty' <<<"$companies_json")"
 aibl_company_id="$(jq -r '[.[] | select(.name == "AIBL")][0].id // empty' <<<"$companies_json")"
 if [[ -z "$ragnos_company_id" || -z "$aibl_company_id" || "$ragnos_company_id" == "$aibl_company_id" ]]; then
-  echo "ERROR: exact, distinct RAGnos and AIBL companies are required" >&2
+  echo "ERROR: exact, distinct RAGnos Labs and AIBL companies are required" >&2
   exit 1
 fi
 

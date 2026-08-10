@@ -285,7 +285,7 @@ ensure_project() {
 }
 
 ragnos_company_id="$(ensure_company \
-  'RAGnos' \
+  'RAGnos Labs' \
   'Human-managed RAGnos work with approval-gated Fleet proposals and applies.')"
 aibl_company_id="$(ensure_company \
   'AIBL' \
