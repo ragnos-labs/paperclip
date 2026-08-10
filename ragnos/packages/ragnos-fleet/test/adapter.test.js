@@ -157,3 +157,15 @@ test("review projection drops oversized or malformed review fields", () => {
 
   assert.deepEqual(result, { repo_id: "ragnos-workspace" });
 });
+
+test("successful proposal waits for the cleanup receipt before disposition", () => {
+  assert.equal(testExports.terminalResultReady("running", {}), false);
+  assert.equal(testExports.terminalResultReady("succeeded", {
+    receipt_id: "receipt-1",
+  }), false);
+  assert.equal(testExports.terminalResultReady("succeeded", {
+    cleanup_receipt_id: "cleanup-1",
+    receipt_id: "receipt-1",
+  }), true);
+  assert.equal(testExports.terminalResultReady("failed", {}), true);
+});

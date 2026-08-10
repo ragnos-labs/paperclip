@@ -302,6 +302,13 @@ function publicField(result, key) {
   return result[key];
 }
 
+function terminalResultReady(status, result) {
+  if (!TERMINAL.has(status)) return false;
+  if (status !== "succeeded") return true;
+  const safe = safePublicResult(result);
+  return nonEmpty(publicField(safe, "cleanup_receipt_id")) !== null;
+}
+
 function markdownFence(value) {
   const runs = [...String(value).matchAll(/`+/g)];
   const longest = Math.max(0, ...runs.map((match) => match[0].length));
@@ -528,7 +535,7 @@ export async function execute(ctx) {
         payload: safePublicResult(current),
       });
     }
-    if (TERMINAL.has(status)) {
+    if (terminalResultReady(status, current)) {
       const result = statusResult(status, current);
       if (status === "succeeded") {
         await publishPaperclipDisposition(ctx, state, op, current);
@@ -595,4 +602,5 @@ export const testExports = Object.freeze({
   safePublicResult,
   structuredProposalId,
   submission,
+  terminalResultReady,
 });
