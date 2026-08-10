@@ -7,6 +7,13 @@ import {
 } from "./company-routes";
 
 describe("company routes", () => {
+  it("treats the operator board as a company route", () => {
+    expect(isBoardPathWithoutPrefix("/board")).toBe(true);
+    expect(extractCompanyPrefixFromPath("/board")).toBeNull();
+    expect(applyCompanyPrefix("/board", "RAG")).toBe("/RAG/board");
+    expect(toCompanyRelativePath("/RAG/board")).toBe("/board");
+  });
+
   it("treats execution workspace paths as board routes that need a company prefix", () => {
     expect(isBoardPathWithoutPrefix("/execution-workspaces/workspace-123")).toBe(true);
     expect(isBoardPathWithoutPrefix("/execution-workspaces/workspace-123/routines")).toBe(true);
