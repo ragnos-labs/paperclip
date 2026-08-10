@@ -1,6 +1,5 @@
 const BOARD_ROUTE_ROOTS = new Set([
   "dashboard",
-  "board",
   "companies",
   "company",
   "skills",
