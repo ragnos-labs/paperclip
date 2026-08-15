@@ -160,15 +160,24 @@ export const skillTestAgentKeyScopeSchema = z.object({
   issueId: z.string().uuid(),
 }).strict();
 
+/** Machine-only authority for exactly one company-bound work projection. */
+export const companyWorkProjectionReadAgentKeyScopeSchema = z.object({
+  kind: z.literal("company_work_projection_read"),
+}).strict();
+
 export const agentApiKeyScopeSchema = z.union([
   standardAgentKeyScopeSchema,
   taskBridgeAgentKeyScopeSchema,
   skillTestAgentKeyScopeSchema,
+  companyWorkProjectionReadAgentKeyScopeSchema,
 ]);
 
 export type AgentApiKeyScope = z.infer<typeof agentApiKeyScopeSchema>;
 export type TaskBridgeAgentKeyScope = z.infer<typeof taskBridgeAgentKeyScopeSchema>;
 export type SkillTestAgentKeyScope = z.infer<typeof skillTestAgentKeyScopeSchema>;
+export type CompanyWorkProjectionReadAgentKeyScope = z.infer<
+  typeof companyWorkProjectionReadAgentKeyScopeSchema
+>;
 
 export function normalizeAgentApiKeyScope(value: unknown): AgentApiKeyScope {
   const parsed = agentApiKeyScopeSchema.safeParse(value);

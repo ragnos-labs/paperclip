@@ -25,6 +25,7 @@ const apiPrefixes: Record<string, string> = {
   "companies.ts": "/api/companies",
   "company-skills.ts": "/api",
   "company-skill-policy.ts": "/api",
+  "company-work-projection.ts": "/api",
   "costs.ts": "/api",
   "dashboard.ts": "/api",
   "decision-training.ts": "/api",
@@ -153,6 +154,17 @@ describe("openapi routes", () => {
     expect(res.body.paths["/api/openapi.json"].get.summary).toBe("Get the generated OpenAPI document");
     expect(res.body.paths["/api/companies/{companyId}/agents"].get.summary).toBe("List agents in a company");
     expect(res.body.paths["/api/agents/{id}/keys"].post.summary).toBe("Create an agent API key");
+    expect(res.body.paths["/api/v1/companies/{companyId}/work-projection"].get).toMatchObject({
+      summary: "Read an immutable, company-scoped work snapshot",
+      security: [{ AgentBearerAuth: [] }],
+      "x-paperclip-authorization": {
+        actor: "agent_key",
+        scope: "company_work_projection_read",
+        companyBound: true,
+      },
+    });
+    expect(res.body.components.schemas.CompanyWorkProjectionV1.properties).toHaveProperty("items");
+    expect(res.body.components.schemas.CompanyWorkProjectionV1.additionalProperties).toBe(false);
     expect(res.body.components.securitySchemes).toMatchObject({
       BoardSessionAuth: { type: "apiKey", in: "cookie" },
       BoardApiKeyAuth: { type: "http", scheme: "bearer" },

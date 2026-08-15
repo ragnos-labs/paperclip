@@ -52,6 +52,7 @@ function recordResponsibleUserDenialFromHttpError(
   details: Record<string, unknown> | null,
 ) {
   if (req.actor?.type !== "agent") return;
+  if (req.actor.keyScope?.kind === "company_work_projection_read") return;
   const db = getPaperclipDb(req);
   if (!db) return;
 

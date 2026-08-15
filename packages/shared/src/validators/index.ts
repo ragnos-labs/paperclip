@@ -14,6 +14,8 @@ export {
   type IssueGraphLivenessAutoRecoveryRequest,
 } from "./instance.js";
 
+export * from "./company-work-projection.js";
+
 export {
   upsertBudgetPolicySchema,
   resolveBudgetIncidentSchema,
@@ -304,6 +306,7 @@ export {
   standardAgentKeyScopeSchema,
   taskBridgeAgentKeyScopeSchema,
   skillTestAgentKeyScopeSchema,
+  companyWorkProjectionReadAgentKeyScopeSchema,
   createAgentKeySchema,
   agentMineInboxQuerySchema,
   wakeAgentSchema,
@@ -322,6 +325,7 @@ export {
   type AgentApiKeyScope,
   type TaskBridgeAgentKeyScope,
   type SkillTestAgentKeyScope,
+  type CompanyWorkProjectionReadAgentKeyScope,
   type CreateAgentKey,
   type AgentMineInboxQuery,
   type WakeAgent,

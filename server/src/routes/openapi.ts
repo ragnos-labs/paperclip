@@ -199,6 +199,9 @@ import {
   importMcpJsonSchema,
   toolPolicyTestRequestSchema,
   createToolMcpGatewaySchema,
+  companyWorkProjectionQuerySchema,
+  companyWorkProjectionResponseSchema,
+  companyWorkProjectionErrorSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -356,6 +359,7 @@ function zodToOpenApiSchema(schema: z.ZodTypeAny): JsonSchema {
     }
     const jsonSchema: JsonSchema = { type: "object", properties };
     if (required.length > 0) jsonSchema.required = required;
+    if (unwrapped._def.unknownKeys === "strict") jsonSchema.additionalProperties = false;
     return jsonSchema;
   }
 
@@ -467,6 +471,14 @@ const registry = new OpenAPIRegistry();
 const ErrorSchema = registry.register(
   "Error",
   z.object({ error: z.string() }),
+);
+const CompanyWorkProjectionResponseSchema = registry.register(
+  "CompanyWorkProjectionV1",
+  companyWorkProjectionResponseSchema,
+);
+const CompanyWorkProjectionErrorSchema = registry.register(
+  "CompanyWorkProjectionErrorV1",
+  companyWorkProjectionErrorSchema,
 );
 
 const responses = {
@@ -651,6 +663,7 @@ function registerCurrentRoute(input: {
 type OpenApiAuthLevel =
   | "public"
   | "authenticated"
+  | "company_work_projection"
   | "board"
   | "instance_admin";
 
@@ -671,6 +684,10 @@ const AUTHENTICATED_SECURITY: Array<Record<string, string[]>> = [
   ...BOARD_SECURITY,
   securityRequirement(AGENT_BEARER_AUTH_SCHEME),
 ];
+
+const COMPANY_WORK_PROJECTION_OPERATIONS = new Set([
+  "GET /api/v1/companies/{companyId}/work-projection",
+]);
 
 const PUBLIC_OPERATIONS = new Set([
   "GET /api/health",
@@ -927,6 +944,7 @@ function isBoardOnlyOperation(method: string, path: string) {
 function resolveOperationAuthLevel(method: string, path: string): OpenApiAuthLevel {
   const key = operationKey(method, path);
   if (PUBLIC_OPERATIONS.has(key)) return "public";
+  if (COMPANY_WORK_PROJECTION_OPERATIONS.has(key)) return "company_work_projection";
   if (INSTANCE_ADMIN_OPERATIONS.has(key)) return "instance_admin";
   if (isBoardOnlyOperation(method, path)) return "board";
   return "authenticated";
@@ -976,6 +994,8 @@ function applyDocumentFixups(document: any): any {
         operation.security = [];
       } else if (authLevel === "authenticated") {
         operation.security = AUTHENTICATED_SECURITY;
+      } else if (authLevel === "company_work_projection") {
+        operation.security = [securityRequirement(AGENT_BEARER_AUTH_SCHEME)];
       } else {
         operation.security = BOARD_SECURITY;
       }
@@ -985,6 +1005,12 @@ function applyDocumentFixups(document: any): any {
           ? { actor: "board", instanceAdmin: true }
           : authLevel === "board"
             ? { actor: "board" }
+            : authLevel === "company_work_projection"
+              ? {
+                  actor: "agent_key",
+                  scope: "company_work_projection_read",
+                  companyBound: true,
+                }
             : authLevel === "authenticated"
               ? { actor: "board_or_agent" }
               : { actor: "public" };
@@ -1094,6 +1120,35 @@ registry.registerPath({
   tags: ["health"],
   summary: "Get the generated OpenAPI document",
   responses: { 200: r.ok() },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/v1/companies/{companyId}/work-projection",
+  tags: ["companies"],
+  summary: "Read an immutable, company-scoped work snapshot",
+  description: "Machine-only GET projection. Requires a company_work_projection_read agent key.",
+  security: [{ AgentBearerAuth: [] }],
+  "x-paperclip-authorization": {
+    actor: "agent_key",
+    scope: "company_work_projection_read",
+    companyBound: true,
+  },
+  request: {
+    params: z.object({ companyId: z.string().uuid() }),
+    query: companyWorkProjectionQuerySchema,
+  },
+  responses: {
+    200: { description: "Snapshot page", content: { "application/json": { schema: CompanyWorkProjectionResponseSchema } } },
+    304: { description: "ETag matched" },
+    400: { description: "Malformed request or cursor", content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } } },
+    401: { description: "Projection credential required", content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } } },
+    403: { description: "Credential is not authorized for this company", content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } } },
+    409: { description: "Schema, source state, or snapshot is incompatible", content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } } },
+    410: { description: "Snapshot is expired or stale", content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } } },
+    429: { description: "Credential concurrency limit reached", content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } } },
+    503: { description: "Projection store or signing key unavailable", content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } } },
+  },
 });
 
 // ─── Companies ───────────────────────────────────────────────────────────────

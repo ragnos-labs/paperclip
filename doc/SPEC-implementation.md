@@ -547,6 +547,16 @@ Detailed ownership, execution, blocker, active-run watchdog, crash-recovery, and
 | Manage another user's inbox state | yes | scoped `inbox:manage` grant |
 | Set work-object visibility (issue/project) | no | no (pro gate) |
 
+### 9.3.1 Machine-only company work projection
+
+The `company_work_projection_read` API-key scope is a non-composable,
+company-bound capability for the versioned GET/HEAD work projection. It has no
+standard agent authority and cannot inherit mutation access from agent role,
+membership, or permission drift. Authentication and projection reads are
+side-effect free. The strict response, snapshot, cursor, error, and recovery
+contract is defined in
+[company-work-projection-contract.md](./company-work-projection-contract.md).
+
 ## 9.4 Permission Terminology and Default Visibility Rule
 
 Paperclip V1 keeps a company-scoped visibility model as the default because centralized authorization and scoped work-object controls are not yet a core V1 control surface.

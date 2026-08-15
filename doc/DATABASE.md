@@ -253,3 +253,15 @@ pnpm secrets:migrate-inline-env --apply
 ```
 
 Hosted AWS provider notes live in [SECRETS-AWS-PROVIDER.md](./SECRETS-AWS-PROVIDER.md).
+
+## Company work projection
+
+`company_work_projection_revisions` stores the current monotonic revision for
+each company. `issue_work_projection_versions` is an append-only history of only
+the issue fields approved for the machine read projection. The
+`issues_work_projection_capture` trigger appends a version or tombstone in the
+same transaction as every projected issue change. The projection read checks
+revision contiguity and executes under a PostgreSQL read-only transaction.
+
+The full authority, pagination, failure, upgrade, and rollback contract is in
+[company-work-projection-contract.md](./company-work-projection-contract.md).

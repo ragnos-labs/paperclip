@@ -278,6 +278,25 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         return;
       }
 
+      const normalizedJwtScope = normalizeAgentApiKeyScope(claims.key_scope);
+      if (normalizedJwtScope.kind === "company_work_projection_read") {
+        // This capability is key-only. Preserve the scope so the global guard
+        // can reject it without performing run-header audits or membership
+        // resolution, both of which are outside its side-effect-free boundary.
+        req.actor = {
+          type: "agent",
+          agentId: claims.sub,
+          companyId: claims.company_id,
+          keyScope: normalizedJwtScope,
+          runId: claims.run_id,
+          onBehalfOfUserId: null,
+          onBehalfOfMemberships: [],
+          source: "agent_jwt",
+        };
+        next();
+        return;
+      }
+
       const normalizedRunIdHeader = normalizeOptionalString(runIdHeader);
       if (normalizedRunIdHeader && normalizedRunIdHeader !== claims.run_id) {
         await auditAgentJwtRunHeaderMismatch(db, {
@@ -315,7 +334,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         agentId: claims.sub,
         companyId: claims.company_id,
         keyId: undefined,
-        keyScope: normalizeAgentApiKeyScope(claims.key_scope),
+        keyScope: normalizedJwtScope,
         runId: claims.run_id,
         onBehalfOfUserId,
         onBehalfOfMemberships,
@@ -325,10 +344,17 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       return;
     }
 
-    await db
-      .update(agentApiKeys)
-      .set({ lastUsedAt: new Date() })
-      .where(eq(agentApiKeys.id, key.id));
+    const normalizedKeyScope = normalizeAgentApiKeyScope(key.scopeConfig);
+    const isCompanyWorkProjectionReader = normalizedKeyScope.kind === "company_work_projection_read";
+
+    // Projection credentials are deliberately non-observing: authentication
+    // must not mutate last_used_at or append a denial/audit record.
+    if (!isCompanyWorkProjectionReader) {
+      await db
+        .update(agentApiKeys)
+        .set({ lastUsedAt: new Date() })
+        .where(eq(agentApiKeys.id, key.id));
+    }
 
     const agentRecord = await db
       .select()
@@ -336,7 +362,28 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       .where(eq(agents.id, key.agentId))
       .then((rows) => rows[0] ?? null);
 
-    if (!agentRecord || agentRecord.status === "terminated" || agentRecord.status === "pending_approval") {
+    if (
+      !agentRecord ||
+      agentRecord.companyId !== key.companyId ||
+      agentRecord.status === "terminated" ||
+      agentRecord.status === "pending_approval"
+    ) {
+      next();
+      return;
+    }
+
+    if (isCompanyWorkProjectionReader) {
+      req.actor = {
+        type: "agent",
+        agentId: key.agentId,
+        companyId: key.companyId,
+        keyId: key.id,
+        keyScope: normalizedKeyScope,
+        onBehalfOfUserId: null,
+        onBehalfOfMemberships: [],
+        runId: runIdHeader || undefined,
+        source: "agent_key",
+      };
       next();
       return;
     }
@@ -361,7 +408,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       agentId: key.agentId,
       companyId: key.companyId,
       keyId: key.id,
-      keyScope: normalizeAgentApiKeyScope(key.scopeConfig),
+      keyScope: normalizedKeyScope,
       onBehalfOfUserId: responsibleUserId,
       onBehalfOfMemberships: await loadResponsibleUserMemberships(db, {
         companyId: key.companyId,

@@ -1492,6 +1492,7 @@ export {
   standardAgentKeyScopeSchema,
   taskBridgeAgentKeyScopeSchema,
   skillTestAgentKeyScopeSchema,
+  companyWorkProjectionReadAgentKeyScopeSchema,
   createAgentKeySchema,
   agentMineInboxQuerySchema,
   wakeAgentSchema,
@@ -1510,6 +1511,7 @@ export {
   type AgentApiKeyScope,
   type TaskBridgeAgentKeyScope,
   type SkillTestAgentKeyScope,
+  type CompanyWorkProjectionReadAgentKeyScope,
   type CreateAgentKey,
   type AgentMineInboxQuery,
   type WakeAgent,
@@ -2219,3 +2221,4 @@ export {
   type EnvironmentCustomImageTerminalSessionToken,
 } from "./validators/environment-custom-images.js";
 export * from "./validators/skill-policy.js";
+export * from "./validators/company-work-projection.js";
