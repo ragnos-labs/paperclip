@@ -39,9 +39,11 @@ export { folders } from "./folders.js";
 export { issues } from "./issues.js";
 export {
   companyWorkProjectionCredentials,
+  companyWorkProjectionIssueHeads,
   companyWorkProjectionRevisions,
   companyWorkProjectionSourceEvents,
   companyWorkProjectionSourceWitnesses,
+  companyWorkProjectionVerifications,
   issueWorkProjectionVersions,
 } from "./company_work_projection.js";
 export { issueWatchdogs } from "./issue_watchdogs.js";

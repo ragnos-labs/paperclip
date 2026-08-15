@@ -8,9 +8,44 @@ import {
   type CompanyWorkProjectionCredential,
   type CreatedCompanyWorkProjectionCredential,
 } from "@paperclipai/shared";
+import { forbidden } from "../errors.js";
 
 const CREDENTIAL_TOKEN_FAMILY_PREFIX = "pcwp_";
 const CREDENTIAL_TOKEN_V1_PATTERN = /^pcwp_v1_[a-f0-9]{48}$/;
+type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+async function lockCurrentCredentialManager(
+  tx: DbTransaction,
+  companyId: string,
+  actorId: string,
+): Promise<void> {
+  const memberships = Array.from(await tx.execute(sql<{ id: string }>`
+    SELECT id
+    FROM public.company_memberships
+    WHERE company_id = ${companyId}::uuid
+      AND principal_type = 'user'
+      AND principal_id = ${actorId}
+      AND status = 'active'
+      AND membership_role IN ('owner', 'admin')
+    FOR UPDATE
+  `));
+  if (!memberships[0]) {
+    throw forbidden("Work projection credential management requires current company administration");
+  }
+
+  const grants = Array.from(await tx.execute(sql<{ id: string }>`
+    SELECT id
+    FROM public.principal_permission_grants
+    WHERE company_id = ${companyId}::uuid
+      AND principal_type = 'user'
+      AND principal_id = ${actorId}
+      AND permission_key = 'work_projection_credentials:manage'
+    FOR UPDATE
+  `));
+  if (!grants[0]) {
+    throw forbidden("Work projection credential management requires current company administration");
+  }
+}
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -68,6 +103,7 @@ export function companyWorkProjectionCredentialService(db: Db) {
       const credentialId = randomUUID();
       const normalizedName = name.trim();
       const row = await db.transaction(async (tx) => {
+        await lockCurrentCredentialManager(tx, companyId, actorId);
         const audit = await tx.insert(activityLog).values({
           companyId,
           actorType: "user",
@@ -103,12 +139,15 @@ export function companyWorkProjectionCredentialService(db: Db) {
       });
     },
 
-    list: async (companyId: string): Promise<CompanyWorkProjectionCredential[]> => {
-      const rows = await db
-        .select()
-        .from(companyWorkProjectionCredentials)
-        .where(eq(companyWorkProjectionCredentials.companyId, companyId))
-        .orderBy(desc(companyWorkProjectionCredentials.createdAt));
+    list: async (companyId: string, actorId: string): Promise<CompanyWorkProjectionCredential[]> => {
+      const rows = await db.transaction(async (tx) => {
+        await lockCurrentCredentialManager(tx, companyId, actorId);
+        return tx
+          .select()
+          .from(companyWorkProjectionCredentials)
+          .where(eq(companyWorkProjectionCredentials.companyId, companyId))
+          .orderBy(desc(companyWorkProjectionCredentials.createdAt));
+      });
       return rows.map(serializeCredential).filter((value): value is CompanyWorkProjectionCredential => value !== null);
     },
 
@@ -118,6 +157,7 @@ export function companyWorkProjectionCredentialService(db: Db) {
       actorId: string,
     ): Promise<CompanyWorkProjectionCredential | null> => {
       const row = await db.transaction(async (tx) => {
+        await lockCurrentCredentialManager(tx, companyId, actorId);
         await tx.execute(sql`
           SELECT id
           FROM public.company_work_projection_credentials

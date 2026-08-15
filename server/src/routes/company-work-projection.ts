@@ -1,17 +1,16 @@
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
-import { companies, companyMemberships } from "@paperclipai/db";
+import { companies } from "@paperclipai/db";
 import {
   companyWorkProjectionQuerySchema,
   createCompanyWorkProjectionCredentialSchema,
   type CompanyWorkProjectionResponse,
 } from "@paperclipai/shared";
-import { and, eq, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { HttpError, forbidden, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyWorkProjectionService } from "../services/company-work-projection.js";
 import { companyWorkProjectionCredentialService } from "../services/company-work-projection-credentials.js";
-import { authorizationService } from "../services/authorization.js";
 import { assertBoard, assertCompanyAccess, hasCompanyAccess } from "./authz.js";
 
 function splitEntityTags(header: string): string[] {
@@ -134,36 +133,15 @@ export function companyWorkProjectionRoutes(
       .then((rows) => rows[0] ?? null);
     if (!company || !hasCompanyAccess(req, companyId)) throw notFound("Company not found");
     assertCompanyAccess(req, companyId);
-    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return;
     const userId = req.actor.userId;
     if (!userId) throw forbidden("Work projection credential management requires company administration");
-    const membership = await db.select({ id: companyMemberships.id })
-      .from(companyMemberships)
-      .where(and(
-        eq(companyMemberships.companyId, companyId),
-        eq(companyMemberships.principalType, "user"),
-        eq(companyMemberships.principalId, userId),
-        eq(companyMemberships.status, "active"),
-        inArray(companyMemberships.membershipRole, ["owner", "admin"]),
-      ))
-      .then((rows) => rows[0] ?? null);
-    if (!membership) {
-      throw forbidden("Work projection credential management requires company administration");
-    }
-    const decision = await authorizationService(db).decide({
-      actor: req.actor,
-      action: "work_projection_credentials:manage",
-      resource: { type: "company", companyId },
-    });
-    if (!decision.allowed) {
-      throw forbidden("Work projection credential management requires company administration");
-    }
+    return userId;
   }
 
   router.get("/v1/companies/:companyId/work-projection-credentials", async (req, res) => {
     const companyId = req.params.companyId as string;
-    await requireCompany(req, companyId);
-    res.json(await credentials.list(companyId));
+    const actorId = await requireCompany(req, companyId);
+    res.json(await credentials.list(companyId, actorId));
   });
 
   router.post(
@@ -171,19 +149,19 @@ export function companyWorkProjectionRoutes(
     validate(createCompanyWorkProjectionCredentialSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
-      await requireCompany(req, companyId);
-      const credential = await credentials.create(companyId, req.body.name, req.actor.userId ?? "board");
+      const actorId = await requireCompany(req, companyId);
+      const credential = await credentials.create(companyId, req.body.name, actorId);
       res.status(201).json(credential);
     },
   );
 
   router.delete("/v1/companies/:companyId/work-projection-credentials/:credentialId", async (req, res) => {
     const companyId = req.params.companyId as string;
-    await requireCompany(req, companyId);
+    const actorId = await requireCompany(req, companyId);
     const credential = await credentials.revoke(
       companyId,
       req.params.credentialId as string,
-      req.actor.userId ?? "board",
+      actorId,
     );
     if (!credential) throw notFound("Work projection credential not found");
     res.json(credential);

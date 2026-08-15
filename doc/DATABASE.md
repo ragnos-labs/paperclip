@@ -270,17 +270,27 @@ executes under a PostgreSQL read-only transaction. Dedicated hashes live in
 creation/revocation activity references make credential mutations auditable in
 the same transaction.
 
+`company_work_projection_issue_heads` keeps one indexed routing row per issue
+lifetime, so historical pages walk at most `pageSize + 1` heads and perform one
+indexed history lookup per head instead of reconstructing accumulated history.
+`company_work_projection_verifications` stores the epoch-bound offline recovery
+receipt. Reads also require that receipt to match the current counter, witness,
+history count, and event count.
+
 Migration `0184` holds `SHARE ROW EXCLUSIVE` locks on `public.companies`,
 `public.issues`, `public.projects`, `public.agents`, and
 `public.company_memberships` across witness/counter seeding, trigger
 installation, and the complete backfill. The lock blocks affected source writes
-for the duration of the migration and its O(visible issue count) backfill, so
-large installations should estimate visible issue volume and schedule a
-maintenance window. Existing and future companies receive explicit
+for the duration of the migration and its O(visible issue count) backfill, head
+construction, full verification, and statistics refresh, so large installations
+should estimate visible issue volume and schedule a maintenance window. Existing
+and future companies receive explicit
 revision-zero counter/witness tokens; missing rows are corruption, not an empty
 collection. A full-database point-in-time restore can reset source and witness
 together and therefore requires the new-database-epoch procedure in the full
-contract; partial projection-table restore is detected.
+contract. Partial projection-table restore requires a committed receipt
+invalidation before maintenance and a successful full continuity verification
+before reads can resume.
 
 The full authority, pagination, failure, upgrade, and rollback contract is in
 [company-work-projection-contract.md](./company-work-projection-contract.md).

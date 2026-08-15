@@ -23,6 +23,8 @@ const SNAPSHOT_TTL_MS = 5 * 60 * 1000;
 const SNAPSHOT_ISSUED_AT_BUCKET_MS = 60 * 1000;
 
 type ProjectionRow = {
+  head_issue_id: string;
+  head_first_revision: string | number | bigint;
   issue_id: string;
   revision: string | number | bigint;
   identifier: string | null;
@@ -39,6 +41,7 @@ type ProjectionRow = {
   project_reference_valid: boolean;
   assignee_agent_reference_valid: boolean;
   assignee_user_reference_valid: boolean;
+  deleted: boolean;
 };
 
 type SnapshotInput = {
@@ -241,6 +244,12 @@ export function companyWorkProjectionService(db: Db) {
           current_integrity_token: string;
           witness_revision: string | number | bigint;
           witness_integrity_token: string;
+          database_epoch: string;
+          verified_database_epoch: string;
+          verified_revision: string | number | bigint;
+          verified_integrity_token: string;
+          verified_history_count: string | number | bigint;
+          verified_event_count: string | number | bigint;
           history_integrity_token: string | null;
           source_event_integrity_token: string | null;
         }>`
@@ -249,11 +258,19 @@ export function companyWorkProjectionService(db: Db) {
             revisions.current_integrity_token,
             witnesses.current_revision AS witness_revision,
             witnesses.current_integrity_token AS witness_integrity_token,
+            witnesses.database_epoch,
+            verification.database_epoch AS verified_database_epoch,
+            verification.verified_revision,
+            verification.verified_integrity_token,
+            verification.verified_history_count,
+            verification.verified_event_count,
             history.integrity_token AS history_integrity_token,
             source_event.integrity_token AS source_event_integrity_token
           FROM public.company_work_projection_revisions AS revisions
           JOIN public.company_work_projection_source_witnesses AS witnesses
             ON witnesses.company_id = revisions.company_id
+          JOIN public.company_work_projection_verifications AS verification
+            ON verification.company_id = revisions.company_id
           LEFT JOIN public.issue_work_projection_versions AS history
             ON history.company_id = revisions.company_id
             AND history.revision = revisions.current_revision
@@ -272,6 +289,11 @@ export function companyWorkProjectionService(db: Db) {
         if (
           witnessRevision !== currentRevision
           || integrity.witness_integrity_token !== integrity.current_integrity_token
+          || integrity.verified_database_epoch !== integrity.database_epoch
+          || decimal(integrity.verified_revision) !== currentRevision
+          || integrity.verified_integrity_token !== integrity.current_integrity_token
+          || decimal(integrity.verified_history_count) !== currentRevision
+          || decimal(integrity.verified_event_count) !== currentRevision
           || (!expectedEmpty && (
             integrity.history_integrity_token !== integrity.current_integrity_token
             || integrity.source_event_integrity_token !== integrity.current_integrity_token
@@ -294,41 +316,58 @@ export function companyWorkProjectionService(db: Db) {
         if (decoded && BigInt(decoded.afterRevision) > BigInt(snapshotRevision)) {
           projectionError(400, "Malformed work projection cursor position", "WORK_PROJECTION_MALFORMED");
         }
+        if (decoded && decoded.afterIssueId === null) {
+          projectionError(400, "Malformed work projection cursor position", "WORK_PROJECTION_MALFORMED");
+        }
 
         const afterRevision = decoded?.afterRevision ?? "0";
-        const afterIssueId = decoded?.afterIssueId;
+        const afterIssueId = decoded?.afterIssueId ?? "00000000-0000-0000-0000-000000000000";
         const rows = Array.from(await tx.execute(sql<ProjectionRow>`
-          WITH latest AS (
-            SELECT DISTINCT ON (issue_id)
-              issue_id, revision, deleted, identifier, project_id,
-              assignee_agent_id, assignee_user_id,
-              project_reference_valid, assignee_agent_reference_valid,
-              assignee_user_reference_valid, status, priority,
-              started_at, completed_at, cancelled_at, created_at, updated_at
-            FROM public.issue_work_projection_versions
-            WHERE company_id = ${input.companyId}::uuid
-              AND revision <= ${snapshotRevision}::bigint
-            ORDER BY issue_id, revision DESC
-          )
           SELECT
-            issue_id, revision, identifier, project_id,
-            assignee_agent_id, assignee_user_id, status, priority,
-            started_at, completed_at, cancelled_at, created_at, updated_at,
-            project_reference_valid, assignee_agent_reference_valid,
-            assignee_user_reference_valid
-          FROM latest
-          WHERE deleted = false
-            AND (
-              revision > ${afterRevision}::bigint
-              OR (revision = ${afterRevision}::bigint AND issue_id > ${afterIssueId ?? "00000000-0000-0000-0000-000000000000"}::uuid)
-            )
-          ORDER BY revision, issue_id
+            head.issue_id AS head_issue_id,
+            head.first_revision AS head_first_revision,
+            history.issue_id, history.revision, history.deleted,
+            history.identifier, history.project_id,
+            history.assignee_agent_id, history.assignee_user_id,
+            history.status, history.priority,
+            history.started_at, history.completed_at, history.cancelled_at,
+            history.created_at, history.updated_at,
+            history.project_reference_valid,
+            history.assignee_agent_reference_valid,
+            history.assignee_user_reference_valid
+          FROM public.company_work_projection_issue_heads AS head
+          LEFT JOIN LATERAL (
+            SELECT
+              version.issue_id, version.revision, version.deleted,
+              version.identifier, version.project_id,
+              version.assignee_agent_id, version.assignee_user_id,
+              version.status, version.priority,
+              version.started_at, version.completed_at, version.cancelled_at,
+              version.created_at, version.updated_at,
+              version.project_reference_valid,
+              version.assignee_agent_reference_valid,
+              version.assignee_user_reference_valid
+            FROM public.issue_work_projection_versions AS version
+            WHERE version.company_id = head.company_id
+              AND version.issue_id = head.issue_id
+              AND version.revision <= ${snapshotRevision}::bigint
+            ORDER BY version.revision DESC
+            LIMIT 1
+          ) AS history ON true
+          WHERE head.company_id = ${input.companyId}::uuid
+            AND head.first_revision <= ${snapshotRevision}::bigint
+            AND (head.first_revision, head.issue_id)
+              > (${afterRevision}::bigint, ${afterIssueId}::uuid)
+          ORDER BY head.first_revision, head.issue_id
           LIMIT ${pageSize + 1}
         `)) as ProjectionRow[];
 
         const hasMore = rows.length > pageSize;
         const pageRows = hasMore ? rows.slice(0, pageSize) : rows;
-        const items = pageRows.map(toItem);
+        if (pageRows.some((row) => !row.issue_id || row.issue_id !== row.head_issue_id)) {
+          projectionError(409, "Work projection verification receipt is invalid", "WORK_PROJECTION_INCOMPATIBLE");
+        }
+        const items = pageRows.filter((row) => !row.deleted).map(toItem);
         const lastRow = pageRows.at(-1);
         const nextCursor = hasMore && lastRow
           ? encodeCompanyWorkProjectionCursor({
@@ -338,8 +377,8 @@ export function companyWorkProjectionService(db: Db) {
               snapshotRevision,
               issuedAt,
               expiresAt,
-              afterRevision: decimal(lastRow.revision),
-              afterIssueId: lastRow.issue_id,
+              afterRevision: decimal(lastRow.head_first_revision),
+              afterIssueId: lastRow.head_issue_id,
               pageSize,
             }, input.cursorSecretForTest)
           : null;

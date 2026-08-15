@@ -203,10 +203,10 @@ Invariants: plaintext `pcwp_v1_` credential shown once at creation; only its
 hash is stored. This table has no agent, role, membership, permission, or
 `last_used_at` relation. Older application versions inspect only
 `agent_api_keys`, so application rollback cannot reinterpret this capability
-as a standard agent key. Only current owner/admin board principals with
-`work_projection_credentials:manage` (plus existing local/instance admin
-authority) manage credentials. Creation/revocation and required activity rows
-are one transaction; active credentials cannot be unlogged.
+as a standard agent key. Only current active owner/admin board principals with
+`work_projection_credentials:manage` manage credentials. Commit-time
+membership and grant checks, creation/revocation, and required activity rows
+are one locked transaction; active credentials cannot be unlogged.
 
 ## 7.4 `goals`
 
@@ -584,7 +584,9 @@ source change and is not part of the projection counter/history restore unit.
 Reference validity is historical data, not a join against mutable current
 project, agent, or membership rows. Reads use shared PostgreSQL advisory-lock
 admission and require an external sustained request-rate limit as defined in the
-contract.
+contract. One indexed issue-head row per issue lifetime bounds historical page
+work, and an epoch-bound offline verification receipt is required after restore
+before any response can claim completeness.
 
 ## 9.4 Permission Terminology and Default Visibility Rule
 

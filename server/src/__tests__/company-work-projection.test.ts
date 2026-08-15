@@ -11,9 +11,11 @@ import {
   companies,
   companyMemberships,
   companyWorkProjectionCredentials,
+  companyWorkProjectionIssueHeads,
   companyWorkProjectionRevisions,
   companyWorkProjectionSourceEvents,
   companyWorkProjectionSourceWitnesses,
+  companyWorkProjectionVerifications,
   createDb,
   issueRecoveryActions,
   issues,
@@ -221,6 +223,8 @@ describePostgres("company work projection", () => {
         .where(eq(issueWorkProjectionVersions.companyId, companyId)),
       sourceEvents: await db.select().from(companyWorkProjectionSourceEvents)
         .where(eq(companyWorkProjectionSourceEvents.companyId, companyId)),
+      heads: await db.select().from(companyWorkProjectionIssueHeads)
+        .where(eq(companyWorkProjectionIssueHeads.companyId, companyId)),
     };
   }
 
@@ -228,6 +232,7 @@ describePostgres("company work projection", () => {
     companyId: string,
     state: Awaited<ReturnType<typeof snapshotProjectionMaterialization>>,
   ) {
+    await db.execute(sql`SELECT public.invalidate_company_work_projection_verification(${companyId}::uuid)`);
     await db.execute(sql.raw(
       "ALTER TABLE public.issue_work_projection_versions DISABLE TRIGGER USER; "
       + "ALTER TABLE public.company_work_projection_source_events DISABLE TRIGGER USER",
@@ -236,12 +241,15 @@ describePostgres("company work projection", () => {
       await db.transaction(async (tx) => {
         await tx.delete(companyWorkProjectionSourceEvents)
           .where(eq(companyWorkProjectionSourceEvents.companyId, companyId));
+        await tx.delete(companyWorkProjectionIssueHeads)
+          .where(eq(companyWorkProjectionIssueHeads.companyId, companyId));
         await tx.delete(issueWorkProjectionVersions)
           .where(eq(issueWorkProjectionVersions.companyId, companyId));
         if (state.history.length > 0) await tx.insert(issueWorkProjectionVersions).values(state.history);
         if (state.sourceEvents.length > 0) {
           await tx.insert(companyWorkProjectionSourceEvents).values(state.sourceEvents);
         }
+        if (state.heads.length > 0) await tx.insert(companyWorkProjectionIssueHeads).values(state.heads);
         await tx.update(companyWorkProjectionRevisions).set({
           currentRevision: state.counter.currentRevision,
           currentIntegrityToken: state.counter.currentIntegrityToken,
@@ -254,12 +262,46 @@ describePostgres("company work projection", () => {
         + "ALTER TABLE public.company_work_projection_source_events ENABLE TRIGGER USER",
       ));
     }
+    await db.execute(sql`SELECT public.verify_company_work_projection_recovery(${companyId}::uuid)`);
   }
 
   async function getProjection(token: string, companyId: string, query = "") {
     return request(app())
       .get(`/api/v1/companies/${companyId}/work-projection${query}`)
       .set("Authorization", `Bearer ${token}`);
+  }
+
+  async function waitForDatabaseLock(
+    queryFragment: string,
+  ): Promise<{ pid: number; waitEventType: string; waitEvent: string; query: string }> {
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      const rows = Array.from(await db.execute(sql<{
+        pid: number;
+        waitEventType: string;
+        waitEvent: string;
+        query: string;
+      }>`
+        SELECT pid, wait_event_type AS "waitEventType", wait_event AS "waitEvent", query
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND pid <> pg_backend_pid()
+          AND wait_event_type = 'Lock'
+          AND query ILIKE ${`%${queryFragment}%`}
+        ORDER BY query_start
+      `));
+      const row = rows[0];
+      if (row) {
+        return {
+          pid: row.pid,
+          waitEventType: row.waitEventType,
+          waitEvent: row.waitEvent,
+          query: row.query,
+        };
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`database wait-state receipt missing for ${queryFragment}`);
   }
 
   async function legacyAgentKeyLookup(token: string) {
@@ -287,6 +329,8 @@ describePostgres("company work projection", () => {
       witnesses: await db.select().from(companyWorkProjectionSourceWitnesses),
       versions: await db.select().from(issueWorkProjectionVersions),
       sourceEvents: await db.select().from(companyWorkProjectionSourceEvents),
+      heads: await db.select().from(companyWorkProjectionIssueHeads),
+      verifications: await db.select().from(companyWorkProjectionVerifications),
     };
     const response = await getProjection(seeded.token, seeded.companyId);
     expect(response.status).toBe(200);
@@ -310,6 +354,8 @@ describePostgres("company work projection", () => {
     expect(await db.select().from(companyWorkProjectionSourceWitnesses)).toEqual(before.witnesses);
     expect(await db.select().from(issueWorkProjectionVersions)).toEqual(before.versions);
     expect(await db.select().from(companyWorkProjectionSourceEvents)).toEqual(before.sourceEvents);
+    expect(await db.select().from(companyWorkProjectionIssueHeads)).toEqual(before.heads);
+    expect(await db.select().from(companyWorkProjectionVerifications)).toEqual(before.verifications);
 
     const conditional = await request(app())
       .get(`/api/v1/companies/${seeded.companyId}/work-projection`)
@@ -375,10 +421,11 @@ describePostgres("company work projection", () => {
     expect(mixedCollision[0]?.lastUsedAt).toBeNull();
     expect(await legacyAgentKeyLookup(seeded.token)).toEqual([]);
 
+    const owner = await boardMember(seeded.companyId, "owner");
     await companyWorkProjectionCredentialService(db).revoke(
       seeded.companyId,
       seeded.credentialId,
-      "synthetic-owner",
+      owner.userId,
     );
     expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(401);
   });
@@ -393,6 +440,8 @@ describePostgres("company work projection", () => {
       .post(`/api/v1/companies/${seeded.companyId}/work-projection-credentials`)
       .send({ name: "operator-must-not-create" });
     expect(denied.status).toBe(403);
+    expect((await request(managementApp(operator))
+      .get(`/api/v1/companies/${seeded.companyId}/work-projection-credentials`)).status).toBe(403);
 
     const ownerCreated = await request(managementApp(owner))
       .post(`/api/v1/companies/${seeded.companyId}/work-projection-credentials`)
@@ -498,6 +547,133 @@ describePostgres("company work projection", () => {
       tokenVersion: 1,
       creationActivityId: undefined as never,
     })).rejects.toThrow();
+  });
+
+  it("serializes create authorization through audit commit before a concurrent demotion", async () => {
+    const seeded = await seed();
+    const owner = await boardMember(seeded.companyId, "owner");
+    const lockKey = 7_184_201;
+    await db.execute(sql.raw(`
+      CREATE OR REPLACE FUNCTION public.synthetic_block_projection_credential_audit() RETURNS trigger
+      LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.action = 'company_work_projection.credential_created' THEN
+          PERFORM pg_advisory_xact_lock(${lockKey});
+        END IF;
+        RETURN NEW;
+      END;
+      $$;
+      CREATE TRIGGER synthetic_block_projection_credential_audit
+      BEFORE INSERT ON public.activity_log
+      FOR EACH ROW EXECUTE FUNCTION public.synthetic_block_projection_credential_audit()
+    `));
+    let releaseBlocker: () => void = () => undefined;
+    let markBlockerReady: () => void = () => undefined;
+    const blockerReady = new Promise<void>((resolve) => { markBlockerReady = resolve; });
+    const holdBlocker = new Promise<void>((resolve) => { releaseBlocker = resolve; });
+    const blockerTransaction = db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${lockKey})`);
+      markBlockerReady();
+      await holdBlocker;
+    });
+    try {
+      await blockerReady;
+      const pendingCreate = request(managementApp(owner))
+        .post(`/api/v1/companies/${seeded.companyId}/work-projection-credentials`)
+        .send({ name: "serialized-create" })
+        .then((response) => response);
+      const createWait = await waitForDatabaseLock("activity_log");
+      expect(createWait).toMatchObject({ waitEventType: "Lock", waitEvent: "advisory" });
+
+      const pendingDemotion = db.transaction(async (tx) => {
+        await tx.execute(sql`
+          UPDATE public.company_memberships
+          SET membership_role = 'operator', updated_at = now()
+          WHERE company_id = ${seeded.companyId}::uuid
+            AND principal_type = 'user' AND principal_id = ${owner.userId}
+        `);
+        await tx.execute(sql`
+          DELETE FROM public.principal_permission_grants
+          WHERE company_id = ${seeded.companyId}::uuid
+            AND principal_type = 'user' AND principal_id = ${owner.userId}
+            AND permission_key = 'work_projection_credentials:manage'
+        `);
+      });
+      const demotionWait = await waitForDatabaseLock("UPDATE public.company_memberships");
+      expect(demotionWait).toMatchObject({ waitEventType: "Lock", waitEvent: "transactionid" });
+
+      releaseBlocker();
+      await blockerTransaction;
+      const created = await pendingCreate;
+      expect(created.status).toBe(201);
+      await pendingDemotion;
+      const afterLoss = await request(managementApp(owner))
+        .post(`/api/v1/companies/${seeded.companyId}/work-projection-credentials`)
+        .send({ name: "after-authority-loss" });
+      expect(afterLoss.status).toBe(403);
+      expect(await db.select().from(companyWorkProjectionCredentials)
+        .where(eq(companyWorkProjectionCredentials.name, "serialized-create"))).toHaveLength(1);
+    } finally {
+      releaseBlocker();
+      await blockerTransaction.catch(() => undefined);
+      await db.execute(sql.raw(`
+        DROP TRIGGER IF EXISTS synthetic_block_projection_credential_audit ON public.activity_log;
+        DROP FUNCTION IF EXISTS public.synthetic_block_projection_credential_audit()
+      `));
+    }
+  });
+
+  it("denies revoke after a concurrent demotion commits while authorization is waiting", async () => {
+    const seeded = await seed();
+    const owner = await boardMember(seeded.companyId, "owner");
+    const created = await request(managementApp(owner))
+      .post(`/api/v1/companies/${seeded.companyId}/work-projection-credentials`)
+      .send({ name: "demotion-before-revoke" });
+    expect(created.status).toBe(201);
+
+    let releaseDemoter: () => void = () => undefined;
+    let markDemoterReady: () => void = () => undefined;
+    const demoterReady = new Promise<void>((resolve) => { markDemoterReady = resolve; });
+    const holdDemoter = new Promise<void>((resolve) => { releaseDemoter = resolve; });
+    const demotionTransaction = db.transaction(async (tx) => {
+      await tx.execute(sql`
+        UPDATE public.company_memberships
+        SET membership_role = 'operator', updated_at = now()
+        WHERE company_id = ${seeded.companyId}::uuid
+          AND principal_type = 'user' AND principal_id = ${owner.userId}
+      `);
+      await tx.execute(sql`
+        DELETE FROM public.principal_permission_grants
+        WHERE company_id = ${seeded.companyId}::uuid
+          AND principal_type = 'user' AND principal_id = ${owner.userId}
+          AND permission_key = 'work_projection_credentials:manage'
+      `);
+      markDemoterReady();
+      await holdDemoter;
+    });
+    try {
+      await demoterReady;
+      const pendingRevoke = request(managementApp(owner))
+        .delete(`/api/v1/companies/${seeded.companyId}/work-projection-credentials/${created.body.id}`)
+        .then((response) => response);
+      const revokeWait = await waitForDatabaseLock("company_memberships");
+      expect(revokeWait).toMatchObject({ waitEventType: "Lock", waitEvent: "transactionid" });
+      releaseDemoter();
+      await demotionTransaction;
+      const denied = await pendingRevoke;
+      expect(denied.status).toBe(403);
+      const credential = await db.select().from(companyWorkProjectionCredentials)
+        .where(eq(companyWorkProjectionCredentials.id, created.body.id))
+        .then((rows) => rows[0]);
+      expect(credential.revokedAt).toBeNull();
+      expect(await db.select().from(activityLog).where(and(
+        eq(activityLog.entityId, created.body.id),
+        eq(activityLog.action, "company_work_projection.credential_revoked"),
+      ))).toEqual([]);
+    } finally {
+      releaseDemoter();
+      await demotionTransaction.catch(() => undefined);
+    }
   });
 
   it("clears implicit board authority for malformed projection-family tokens", async () => {
@@ -955,6 +1131,77 @@ describePostgres("company work projection", () => {
     await replaceProjectionMaterialization(seeded.companyId, complete);
   });
 
+  it("requires an offline verification receipt after restore and rejects an internal matched gap", async () => {
+    const seeded = await seed();
+    const omittedIssueId = await addIssue(seeded.companyId);
+    const retainedIssueId = await addIssue(seeded.companyId);
+    await db.update(issues).set({ priority: "high", updatedAt: new Date() })
+      .where(eq(issues.id, retainedIssueId));
+    const complete = await snapshotProjectionMaterialization(seeded.companyId);
+    const omittedHistory = complete.history.find((row) => row.issueId === omittedIssueId);
+    const omittedEvent = complete.sourceEvents.find((row) => row.revision === omittedHistory?.revision);
+    const omittedHead = complete.heads.find((row) => row.issueId === omittedIssueId);
+    if (!omittedHistory || !omittedEvent || !omittedHead) throw new Error("synthetic restore rows missing");
+
+    await db.execute(sql`SELECT public.invalidate_company_work_projection_verification(${seeded.companyId}::uuid)`);
+    await db.execute(sql.raw(
+      "ALTER TABLE public.issue_work_projection_versions DISABLE TRIGGER USER; "
+      + "ALTER TABLE public.company_work_projection_source_events DISABLE TRIGGER USER",
+    ));
+    try {
+      await db.delete(companyWorkProjectionIssueHeads).where(and(
+        eq(companyWorkProjectionIssueHeads.companyId, seeded.companyId),
+        eq(companyWorkProjectionIssueHeads.issueId, omittedIssueId),
+      ));
+      await db.delete(companyWorkProjectionSourceEvents).where(and(
+        eq(companyWorkProjectionSourceEvents.companyId, seeded.companyId),
+        eq(companyWorkProjectionSourceEvents.revision, omittedHistory.revision),
+      ));
+      await db.delete(issueWorkProjectionVersions).where(and(
+        eq(issueWorkProjectionVersions.companyId, seeded.companyId),
+        eq(issueWorkProjectionVersions.revision, omittedHistory.revision),
+      ));
+
+      const invalidVerification = await db.execute(sql<{ verified: boolean }>`
+        SELECT public.verify_company_work_projection_recovery(${seeded.companyId}::uuid) AS verified
+      `);
+      expect(Array.from(invalidVerification)[0]?.verified).toBe(false);
+      const incomplete = await getProjection(seeded.token, seeded.companyId);
+      expect(incomplete.status).toBe(409);
+      expect(incomplete.body.code).toBe("WORK_PROJECTION_INCOMPATIBLE");
+      expect(await db.select().from(companyWorkProjectionVerifications)
+        .where(eq(companyWorkProjectionVerifications.companyId, seeded.companyId))).toEqual([]);
+
+      await db.insert(issueWorkProjectionVersions).values(omittedHistory);
+      await db.insert(companyWorkProjectionSourceEvents).values(omittedEvent);
+      await db.insert(companyWorkProjectionIssueHeads).values(omittedHead);
+      const recoveredVerification = await db.execute(sql<{ verified: boolean }>`
+        SELECT public.verify_company_work_projection_recovery(${seeded.companyId}::uuid) AS verified
+      `);
+      expect(Array.from(recoveredVerification)[0]?.verified).toBe(true);
+    } finally {
+      await db.execute(sql.raw(
+        "ALTER TABLE public.issue_work_projection_versions ENABLE TRIGGER USER; "
+        + "ALTER TABLE public.company_work_projection_source_events ENABLE TRIGGER USER",
+      ));
+    }
+    const recovered = await getProjection(seeded.token, seeded.companyId);
+    expect(recovered.status).toBe(200);
+    expect(recovered.body.items.map((item: { id: string }) => item.id).sort())
+      .toEqual([omittedIssueId, retainedIssueId].sort());
+
+    await db.update(companyWorkProjectionSourceWitnesses).set({
+      databaseEpoch: randomUUID(),
+      updatedAt: new Date(),
+    }).where(eq(companyWorkProjectionSourceWitnesses.companyId, seeded.companyId));
+    expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(409);
+    const newEpochVerification = await db.execute(sql<{ verified: boolean }>`
+      SELECT public.verify_company_work_projection_recovery(${seeded.companyId}::uuid) AS verified
+    `);
+    expect(Array.from(newEpochVerification)[0]?.verified).toBe(true);
+    expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(200);
+  });
+
   it("fails closed for missing, behind, ahead, and partially restored materialization state", async () => {
     const seeded = await seed();
     await addIssue(seeded.companyId);
@@ -981,6 +1228,7 @@ describePostgres("company work projection", () => {
       counter: complete.counter,
       history: [],
       sourceEvents: [],
+      heads: [],
     });
     expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(409);
 

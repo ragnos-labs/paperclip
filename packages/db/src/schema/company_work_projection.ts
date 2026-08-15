@@ -67,7 +67,29 @@ export const companyWorkProjectionSourceWitnesses = pgTable(
       .references(() => companies.id, { onDelete: "cascade" }),
     currentRevision: bigint("current_revision", { mode: "bigint" }).notNull().default(0n),
     currentIntegrityToken: uuid("current_integrity_token").notNull(),
+    databaseEpoch: uuid("database_epoch").notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+);
+
+/**
+ * Offline recovery verification receipt. Normal captured source writes may
+ * extend a current receipt transactionally; maintenance must invalidate and
+ * fully re-verify continuity before reads can resume.
+ */
+export const companyWorkProjectionVerifications = pgTable(
+  "company_work_projection_verifications",
+  {
+    companyId: uuid("company_id")
+      .primaryKey()
+      .references(() => companies.id, { onDelete: "cascade" }),
+    databaseEpoch: uuid("database_epoch").notNull(),
+    verifiedRevision: bigint("verified_revision", { mode: "bigint" }).notNull(),
+    verifiedIntegrityToken: uuid("verified_integrity_token").notNull(),
+    verifiedHistoryCount: bigint("verified_history_count", { mode: "bigint" }).notNull(),
+    verifiedEventCount: bigint("verified_event_count", { mode: "bigint" }).notNull(),
+    verifiedHeadCount: bigint("verified_head_count", { mode: "bigint" }).notNull(),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }).notNull().defaultNow(),
   },
 );
 
@@ -109,6 +131,35 @@ export const issueWorkProjectionVersions = pgTable(
     companyRevisionTokenUniqueIdx: uniqueIndex(
       "issue_work_projection_versions_company_revision_token_idx",
     ).on(table.companyId, table.revision, table.integrityToken),
+  }),
+);
+
+/**
+ * One bounded routing row per issue/company lifetime. Historical pages walk
+ * this table by first revision and issue id and perform one indexed history
+ * lookup per head; accumulated issue revisions are never reconstructed for
+ * each request.
+ */
+export const companyWorkProjectionIssueHeads = pgTable(
+  "company_work_projection_issue_heads",
+  {
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "cascade" }),
+    issueId: uuid("issue_id").notNull(),
+    firstRevision: bigint("first_revision", { mode: "bigint" }).notNull(),
+    currentRevision: bigint("current_revision", { mode: "bigint" }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.companyId, table.issueId] }),
+    currentRevisionFk: foreignKey({
+      columns: [table.companyId, table.currentRevision],
+      foreignColumns: [issueWorkProjectionVersions.companyId, issueWorkProjectionVersions.revision],
+      name: "company_work_projection_issue_heads_current_fk",
+    }),
+    companyFirstRevisionIdx: index("company_work_projection_issue_heads_first_revision_idx")
+      .on(table.companyId, table.firstRevision, table.issueId),
   }),
 );
 

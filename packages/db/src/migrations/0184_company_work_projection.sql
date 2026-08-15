@@ -69,6 +69,7 @@ CREATE TABLE public.company_work_projection_source_witnesses (
   company_id uuid PRIMARY KEY NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
   current_revision bigint DEFAULT 0 NOT NULL CHECK (current_revision >= 0),
   current_integrity_token uuid NOT NULL,
+  database_epoch uuid NOT NULL,
   updated_at timestamp with time zone DEFAULT now() NOT NULL
 );--> statement-breakpoint
 
@@ -104,6 +105,22 @@ CREATE TABLE public.issue_work_projection_versions (
 CREATE INDEX issue_work_projection_versions_company_issue_revision_idx
   ON public.issue_work_projection_versions (company_id, issue_id, revision);--> statement-breakpoint
 
+CREATE TABLE public.company_work_projection_issue_heads (
+  company_id uuid NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+  issue_id uuid NOT NULL,
+  first_revision bigint NOT NULL CHECK (first_revision > 0),
+  current_revision bigint NOT NULL CHECK (current_revision >= first_revision),
+  updated_at timestamp with time zone DEFAULT now() NOT NULL,
+  CONSTRAINT company_work_projection_issue_heads_pk PRIMARY KEY(company_id, issue_id),
+  CONSTRAINT company_work_projection_issue_heads_current_fk
+    FOREIGN KEY (company_id, current_revision)
+    REFERENCES public.issue_work_projection_versions(company_id, revision)
+    DEFERRABLE INITIALLY DEFERRED
+);--> statement-breakpoint
+
+CREATE INDEX company_work_projection_issue_heads_first_revision_idx
+  ON public.company_work_projection_issue_heads (company_id, first_revision, issue_id);--> statement-breakpoint
+
 -- One immutable witness event exists for every positive source revision. The
 -- deferred reverse FK prevents a runtime history gap while allowing the two
 -- rows to be appended in one transaction.
@@ -117,6 +134,17 @@ CREATE TABLE public.company_work_projection_source_events (
     FOREIGN KEY (company_id, revision, integrity_token)
     REFERENCES public.issue_work_projection_versions(company_id, revision, integrity_token)
     DEFERRABLE INITIALLY DEFERRED
+);--> statement-breakpoint
+
+CREATE TABLE public.company_work_projection_verifications (
+  company_id uuid PRIMARY KEY NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+  database_epoch uuid NOT NULL,
+  verified_revision bigint NOT NULL CHECK (verified_revision >= 0),
+  verified_integrity_token uuid NOT NULL,
+  verified_history_count bigint NOT NULL CHECK (verified_history_count >= 0),
+  verified_event_count bigint NOT NULL CHECK (verified_event_count >= 0),
+  verified_head_count bigint NOT NULL CHECK (verified_head_count >= 0),
+  verified_at timestamp with time zone DEFAULT now() NOT NULL
 );--> statement-breakpoint
 
 CREATE OR REPLACE FUNCTION public.reject_company_work_projection_append_only_mutation() RETURNS trigger
@@ -139,6 +167,139 @@ CREATE TRIGGER company_work_projection_source_events_append_only
 BEFORE UPDATE OR DELETE ON public.company_work_projection_source_events
 FOR EACH ROW EXECUTE FUNCTION public.reject_company_work_projection_append_only_mutation();--> statement-breakpoint
 
+CREATE OR REPLACE FUNCTION public.invalidate_company_work_projection_verification(
+  target_company_id uuid
+) RETURNS void
+LANGUAGE sql
+SET search_path = pg_catalog, public
+AS $$
+  DELETE FROM public.company_work_projection_verifications
+  WHERE company_id = target_company_id
+$$;--> statement-breakpoint
+
+CREATE OR REPLACE FUNCTION public.verify_company_work_projection_recovery(
+  target_company_id uuid
+) RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  counter_revision bigint;
+  counter_token uuid;
+  witness_revision bigint;
+  witness_token uuid;
+  witness_epoch uuid;
+  history_count bigint;
+  history_min bigint;
+  history_max bigint;
+  event_count bigint;
+  event_min bigint;
+  event_max bigint;
+  head_count bigint;
+  distinct_issue_count bigint;
+  invalid_pair_exists boolean;
+  invalid_head_exists boolean;
+BEGIN
+  SELECT current_revision, current_integrity_token, database_epoch
+  INTO witness_revision, witness_token, witness_epoch
+  FROM public.company_work_projection_source_witnesses
+  WHERE company_id = target_company_id
+  FOR UPDATE;
+
+  SELECT current_revision, current_integrity_token
+  INTO counter_revision, counter_token
+  FROM public.company_work_projection_revisions
+  WHERE company_id = target_company_id
+  FOR UPDATE;
+
+  -- Acquire the source/counter serialization locks before touching the
+  -- receipt. Source append holds the witness first and then extends a receipt;
+  -- matching that order avoids a verifier/source deadlock.
+  DELETE FROM public.company_work_projection_verifications
+  WHERE company_id = target_company_id;
+
+  IF witness_revision IS NULL OR counter_revision IS NULL
+    OR witness_revision <> counter_revision OR witness_token <> counter_token THEN
+    RETURN false;
+  END IF;
+
+  SELECT count(*), min(revision), max(revision)
+  INTO history_count, history_min, history_max
+  FROM public.issue_work_projection_versions
+  WHERE company_id = target_company_id;
+
+  SELECT count(*), min(revision), max(revision)
+  INTO event_count, event_min, event_max
+  FROM public.company_work_projection_source_events
+  WHERE company_id = target_company_id;
+
+  SELECT count(*) INTO head_count
+  FROM public.company_work_projection_issue_heads
+  WHERE company_id = target_company_id;
+
+  SELECT count(DISTINCT issue_id) INTO distinct_issue_count
+  FROM public.issue_work_projection_versions
+  WHERE company_id = target_company_id;
+
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.issue_work_projection_versions AS history
+    FULL JOIN public.company_work_projection_source_events AS event
+      ON event.company_id = history.company_id
+      AND event.revision = history.revision
+    WHERE COALESCE(history.company_id, event.company_id) = target_company_id
+      AND (
+        history.revision IS NULL OR event.revision IS NULL
+        OR history.integrity_token <> event.integrity_token
+      )
+  ) INTO invalid_pair_exists;
+
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.company_work_projection_issue_heads AS head
+    LEFT JOIN LATERAL (
+      SELECT min(revision) AS first_revision, max(revision) AS current_revision
+      FROM public.issue_work_projection_versions AS history
+      WHERE history.company_id = head.company_id AND history.issue_id = head.issue_id
+    ) AS bounds ON true
+    WHERE head.company_id = target_company_id
+      AND (
+        bounds.first_revision IS NULL
+        OR head.first_revision <> bounds.first_revision
+        OR head.current_revision <> bounds.current_revision
+      )
+  ) INTO invalid_head_exists;
+
+  IF history_count <> witness_revision OR event_count <> witness_revision
+    OR head_count <> distinct_issue_count OR invalid_pair_exists OR invalid_head_exists
+    OR (witness_revision = 0 AND (
+      history_min IS NOT NULL OR history_max IS NOT NULL
+      OR event_min IS NOT NULL OR event_max IS NOT NULL OR head_count <> 0
+    ))
+    OR (witness_revision > 0 AND (
+      history_min <> 1 OR history_max <> witness_revision
+      OR event_min <> 1 OR event_max <> witness_revision
+      OR NOT EXISTS (
+        SELECT 1 FROM public.issue_work_projection_versions
+        WHERE company_id = target_company_id
+          AND revision = witness_revision
+          AND integrity_token = witness_token
+      )
+    )) THEN
+    RETURN false;
+  END IF;
+
+  INSERT INTO public.company_work_projection_verifications (
+    company_id, database_epoch, verified_revision, verified_integrity_token,
+    verified_history_count, verified_event_count, verified_head_count, verified_at
+  ) VALUES (
+    target_company_id, witness_epoch, witness_revision, witness_token,
+    history_count, event_count, head_count, now()
+  );
+  RETURN true;
+END;
+$$;--> statement-breakpoint
+
 -- Seed every company with the same random revision-zero token in the materialized
 -- counter and independent source witness. Reads never synthesize this state.
 WITH seeds AS (
@@ -151,9 +312,9 @@ INSERT INTO public.company_work_projection_revisions (
 SELECT company_id, 0, integrity_token, now() FROM seeds;--> statement-breakpoint
 
 INSERT INTO public.company_work_projection_source_witnesses (
-  company_id, current_revision, current_integrity_token, updated_at
+  company_id, current_revision, current_integrity_token, database_epoch, updated_at
 )
-SELECT company_id, current_revision, current_integrity_token, now()
+SELECT company_id, current_revision, current_integrity_token, gen_random_uuid(), now()
 FROM public.company_work_projection_revisions;--> statement-breakpoint
 
 CREATE OR REPLACE FUNCTION public.company_work_projection_issue_is_visible(
@@ -247,28 +408,39 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
 DECLARE
+  previous_revision bigint;
+  previous_integrity_token uuid;
+  source_database_epoch uuid;
   next_revision bigint;
   next_integrity_token uuid := gen_random_uuid();
   counter_revision bigint;
+  head_was_inserted boolean;
 BEGIN
-  UPDATE public.company_work_projection_source_witnesses
-  SET current_revision = current_revision + 1,
-      current_integrity_token = next_integrity_token,
-      updated_at = now()
+  SELECT current_revision, current_integrity_token, database_epoch
+  INTO previous_revision, previous_integrity_token, source_database_epoch
+  FROM public.company_work_projection_source_witnesses
   WHERE company_id = source_company_id
-  RETURNING current_revision INTO next_revision;
+  FOR UPDATE;
 
-  IF next_revision IS NULL THEN
+  IF previous_revision IS NULL THEN
     RAISE EXCEPTION 'company work projection source witness missing for company %', source_company_id
       USING ERRCODE = '23514';
   END IF;
+
+  next_revision := previous_revision + 1;
+  UPDATE public.company_work_projection_source_witnesses
+  SET current_revision = next_revision,
+      current_integrity_token = next_integrity_token,
+      updated_at = now()
+  WHERE company_id = source_company_id;
 
   UPDATE public.company_work_projection_revisions
   SET current_revision = next_revision,
       current_integrity_token = next_integrity_token,
       updated_at = now()
   WHERE company_id = source_company_id
-    AND current_revision = next_revision - 1
+    AND current_revision = previous_revision
+    AND current_integrity_token = previous_integrity_token
   RETURNING current_revision INTO counter_revision;
 
   IF counter_revision IS NULL THEN
@@ -305,6 +477,36 @@ BEGIN
   INSERT INTO public.company_work_projection_source_events (
     company_id, revision, integrity_token, recorded_at
   ) VALUES (source_company_id, next_revision, next_integrity_token, now());
+
+  SELECT NOT EXISTS (
+    SELECT 1 FROM public.company_work_projection_issue_heads
+    WHERE company_id = source_company_id AND issue_id = source_issue_id
+  ) INTO head_was_inserted;
+
+  INSERT INTO public.company_work_projection_issue_heads (
+    company_id, issue_id, first_revision, current_revision, updated_at
+  ) VALUES (
+    source_company_id, source_issue_id, next_revision, next_revision, now()
+  )
+  ON CONFLICT (company_id, issue_id) DO UPDATE
+  SET current_revision = EXCLUDED.current_revision,
+      updated_at = now();
+
+  -- A verified normal history extends without a new full scan. A missing or
+  -- stale receipt stays unavailable until the offline verifier recreates it.
+  UPDATE public.company_work_projection_verifications
+  SET verified_revision = next_revision,
+      verified_integrity_token = next_integrity_token,
+      verified_history_count = verified_history_count + 1,
+      verified_event_count = verified_event_count + 1,
+      verified_head_count = verified_head_count + CASE WHEN head_was_inserted THEN 1 ELSE 0 END,
+      verified_at = now()
+  WHERE company_id = source_company_id
+    AND database_epoch = source_database_epoch
+    AND verified_revision = previous_revision
+    AND verified_integrity_token = previous_integrity_token
+    AND verified_history_count = previous_revision
+    AND verified_event_count = previous_revision;
 END;
 $$;--> statement-breakpoint
 
@@ -475,14 +677,20 @@ CREATE OR REPLACE FUNCTION public.initialize_company_work_projection_revision() 
 LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
-DECLARE initial_integrity_token uuid := gen_random_uuid();
+DECLARE
+  initial_integrity_token uuid := gen_random_uuid();
+  initial_database_epoch uuid := gen_random_uuid();
 BEGIN
   INSERT INTO public.company_work_projection_revisions (
     company_id, current_revision, current_integrity_token, updated_at
   ) VALUES (NEW.id, 0, initial_integrity_token, now());
   INSERT INTO public.company_work_projection_source_witnesses (
-    company_id, current_revision, current_integrity_token, updated_at
-  ) VALUES (NEW.id, 0, initial_integrity_token, now());
+    company_id, current_revision, current_integrity_token, database_epoch, updated_at
+  ) VALUES (NEW.id, 0, initial_integrity_token, initial_database_epoch, now());
+  INSERT INTO public.company_work_projection_verifications (
+    company_id, database_epoch, verified_revision, verified_integrity_token,
+    verified_history_count, verified_event_count, verified_head_count, verified_at
+  ) VALUES (NEW.id, initial_database_epoch, 0, initial_integrity_token, 0, 0, 0, now());
   RETURN NEW;
 END;
 $$;--> statement-breakpoint
@@ -538,6 +746,13 @@ INSERT INTO public.company_work_projection_source_events (
 SELECT company_id, revision, integrity_token, recorded_at
 FROM public.issue_work_projection_versions;--> statement-breakpoint
 
+INSERT INTO public.company_work_projection_issue_heads (
+  company_id, issue_id, first_revision, current_revision, updated_at
+)
+SELECT company_id, issue_id, min(revision), max(revision), now()
+FROM public.issue_work_projection_versions
+GROUP BY company_id, issue_id;--> statement-breakpoint
+
 WITH latest AS (
   SELECT DISTINCT ON (company_id)
     company_id, revision, integrity_token
@@ -562,4 +777,21 @@ SET current_revision = latest.revision,
     current_integrity_token = latest.integrity_token,
     updated_at = now()
 FROM latest
-WHERE witnesses.company_id = latest.company_id;
+WHERE witnesses.company_id = latest.company_id;--> statement-breakpoint
+
+-- The first live page must see current cardinality estimates immediately after
+-- the locked backfill so LIMIT is driven by the ordered head index.
+ANALYZE public.company_work_projection_issue_heads,
+  public.issue_work_projection_versions;--> statement-breakpoint
+
+DO $$
+DECLARE source_company_id uuid;
+BEGIN
+  FOR source_company_id IN SELECT id FROM public.companies ORDER BY id LOOP
+    IF NOT public.verify_company_work_projection_recovery(source_company_id) THEN
+      RAISE EXCEPTION 'company work projection verification failed during migration for company %', source_company_id
+        USING ERRCODE = '23514';
+    END IF;
+  END LOOP;
+END;
+$$;

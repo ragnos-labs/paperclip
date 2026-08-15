@@ -25,13 +25,16 @@ membership, role, or permission changes cannot expand it. Global middleware
 rejects this credential on every other path and on every non-GET method.
 
 Only active company owners/admins with the dedicated
-`work_projection_credentials:manage` permission (plus the existing local board
-and explicitly company-authorized instance-admin paths) can create, list, or
-revoke these credentials through the company-scoped
+`work_projection_credentials:manage` permission can create, list, or revoke
+these credentials through the company-scoped
 `/api/v1/companies/:companyId/work-projection-credentials` routes. Missing and
 inaccessible companies both return the same `404` on every lifecycle route.
-Creation/revocation and their required activity rows commit in one database
-transaction. Credential rows carry a required creation-activity reference, and
+For create and revoke, the active owner/admin membership and dedicated grant
+are locked and re-read inside the same database transaction as the credential
+mutation and required activity row. Concurrent demotion or grant removal
+therefore serializes before or after that whole transaction; it cannot commit
+between authorization and credential commit. Credential rows carry a required
+creation-activity reference, and
 an active credential cannot exist without that audit row. Revocation is
 lock-serialized and idempotent, with exactly one revocation activity reference.
 Plaintext is returned once at creation. Older Paperclip binaries query
@@ -95,12 +98,14 @@ Migration `0184_company_work_projection` takes `SHARE ROW EXCLUSIVE` locks on
 that can affect collection membership or reference validity while counters and
 source witnesses are seeded, capture triggers are installed, and existing work
 is backfilled. The lock is held for the duration of the schema work plus an
-O(visible issue count) backfill; operators must estimate that count and use a
-maintenance window for large tables.
+O(visible issue count) backfill, head construction, full verification, and
+statistics refresh; operators must estimate that count and use a maintenance
+window for large tables.
 
-Every existing company receives an explicit revision-zero counter and an
+Every existing company receives an explicit revision-zero counter, an
 independent source-integrity witness with the same random token; an `AFTER
-INSERT` company trigger creates both for future companies. The issue
+INSERT` company trigger creates both plus a revision-zero verification receipt
+for future companies. The issue
 trigger records each visible insert, update, hide, unhide, harness toggle,
 plugin-visibility toggle, company move, and delete in the same transaction as
 the source mutation. Each eligible source change advances the independent
@@ -111,21 +116,29 @@ Deletions and removals are tombstones. Revisions are contiguous within a
 company; reverse referential integrity and append-only guards prevent a runtime
 history gap.
 
-The first page fixes a high-water revision. Each later page selects the latest
-version of every issue at or below that high-water mark, orders by item revision
-then issue UUID, and advances with a signed opaque keyset cursor. The cursor
+The first page fixes a high-water revision. A bounded
+`company_work_projection_issue_heads` table stores one routing row per issue
+lifetime. Pages walk its `(company, first revision, issue UUID)` index in that
+order, at most `pageSize + 1` head rows at a time, and perform one indexed lateral history
+lookup per head to select the latest version at or below the high-water mark.
+Tombstones consume a cursor slot but are omitted from `items`, so a partial page
+may contain fewer items than its requested size while still making deterministic
+progress. Accumulated history is never reconstructed per request. The cursor
 binds company, API/schema version, high-water revision, position, page size,
 issue time, and expiry. It is HMAC-signed with an instance- and company-derived
 key. No process-local cursor state is required, so replay and restart are
 deterministic until expiry.
 
 Reads require the counter, independent source witness, current source event,
-and current history row to agree on revision and integrity token before serving
-any snapshot. These are primary-key/index lookups rather than a full-history
-scan; a 100,000-revision PostgreSQL query-plan regression prohibits sequential
-scans and enforces the API's 250 ms latency ceiling. Missing, behind, ahead,
-gapped, or partially restored state is incompatible; it is never interpreted
-as empty or complete.
+current history row, database epoch, and post-recovery verification receipt to
+agree on revision, token, and retained history/event counts before serving any
+snapshot. These readiness checks are primary-key/index lookups rather than a
+full-history scan. Separate 100,000-revision PostgreSQL query-plan regressions
+cover actual first, middle, and final page execution, require indexed head and
+history scans, bound materialization rows to the page limit, and enforce the
+API's 250 ms latency ceiling. Missing, behind, ahead, gapped, unverified, or
+partially restored state is incompatible; it is never interpreted as empty or
+complete.
 
 Snapshots expire after five minutes. Replaying a cursor returns the same page;
 clients may safely deduplicate by item ID and revision. A concurrent issue
@@ -192,27 +205,46 @@ installed. Existing issue APIs and rows are unchanged. Deployments must apply
 the migration before enabling clients.
 
 If revision integrity fails, disable the route and preserve the independent
-`company_work_projection_source_witnesses` and
-`company_work_projection_source_events` tables. During a maintenance window,
-restore/rebuild only `company_work_projection_revisions` and
-`issue_work_projection_versions`, then verify their current revision/token
-against both source-witness tables before re-enabling reads. Never reset a
-counter while clients may hold cursors. A partial restore of the materialized
-counter/history to an older self-consistent prefix is detected because the
-independent witness remains newer. A full-database point-in-time restore can
-reset issues, both witness tables, and both materialization tables together;
-that is outside the partial-restore guarantee and must be treated as a new
+`company_work_projection_source_witnesses` table. Before disabling append-only
+guards or starting any restore, call
+`invalidate_company_work_projection_verification(company_id)` and commit that
+invalidation while the route remains disabled. During the maintenance window,
+restore/rebuild `company_work_projection_revisions`,
+`issue_work_projection_versions`, `company_work_projection_source_events`, and
+`company_work_projection_issue_heads`. Then call
+`verify_company_work_projection_recovery(company_id)`. The offline verifier
+holds the counter/witness rows, scans full history and source-event counts and
+min/max continuity, verifies every revision/token pair, verifies one exact head
+per retained issue with correct first/current bounds, and writes a receipt only
+when all checks pass. Commit that receipt before re-enabling reads. A false
+result leaves the receipt absent and the endpoint returns `409`.
+
+This procedure is the protection boundary for privileged restore tooling:
+ordinary source writes extend a current receipt transactionally, but a restore
+that bypasses database guards must invalidate it first. Restoring only
+projection tables cannot manufacture a current receipt. A full-database
+point-in-time restore can reset issues, witness, epoch, and receipt together;
+that is outside the partial-table guarantee and must be treated as a new
 database epoch with the route disabled, all projection credentials revoked,
-and all cursors allowed to expire before clients restart.
+cursor/signing material rotated, all old cursors allowed to expire, and the
+offline verifier run successfully before clients restart. Never reset a counter
+while clients may hold cursors.
+
+For that full-database case, after receipt invalidation and while the route is
+still disabled, set `company_work_projection_source_witnesses.database_epoch`
+to a new random UUID for each restored company. The old receipt then fails the
+online epoch check. Run the same offline verifier to issue the first receipt for
+the new epoch; tests prove the endpoint remains `409` between rotation and that
+successful verification.
 
 Rollback rehearsal is two-version and fail closed: first disable the route,
 wait five minutes for cursors to expire, retain the dedicated credential table,
 then roll back the application binary. Older binaries query only
 `agent_api_keys`, so `pcwp_v1_` hashes remain undiscoverable and unusable. Do
 not copy those hashes into `agent_api_keys`. Forward recovery reapplies this
-migration/contract, verifies the indexed witness query and credential audit
-foreign keys, rotates the cursor key if the database epoch changed, and only
-then re-enables the route.
+migration/contract, establishes a fresh epoch for a full-database restore, runs
+the offline verifier, verifies credential audit foreign keys, rotates the
+cursor key, and only then re-enables the route.
 
 The append-only tables have no automatic pruning in v1. A later retention policy
 must preserve every unexpired high-water snapshot and requires a separate

@@ -10,9 +10,11 @@ import {
   activityLog,
   companies,
   companyWorkProjectionCredentials,
+  companyWorkProjectionIssueHeads,
   companyWorkProjectionRevisions,
   companyWorkProjectionSourceEvents,
   companyWorkProjectionSourceWitnesses,
+  companyWorkProjectionVerifications,
   companyMemberships,
   issueWorkProjectionVersions,
   issues,
@@ -56,8 +58,12 @@ const DROP_0184_SQL = `
   DROP FUNCTION IF EXISTS public.company_work_projection_project_reference_is_valid(uuid, uuid);
   DROP FUNCTION IF EXISTS public.company_work_projection_agent_reference_is_valid(uuid, uuid);
   DROP FUNCTION IF EXISTS public.company_work_projection_user_reference_is_valid(uuid, text);
+  DROP FUNCTION IF EXISTS public.invalidate_company_work_projection_verification(uuid);
+  DROP FUNCTION IF EXISTS public.verify_company_work_projection_recovery(uuid);
   DROP TABLE IF EXISTS public.company_work_projection_credentials;
+  DROP TABLE IF EXISTS public.company_work_projection_verifications;
   DROP TABLE IF EXISTS public.company_work_projection_source_events;
+  DROP TABLE IF EXISTS public.company_work_projection_issue_heads;
   DROP TABLE IF EXISTS public.issue_work_projection_versions;
   DROP TABLE IF EXISTS public.company_work_projection_source_witnesses;
   DROP TABLE IF EXISTS public.company_work_projection_revisions;
@@ -326,6 +332,19 @@ describePostgres("0184 company work projection migration", () => {
       expect(witness[0]?.currentIntegrityToken).toBe(counter[0]?.currentIntegrityToken);
       expect(await db.select().from(companyWorkProjectionSourceEvents)
         .where(eq(companyWorkProjectionSourceEvents.companyId, companyId))).toHaveLength(history.length);
+      expect(await db.select().from(companyWorkProjectionIssueHeads)
+        .where(eq(companyWorkProjectionIssueHeads.companyId, companyId))).toHaveLength(
+          new Set(history.map((row) => row.issueId)).size,
+        );
+      expect(await db.select().from(companyWorkProjectionVerifications)
+        .where(eq(companyWorkProjectionVerifications.companyId, companyId))).toMatchObject([
+          {
+            companyId,
+            verifiedRevision: BigInt(history.length),
+            verifiedHistoryCount: BigInt(history.length),
+            verifiedEventCount: BigInt(history.length),
+          },
+        ]);
     }
 
     const futureCompanyId = randomUUID();
@@ -348,6 +367,10 @@ describePostgres("0184 company work projection migration", () => {
         currentRevision: 0n,
         currentIntegrityToken: futureCounter.currentIntegrityToken,
       },
+    ]);
+    expect(await db.select().from(companyWorkProjectionVerifications)
+      .where(eq(companyWorkProjectionVerifications.companyId, futureCompanyId))).toMatchObject([
+      { companyId: futureCompanyId, verifiedRevision: 0n, verifiedHistoryCount: 0n },
     ]);
 
     const projectionToken = `pcwp_v1_${"e".repeat(48)}`;
@@ -374,7 +397,7 @@ describePostgres("0184 company work projection migration", () => {
       .where(eq(companyWorkProjectionCredentials.keyHash, projectionHash))).toHaveLength(1);
   }, 30_000);
 
-  it("keeps source-integrity readiness indexed and below the API latency budget at 100k revisions", async () => {
+  it("bounds first, middle, and final page plans independently of 100k accumulated revisions", async () => {
     const companyId = randomUUID();
     await db.insert(companies).values({
       id: companyId,
@@ -385,7 +408,7 @@ describePostgres("0184 company work projection migration", () => {
       WITH generated AS (
         SELECT
           ${companyId}::uuid AS company_id,
-          gen_random_uuid() AS issue_id,
+          ('00000000-0000-0000-0000-' || lpad((((sequence - 1) % 10000) + 1)::text, 12, '0'))::uuid AS issue_id,
           sequence::bigint AS revision,
           gen_random_uuid() AS integrity_token
         FROM generate_series(1, 100000) AS sequence
@@ -408,6 +431,15 @@ describePostgres("0184 company work projection migration", () => {
       SELECT company_id, revision, integrity_token, recorded_at
       FROM public.issue_work_projection_versions
       WHERE company_id = ${companyId}::uuid
+    `);
+    await db.execute(sql`
+      INSERT INTO public.company_work_projection_issue_heads (
+        company_id, issue_id, first_revision, current_revision, updated_at
+      )
+      SELECT company_id, issue_id, min(revision), max(revision), now()
+      FROM public.issue_work_projection_versions
+      WHERE company_id = ${companyId}::uuid
+      GROUP BY company_id, issue_id
     `);
     await db.execute(sql`
       WITH latest AS (
@@ -439,36 +471,61 @@ describePostgres("0184 company work projection migration", () => {
       FROM latest
       WHERE company_id = ${companyId}::uuid
     `);
+    const verified = await db.execute(sql<{ verified: boolean }>`
+      SELECT public.verify_company_work_projection_recovery(${companyId}::uuid) AS verified
+    `);
+    expect(Array.from(verified)[0]?.verified).toBe(true);
+    await db.execute(sql.raw(
+      "ANALYZE public.company_work_projection_issue_heads, public.issue_work_projection_versions",
+    ));
 
     const client = postgres(connectionString, { max: 1, onnotice: () => undefined });
     try {
-      const explain = await client.unsafe(`
-        EXPLAIN (ANALYZE, FORMAT JSON)
-        SELECT
-          revisions.current_revision,
-          revisions.current_integrity_token,
-          witnesses.current_revision AS witness_revision,
-          witnesses.current_integrity_token AS witness_integrity_token,
-          history.integrity_token AS history_integrity_token,
-          source_event.integrity_token AS source_event_integrity_token
-        FROM public.company_work_projection_revisions AS revisions
-        JOIN public.company_work_projection_source_witnesses AS witnesses
-          ON witnesses.company_id = revisions.company_id
-        LEFT JOIN public.issue_work_projection_versions AS history
-          ON history.company_id = revisions.company_id
-          AND history.revision = revisions.current_revision
-        LEFT JOIN public.company_work_projection_source_events AS source_event
-          ON source_event.company_id = revisions.company_id
-          AND source_event.revision = revisions.current_revision
-        WHERE revisions.company_id = '${companyId}'::uuid
-      `);
-      const plan = explain[0]?.["QUERY PLAN"]?.[0];
-      const serializedPlan = JSON.stringify(plan);
-      expect(serializedPlan).toContain("Index Scan");
-      expect(serializedPlan).not.toContain("Seq Scan");
-      expect(plan?.["Execution Time"]).toBeLessThan(250);
+      for (const afterRevision of [0, 5000, 9900]) {
+        const explain = await client.unsafe(`
+          EXPLAIN (ANALYZE, FORMAT JSON)
+          SELECT head.issue_id, history.revision, history.deleted
+          FROM public.company_work_projection_issue_heads AS head
+          LEFT JOIN LATERAL (
+            SELECT version.revision, version.deleted
+            FROM public.issue_work_projection_versions AS version
+            WHERE version.company_id = head.company_id
+              AND version.issue_id = head.issue_id
+              AND version.revision <= 100000
+            ORDER BY version.revision DESC
+            LIMIT 1
+          ) AS history ON true
+          WHERE head.company_id = '${companyId}'::uuid
+            AND head.first_revision <= 100000
+            AND (head.first_revision, head.issue_id)
+              > (${afterRevision}, '00000000-0000-0000-0000-000000000000'::uuid)
+          ORDER BY head.first_revision, head.issue_id
+          LIMIT 101
+        `);
+        const plan = explain[0]?.["QUERY PLAN"]?.[0];
+        const serializedPlan = JSON.stringify(plan);
+        expect(serializedPlan).toContain("company_work_projection_issue_heads_first_revision_idx");
+        expect(serializedPlan).toContain("issue_work_projection_versions_company_issue_revision_idx");
+        expect(serializedPlan).not.toContain('"Relation Name":"issue_work_projection_versions","Alias":"version","Scan Direction":"Forward","Actual Rows":100000');
+        expect(plan?.["Execution Time"]).toBeLessThan(250);
+
+        const nodes: Array<Record<string, unknown>> = [];
+        const visit = (node: Record<string, unknown>) => {
+          nodes.push(node);
+          for (const child of (node.Plans as Array<Record<string, unknown>> | undefined) ?? []) visit(child);
+        };
+        visit(plan.Plan as Record<string, unknown>);
+        const materializationNodes = nodes.filter((node) => (
+          node["Relation Name"] === "company_work_projection_issue_heads"
+          || node["Relation Name"] === "issue_work_projection_versions"
+        ));
+        expect(materializationNodes.length).toBeGreaterThanOrEqual(2);
+        for (const node of materializationNodes) {
+          expect(Number(node["Actual Rows"] ?? 0), serializedPlan).toBeLessThanOrEqual(101);
+        }
+      }
     } finally {
       await client.end();
     }
-  }, 30_000);
+  }, 45_000);
 });
