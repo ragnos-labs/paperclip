@@ -1035,6 +1035,26 @@ describe("agent issue mutation checkout ownership", () => {
     );
   });
 
+  it("does not let an agent self-approve exportable work projection context", async () => {
+    const app = await createApp(ownerActor());
+    const res = await request(app).patch(`/api/issues/${issueId}`).send({
+      workProjectionContext: {
+        objective: "Agent-authored export approval must be rejected.",
+        objectiveExportApproved: true,
+        intent: {
+          type: "runtime_operation",
+          systemReference: "runtime:synthetic",
+          operation: "restart",
+        },
+        delegation: null,
+      },
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("human board actor");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
   it("stores the authenticated agent run id when creating work products", async () => {
     const app = await createApp(ownerActor());
 

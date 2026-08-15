@@ -2362,6 +2362,7 @@ export {
 } from "./validators/environment-custom-images.js";
 export * from "./validators/skill-policy.js";
 export * from "./validators/company-work-projection.js";
+export * from "./validators/company-work-projection-v2.js";
 export {
   FEATURE_TIERS,
   INSTANCE_FEATURE_CATALOG,

@@ -7608,6 +7608,10 @@ export function issueRoutes(
   router.post("/companies/:companyId/issues", applyCreateIssueStatusDefault, validate(createIssueSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    if (req.body.workProjectionContext !== undefined && req.actor.type !== "board") {
+      res.status(403).json({ error: "Only a human board actor can approve work projection export context" });
+      return;
+    }
     if (isSkillTestScopedActor(req)) {
       res.status(403).json({
         error: "Skill-test run tokens cannot create issues.",
@@ -7870,6 +7874,10 @@ export function issueRoutes(
     const parentId = req.params.id as string;
     const parent = await getAccessibleResource(req, res, svc.getById(parentId), "Parent issue not found");
     if (!parent) return;
+    if (req.body.workProjectionContext !== undefined && req.actor.type !== "board") {
+      res.status(403).json({ error: "Only a human board actor can approve work projection export context" });
+      return;
+    }
     if (!isTaskBridgeKeyActor(req) && !(await assertIssueWriteInfluenceAllowed(req, res, parent))) return;
     if (!(await assertTaskWatchdogCreateIssueAllowed(req, res, parent.companyId, parent))) return;
     if (await assertLowTrustControlPlaneDenied(req, res, parent.companyId, parent)) return;
@@ -8421,6 +8429,10 @@ export function issueRoutes(
     const id = req.params.id as string;
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Issue not found");
     if (!existing) return;
+    if (req.body.workProjectionContext !== undefined && req.actor.type !== "board") {
+      res.status(403).json({ error: "Only a human board actor can approve work projection export context" });
+      return;
+    }
     assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(req.body));
     if (req.actor.type === "agent" && req.body.onBehalfOfUserId != null) {
       await auditAgentIssueCommentAttributionSpoof({
