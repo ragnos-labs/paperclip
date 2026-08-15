@@ -8374,6 +8374,15 @@ export function issueRoutes(
     const sourceIssueId = req.params.id as string;
     const sourceIssue = await getAccessibleResource(req, res, svc.getById(sourceIssueId), "Issue not found");
     if (!sourceIssue) return;
+    if (
+      req.actor.type !== "board"
+      && req.body.children.some((child: { workProjectionContext?: unknown }) => (
+        child.workProjectionContext !== undefined
+      ))
+    ) {
+      res.status(403).json({ error: "Only a human board actor can approve work projection export context" });
+      return;
+    }
     if (!(await assertAgentIssueMutationAllowed(req, res, sourceIssue))) return;
 
     const requestedChildren = [];
