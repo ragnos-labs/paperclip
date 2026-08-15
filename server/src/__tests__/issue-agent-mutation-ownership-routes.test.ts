@@ -1485,6 +1485,35 @@ describe("agent issue mutation checkout ownership", () => {
     );
   });
 
+  it("does not let an agent self-approve exportable context through accepted-plan decomposition", async () => {
+    const app = await createApp(ownerActor());
+
+    const res = await request(app)
+      .post(`/api/issues/${issueId}/accepted-plan-decompositions`)
+      .send({
+        acceptedPlanRevisionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        children: [
+          {
+            title: "Agent-authored export approval must be rejected",
+            workProjectionContext: {
+              objective: "Export this child to the runtime controller.",
+              objectiveExportApproved: true,
+              intent: {
+                type: "runtime_operation",
+                systemReference: "runtime:synthetic",
+                operation: "restart",
+              },
+              delegation: null,
+            },
+          },
+        ],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toContain("human board actor");
+    expect(mockIssueService.decomposeAcceptedPlan).not.toHaveBeenCalled();
+  });
+
   it("allows board users to set explicit cheap issue assignee profile overrides", async () => {
     const app = await createApp(boardActor());
 
