@@ -3,6 +3,8 @@ import { z } from "zod";
 import {
   COMPANY_WORK_PROJECTION_API_VERSION,
   COMPANY_WORK_PROJECTION_SCHEMA_VERSION,
+  COMPANY_WORK_PROJECTION_V2_API_VERSION,
+  COMPANY_WORK_PROJECTION_V2_SCHEMA_VERSION,
 } from "@paperclipai/shared";
 import { resolvePaperclipInstanceId } from "../home-paths.js";
 import { HttpError } from "../errors.js";
@@ -21,6 +23,13 @@ const cursorPayloadSchema = z.object({
 const MAX_CURSOR_LIFETIME_MS = 5 * 60 * 1000;
 
 export type CompanyWorkProjectionCursor = z.infer<typeof cursorPayloadSchema>;
+
+const cursorPayloadV2Schema = cursorPayloadSchema.extend({
+  apiVersion: z.literal(COMPANY_WORK_PROJECTION_V2_API_VERSION),
+  schemaVersion: z.literal(COMPANY_WORK_PROJECTION_V2_SCHEMA_VERSION),
+}).strict();
+
+export type CompanyWorkProjectionV2Cursor = z.infer<typeof cursorPayloadV2Schema>;
 
 function cursorError(message: string, code = "WORK_PROJECTION_MALFORMED", status = 400): never {
   throw new HttpError(status, message, { code });
@@ -48,8 +57,23 @@ function signingKey(companyId: string, secret: string | null): Buffer {
     .digest();
 }
 
+function signingKeyV2(companyId: string, secret: string | null): Buffer {
+  if (!secret) {
+    throw new HttpError(503, "Work projection signing key is unavailable", {
+      code: "WORK_PROJECTION_UNAVAILABLE",
+    });
+  }
+  return createHmac("sha256", secret)
+    .update(`company-work-projection-cursor:v2:${resolvePaperclipInstanceId()}:${companyId}`)
+    .digest();
+}
+
 function signature(payload: string, companyId: string, secret: string | null): string {
   return createHmac("sha256", signingKey(companyId, secret)).update(payload).digest("base64url");
+}
+
+function signatureV2(payload: string, companyId: string, secret: string | null): string {
+  return createHmac("sha256", signingKeyV2(companyId, secret)).update(payload).digest("base64url");
 }
 
 function signaturesMatch(leftValue: string, rightValue: string): boolean {
@@ -63,6 +87,13 @@ export function assertCompanyWorkProjectionCursorSigningReady(
   secretOverride?: string,
 ): void {
   signingKey(companyId, secretOverride ?? masterSecret());
+}
+
+export function assertCompanyWorkProjectionV2CursorSigningReady(
+  companyId: string,
+  secretOverride?: string,
+): void {
+  signingKeyV2(companyId, secretOverride ?? masterSecret());
 }
 
 export function encodeCompanyWorkProjectionCursor(
@@ -115,6 +146,69 @@ export function decodeCompanyWorkProjectionCursor(
 
   if (parsed.data.companyId !== expectedCompanyId) {
     // Do not disclose whether the signed cursor belongs to another company.
+    cursorError("Malformed work projection cursor");
+  }
+
+  const issuedAt = new Date(parsed.data.issuedAt).getTime();
+  const expiresAt = new Date(parsed.data.expiresAt).getTime();
+  if (expiresAt <= issuedAt || expiresAt - issuedAt > MAX_CURSOR_LIFETIME_MS) {
+    cursorError("Malformed work projection cursor lifetime");
+  }
+  if (expiresAt <= now.getTime()) {
+    cursorError("Work projection snapshot expired", "WORK_PROJECTION_SNAPSHOT_EXPIRED", 410);
+  }
+  return parsed.data;
+}
+
+export function encodeCompanyWorkProjectionV2Cursor(
+  value: CompanyWorkProjectionV2Cursor,
+  secretOverride?: string,
+): string {
+  const payload = Buffer.from(JSON.stringify(cursorPayloadV2Schema.parse(value)), "utf8").toString("base64url");
+  return `${payload}.${signatureV2(payload, value.companyId, secretOverride ?? masterSecret())}`;
+}
+
+export function decodeCompanyWorkProjectionV2Cursor(
+  token: string,
+  expectedCompanyId: string,
+  now: Date,
+  secretOverride?: string,
+  previousSecretOverride?: string,
+): CompanyWorkProjectionV2Cursor {
+  const parts = token.split(".");
+  if (parts.length !== 2) cursorError("Malformed work projection cursor");
+  const [payload, suppliedSignature] = parts;
+
+  let unknownValue: unknown;
+  try {
+    unknownValue = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    cursorError("Malformed work projection cursor");
+  }
+  const currentSignature = signatureV2(payload, expectedCompanyId, secretOverride ?? masterSecret());
+  const previousSecret = previousSecretOverride ?? previousMasterSecret();
+  const matchesCurrent = signaturesMatch(suppliedSignature, currentSignature);
+  const matchesPrevious = !matchesCurrent && previousSecret
+    ? signaturesMatch(suppliedSignature, signatureV2(payload, expectedCompanyId, previousSecret))
+    : false;
+  if (!matchesCurrent && !matchesPrevious) {
+    cursorError("Malformed work projection cursor");
+  }
+
+  const parsed = cursorPayloadV2Schema.safeParse(unknownValue);
+  if (!parsed.success) {
+    const raw = unknownValue as Record<string, unknown> | null;
+    if (
+      raw &&
+      (raw.apiVersion !== COMPANY_WORK_PROJECTION_V2_API_VERSION ||
+        raw.schemaVersion !== COMPANY_WORK_PROJECTION_V2_SCHEMA_VERSION)
+    ) {
+      cursorError("Incompatible work projection cursor version", "WORK_PROJECTION_INCOMPATIBLE", 409);
+    }
+    cursorError("Malformed work projection cursor");
+  }
+
+  if (parsed.data.companyId !== expectedCompanyId) {
     cursorError("Malformed work projection cursor");
   }
 

@@ -31,6 +31,7 @@ import { errorHandler } from "../middleware/error-handler.js";
 import { companyWorkProjectionRoutes } from "../routes/company-work-projection.js";
 import { encodeCompanyWorkProjectionCursor } from "../services/company-work-projection-cursor.js";
 import { companyWorkProjectionCredentialService } from "../services/company-work-projection-credentials.js";
+import type { IssueWorkProjectionContext } from "@paperclipai/shared";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -175,6 +176,7 @@ describePostgres("company work projection", () => {
     name: string,
     token: string,
     credentialId = randomUUID(),
+    tokenVersion: 1 | 2 = 1,
   ) {
     const audit = await db.insert(activityLog).values({
       companyId,
@@ -189,7 +191,7 @@ describePostgres("company work projection", () => {
       companyId,
       name,
       keyHash: createHash("sha256").update(token).digest("hex"),
-      tokenVersion: 1,
+      tokenVersion,
       creationActivityId: audit.id,
     });
     return credentialId;
@@ -197,7 +199,12 @@ describePostgres("company work projection", () => {
 
   async function addIssue(
     companyId: string,
-    input: { priority?: "critical" | "high" | "medium" | "low"; assigneeAgentId?: string | null } = {},
+    input: {
+      priority?: "critical" | "high" | "medium" | "low";
+      assigneeAgentId?: string | null;
+      assigneeUserId?: string | null;
+      workProjectionContext?: IssueWorkProjectionContext | null;
+    } = {},
   ) {
     const id = randomUUID();
     await db.insert(issues).values({
@@ -208,6 +215,8 @@ describePostgres("company work projection", () => {
       priority: input.priority ?? "medium",
       status: "todo",
       assigneeAgentId: input.assigneeAgentId ?? null,
+      assigneeUserId: input.assigneeUserId ?? null,
+      workProjectionContext: input.workProjectionContext ?? null,
     });
     return id;
   }
@@ -268,6 +277,12 @@ describePostgres("company work projection", () => {
   async function getProjection(token: string, companyId: string, query = "") {
     return request(app())
       .get(`/api/v1/companies/${companyId}/work-projection${query}`)
+      .set("Authorization", `Bearer ${token}`);
+  }
+
+  async function getProjectionV2(token: string, companyId: string, query = "") {
+    return request(app())
+      .get(`/api/v2/companies/${companyId}/work-projection${query}`)
       .set("Authorization", `Bearer ${token}`);
   }
 
@@ -380,6 +395,184 @@ describePostgres("company work projection", () => {
       .set("Authorization", `Bearer ${seeded.token}`)
       .set("If-None-Match", 'W/"unrelated"');
     expect(nonMatch.status).toBe(200);
+  });
+
+  it("emits closed v2 packet context while keeping v1 and credential authority isolated", async () => {
+    const seeded = await seed();
+    const owner = await boardMember(seeded.companyId, "owner");
+    const createdV2Credential = await request(managementApp(owner))
+      .post(`/api/v2/companies/${seeded.companyId}/work-projection-credentials`)
+      .send({ name: "projection-reader-v2" });
+    expect(createdV2Credential.status).toBe(201);
+    const v2CredentialId = createdV2Credential.body.id as string;
+    const v2Token = createdV2Credential.body.token as string;
+    expect(v2Token).toMatch(/^pcwp_v2_[a-f0-9]{48}$/);
+    const humanOwner = await boardMember(seeded.companyId, "operator");
+    const agentAuthorizer = await boardMember(seeded.companyId, "operator");
+    const intent = {
+      type: "repository_change" as const,
+      repository: "github:synthetic/example",
+      baseRevision: "main",
+      allowedPaths: ["src/**"],
+      prohibitedPaths: ["secrets/**"],
+    };
+    const approvedHumanContext = {
+      objective: "Implement the approved human-owned change.",
+      objectiveExportApproved: true as const,
+      intent,
+      delegation: null,
+    } satisfies IssueWorkProjectionContext;
+    const approvedAgentContext = {
+      objective: "Implement the approved delegated change.",
+      objectiveExportApproved: true as const,
+      intent,
+      delegation: {
+        onBehalfOf: { type: "human" as const, id: agentAuthorizer.userId },
+        grantReference: "paperclip:delegation:synthetic-v2",
+        grantDigest: `sha256:${"d".repeat(64)}`,
+        grantedAt: "2026-08-15T12:00:00.000Z",
+      },
+    } satisfies IssueWorkProjectionContext;
+
+    const unassignedId = await addIssue(seeded.companyId);
+    const restrictedId = await addIssue(seeded.companyId, { assigneeAgentId: seeded.agentId });
+    const unsupportedId = await addIssue(seeded.companyId, {
+      assigneeAgentId: seeded.agentId,
+      workProjectionContext: {
+        objective: "Approved objective without a supported target.",
+        objectiveExportApproved: true,
+        intent: null,
+        delegation: null,
+      },
+    });
+    const missingDelegationId = await addIssue(seeded.companyId, {
+      assigneeAgentId: seeded.agentId,
+      workProjectionContext: { ...approvedAgentContext, delegation: null },
+    });
+    const humanReadyId = await addIssue(seeded.companyId, {
+      assigneeUserId: humanOwner.userId,
+      workProjectionContext: approvedHumanContext,
+    });
+    const agentReadyId = await addIssue(seeded.companyId, {
+      assigneeAgentId: seeded.agentId,
+      workProjectionContext: approvedAgentContext,
+    });
+
+    expect((await getProjectionV2(seeded.token, seeded.companyId)).status).toBe(403);
+    expect((await getProjection(v2Token, seeded.companyId)).status).toBe(403);
+
+    const response = await getProjectionV2(v2Token, seeded.companyId);
+    expect(response.status).toBe(200);
+    const byId = new Map(response.body.items.map((item: { id: string }) => [item.id, item]));
+    expect(byId.get(unassignedId)?.packetContext).toEqual({
+      availability: "unavailable",
+      reason: "unassigned",
+    });
+    expect(byId.get(restrictedId)?.packetContext).toEqual({
+      availability: "unavailable",
+      reason: "restricted_objective",
+    });
+    expect(byId.get(unsupportedId)?.packetContext).toEqual({
+      availability: "unavailable",
+      reason: "unsupported_target",
+    });
+    expect(byId.get(missingDelegationId)?.packetContext).toEqual({
+      availability: "unavailable",
+      reason: "missing_delegation",
+    });
+    expect(byId.get(humanReadyId)?.packetContext).toMatchObject({
+      availability: "ready",
+      actor: { type: "human", id: humanOwner.userId },
+      delegation: null,
+      objective: approvedHumanContext.objective,
+    });
+    const readyAgent = byId.get(agentReadyId)?.packetContext;
+    expect(readyAgent).toMatchObject({
+      availability: "ready",
+      actor: { type: "agent", id: seeded.agentId },
+      delegation: approvedAgentContext.delegation,
+      objective: approvedAgentContext.objective,
+      sourceReceipt: {
+        contractVersion: "paperclip.company-work-projection/v2",
+        revision: byId.get(agentReadyId)?.revision,
+      },
+    });
+    expect(readyAgent.sourceReceipt.reference).toContain(`issue:${agentReadyId}:revision:`);
+    expect(readyAgent.sourceReceipt.digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+
+    const repeated = await getProjectionV2(v2Token, seeded.companyId);
+    expect(repeated.status).toBe(200);
+    expect(repeated.body.etag).toBe(response.body.etag);
+    expect(repeated.body.items).toEqual(response.body.items);
+
+    const v1 = await getProjection(seeded.token, seeded.companyId);
+    expect(v1.status).toBe(200);
+    const v1AgentItem = v1.body.items.find((item: { id: string }) => item.id === agentReadyId);
+    expect(Object.keys(v1AgentItem).sort()).toEqual([
+      "evidence",
+      "id",
+      "identifier",
+      "owner",
+      "planningState",
+      "priority",
+      "projectId",
+      "revision",
+      "timestamps",
+    ]);
+    expect(JSON.stringify(v1.body)).not.toContain(approvedAgentContext.objective);
+
+    const v1CredentialList = await request(managementApp(owner))
+      .get(`/api/v1/companies/${seeded.companyId}/work-projection-credentials`);
+    const v2CredentialList = await request(managementApp(owner))
+      .get(`/api/v2/companies/${seeded.companyId}/work-projection-credentials`);
+    expect(v1CredentialList.body.map((entry: { tokenVersion: number }) => entry.tokenVersion)).toEqual([1]);
+    expect(v2CredentialList.body.map((entry: { tokenVersion: number }) => entry.tokenVersion)).toEqual([2]);
+
+    await db.update(companyMemberships)
+      .set({ status: "archived", updatedAt: new Date() })
+      .where(and(
+        eq(companyMemberships.companyId, seeded.companyId),
+        eq(companyMemberships.principalId, agentAuthorizer.userId),
+      ));
+    const invalidDelegation = await getProjectionV2(v2Token, seeded.companyId);
+    expect(invalidDelegation.status).toBe(409);
+    expect(invalidDelegation.body.code).toBe("WORK_PROJECTION_INCOMPATIBLE");
+
+    const revoked = await request(managementApp(owner))
+      .delete(`/api/v2/companies/${seeded.companyId}/work-projection-credentials/${v2CredentialId}`);
+    expect(revoked.status).toBe(200);
+    expect(revoked.body).toMatchObject({ id: v2CredentialId, tokenVersion: 2 });
+    expect((await getProjectionV2(v2Token, seeded.companyId)).status).toBe(401);
+  });
+
+  it("fails v2 closed on malformed stored context without changing the v1 shape", async () => {
+    const seeded = await seed();
+    const v2Token = `pcwp_v2_${randomUUID().replaceAll("-", "")}${randomUUID().replaceAll("-", "").slice(0, 16)}`;
+    await insertProjectionCredential(seeded.companyId, "projection-reader-v2", v2Token, randomUUID(), 2);
+    const issueId = await addIssue(seeded.companyId, { assigneeAgentId: seeded.agentId });
+    await db.execute(sql`
+      UPDATE public.issues
+      SET work_projection_context = ${JSON.stringify({
+        objective: "Synthetic malformed source context",
+        objectiveExportApproved: true,
+        intent: {
+          type: "runtime_operation",
+          systemReference: "runtime:synthetic",
+          operation: "restart",
+          unexpected: true,
+        },
+        delegation: null,
+      })}::jsonb
+      WHERE id = ${issueId}::uuid
+    `);
+
+    const incompatible = await getProjectionV2(v2Token, seeded.companyId);
+    expect(incompatible.status).toBe(409);
+    expect(incompatible.body.code).toBe("WORK_PROJECTION_INCOMPATIBLE");
+
+    const v1 = await getProjection(seeded.token, seeded.companyId);
+    expect(v1.status).toBe(200);
+    expect(v1.body.items[0]).not.toHaveProperty("packetContext");
   });
 
   it("keeps current, malformed, mixed-version, and rolled-back credential handling fail closed", async () => {
@@ -1041,6 +1234,7 @@ describePostgres("company work projection", () => {
         type: "none",
         companyId,
         credentialId: randomUUID(),
+        credentialTokenVersion: 1,
         source: "none",
       };
       next();

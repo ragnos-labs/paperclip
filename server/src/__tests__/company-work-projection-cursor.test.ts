@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { HttpError } from "../errors.js";
 import {
   decodeCompanyWorkProjectionCursor,
+  decodeCompanyWorkProjectionV2Cursor,
   encodeCompanyWorkProjectionCursor,
+  encodeCompanyWorkProjectionV2Cursor,
 } from "../services/company-work-projection-cursor.js";
 import { resolvePaperclipInstanceId } from "../home-paths.js";
 
@@ -133,6 +135,38 @@ describe("company work projection cursor", () => {
         companyId,
         new Date("2026-08-14T20:01:00Z"),
         newSecret,
+      ),
+      400,
+      "WORK_PROJECTION_MALFORMED",
+    );
+  });
+
+  it("uses a separate deterministic v2 signing domain", () => {
+    const companyId = randomUUID();
+    const value = {
+      ...cursor(companyId),
+      apiVersion: "paperclip.company-work-projection/v2" as const,
+      schemaVersion: 2 as const,
+    };
+    const token = encodeCompanyWorkProjectionV2Cursor(value, secret);
+    expect(decodeCompanyWorkProjectionV2Cursor(
+      token,
+      companyId,
+      new Date("2026-08-14T20:01:00Z"),
+      secret,
+    )).toEqual(value);
+    expect(encodeCompanyWorkProjectionV2Cursor(value, secret)).toBe(token);
+    expect(token).not.toBe(encodeCompanyWorkProjectionCursor({
+      ...value,
+      apiVersion: "paperclip.company-work-projection/v1",
+      schemaVersion: 1,
+    }, secret));
+    expectCode(
+      () => decodeCompanyWorkProjectionCursor(
+        token,
+        companyId,
+        new Date("2026-08-14T20:01:00Z"),
+        secret,
       ),
       400,
       "WORK_PROJECTION_MALFORMED",

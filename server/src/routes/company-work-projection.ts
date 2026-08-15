@@ -5,12 +5,16 @@ import {
   companyWorkProjectionQuerySchema,
   createCompanyWorkProjectionCredentialSchema,
   type CompanyWorkProjectionResponse,
+  type CompanyWorkProjectionV2Response,
 } from "@paperclipai/shared";
 import { eq } from "drizzle-orm";
 import { HttpError, forbidden, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { companyWorkProjectionService } from "../services/company-work-projection.js";
-import { companyWorkProjectionCredentialService } from "../services/company-work-projection-credentials.js";
+import {
+  companyWorkProjectionCredentialService,
+  companyWorkProjectionV2CredentialService,
+} from "../services/company-work-projection-credentials.js";
 import { assertBoard, assertCompanyAccess, hasCompanyAccess } from "./authz.js";
 
 function splitEntityTags(header: string): string[] {
@@ -58,12 +62,20 @@ export function companyWorkProjectionRoutes(
       cursor?: string;
       pageSize?: number;
     }) => Promise<CompanyWorkProjectionResponse>;
+    readSnapshotV2?: (input: {
+      companyId: string;
+      credentialId: string;
+      cursor?: string;
+      pageSize?: number;
+    }) => Promise<CompanyWorkProjectionV2Response>;
   } = {},
 ) {
   const router = Router();
   const service = companyWorkProjectionService(db);
   const credentials = companyWorkProjectionCredentialService(db);
+  const credentialsV2 = companyWorkProjectionV2CredentialService(db);
   const readSnapshot = options.readSnapshot ?? service.readSnapshot;
+  const readSnapshotV2 = options.readSnapshotV2 ?? service.readSnapshotV2;
 
   router.get("/v1/companies/:companyId/work-projection", async (req, res, next) => {
     const companyId = req.params.companyId as string;
@@ -76,7 +88,8 @@ export function companyWorkProjectionRoutes(
     if (
       req.actor.type !== "none" ||
       req.actor.companyId !== companyId ||
-      !req.actor.credentialId
+      !req.actor.credentialId ||
+      req.actor.credentialTokenVersion !== 1
     ) {
       next(forbidden("Work projection credential cannot access this company", {
         code: "WORK_PROJECTION_FORBIDDEN",
@@ -94,6 +107,66 @@ export function companyWorkProjectionRoutes(
 
     try {
       const result = await readSnapshot({
+        companyId,
+        credentialId: req.actor.credentialId,
+        cursor: query.data.cursor,
+        pageSize: query.data.pageSize,
+      });
+      res.set({
+        ETag: result.etag,
+        "Cache-Control": "private, no-cache",
+        Vary: "Authorization",
+        "X-Paperclip-Api-Version": result.apiVersion,
+        "X-Paperclip-Schema-Version": String(result.schemaVersion),
+        "X-Paperclip-Snapshot-Revision": result.snapshot.revision,
+      });
+      if (ifNoneMatchMatches(req.header("if-none-match"), result.etag)) {
+        res.status(304).end();
+        return;
+      }
+      res.status(200).json(result);
+    } catch (error) {
+      if (error instanceof HttpError) {
+        if (error.status === 429) res.set("Retry-After", "1");
+        next(error);
+      } else {
+        next(new HttpError(503, "Work projection is unavailable", {
+          code: "WORK_PROJECTION_UNAVAILABLE",
+        }));
+      }
+    }
+  });
+
+  router.get("/v2/companies/:companyId/work-projection", async (req, res, next) => {
+    const companyId = req.params.companyId as string;
+    if (req.actor.type === "none" && !req.actor.credentialId) {
+      next(new HttpError(401, "Work projection credential required", {
+        code: "WORK_PROJECTION_UNAUTHORIZED",
+      }));
+      return;
+    }
+    if (
+      req.actor.type !== "none" ||
+      req.actor.companyId !== companyId ||
+      !req.actor.credentialId ||
+      req.actor.credentialTokenVersion !== 2
+    ) {
+      next(forbidden("Work projection credential cannot access this company", {
+        code: "WORK_PROJECTION_FORBIDDEN",
+      }));
+      return;
+    }
+
+    const query = companyWorkProjectionQuerySchema.safeParse(req.query);
+    if (!query.success) {
+      next(new HttpError(400, "Malformed work projection request", {
+        code: "WORK_PROJECTION_MALFORMED",
+      }));
+      return;
+    }
+
+    try {
+      const result = await readSnapshotV2({
         companyId,
         credentialId: req.actor.credentialId,
         cursor: query.data.cursor,
@@ -159,6 +232,35 @@ export function companyWorkProjectionRoutes(
     const companyId = req.params.companyId as string;
     const actorId = await requireCompany(req, companyId);
     const credential = await credentials.revoke(
+      companyId,
+      req.params.credentialId as string,
+      actorId,
+    );
+    if (!credential) throw notFound("Work projection credential not found");
+    res.json(credential);
+  });
+
+  router.get("/v2/companies/:companyId/work-projection-credentials", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const actorId = await requireCompany(req, companyId);
+    res.json(await credentialsV2.list(companyId, actorId));
+  });
+
+  router.post(
+    "/v2/companies/:companyId/work-projection-credentials",
+    validate(createCompanyWorkProjectionCredentialSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const actorId = await requireCompany(req, companyId);
+      const credential = await credentialsV2.create(companyId, req.body.name, actorId);
+      res.status(201).json(credential);
+    },
+  );
+
+  router.delete("/v2/companies/:companyId/work-projection-credentials/:credentialId", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    const actorId = await requireCompany(req, companyId);
+    const credential = await credentialsV2.revoke(
       companyId,
       req.params.credentialId as string,
       actorId,
