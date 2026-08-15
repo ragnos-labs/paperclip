@@ -40,6 +40,8 @@ export { issues } from "./issues.js";
 export {
   companyWorkProjectionCredentials,
   companyWorkProjectionRevisions,
+  companyWorkProjectionSourceEvents,
+  companyWorkProjectionSourceWitnesses,
   issueWorkProjectionVersions,
 } from "./company_work_projection.js";
 export { issueWatchdogs } from "./issue_watchdogs.js";

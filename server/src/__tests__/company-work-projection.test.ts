@@ -12,10 +12,13 @@ import {
   companyMemberships,
   companyWorkProjectionCredentials,
   companyWorkProjectionRevisions,
+  companyWorkProjectionSourceEvents,
+  companyWorkProjectionSourceWitnesses,
   createDb,
   issueRecoveryActions,
   issues,
   issueWorkProjectionVersions,
+  principalPermissionGrants,
   projects,
 } from "@paperclipai/db";
 import { actorMiddleware } from "../middleware/auth.js";
@@ -25,6 +28,8 @@ import { companyWorkProjectionCredentialGuard } from "../middleware/company-work
 import { errorHandler } from "../middleware/error-handler.js";
 import { companyWorkProjectionRoutes } from "../routes/company-work-projection.js";
 import { encodeCompanyWorkProjectionCursor } from "../services/company-work-projection-cursor.js";
+import { companyWorkProjectionCredentialService } from "../services/company-work-projection-credentials.js";
+import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -70,9 +75,10 @@ describePostgres("company work projection", () => {
   afterEach(async () => {
     await db.delete(issueRecoveryActions);
     await db.delete(issues);
-    await db.delete(activityLog);
     await db.delete(companyWorkProjectionCredentials);
+    await db.delete(activityLog);
     await db.delete(agentApiKeys);
+    await db.delete(principalPermissionGrants);
     await db.delete(companyMemberships);
     await db.delete(projects);
     await db.delete(agents);
@@ -85,15 +91,56 @@ describePostgres("company work projection", () => {
     await tempDb?.cleanup();
   });
 
-  function app(maxConcurrentReadsPerCredential = 4) {
+  function app() {
     const instance = express();
     instance.locals.paperclipDb = db;
     instance.use(express.json());
     instance.use(actorMiddleware(db, { deploymentMode: "authenticated", resolveSession: async () => null }));
     instance.use(companyWorkProjectionCredentialGuard());
-    instance.use("/api", companyWorkProjectionRoutes(db, { maxConcurrentReadsPerCredential }));
+    instance.use("/api", companyWorkProjectionRoutes(db));
     instance.use(errorHandler);
     return instance;
+  }
+
+  function managementApp(actor: Express.Request["actor"]) {
+    const instance = express();
+    instance.use(express.json());
+    instance.use((req, _res, next) => {
+      req.actor = actor;
+      next();
+    });
+    instance.use(companyWorkProjectionCredentialGuard());
+    instance.use("/api", companyWorkProjectionRoutes(db));
+    instance.use(errorHandler);
+    return instance;
+  }
+
+  async function boardMember(
+    companyId: string,
+    role: "owner" | "admin" | "operator" | "viewer",
+  ) {
+    const userId = `synthetic-${role}-${randomUUID()}`;
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: userId,
+      status: "active",
+      membershipRole: role,
+    });
+    await ensureHumanRoleDefaultGrants(db, {
+      companyId,
+      principalId: userId,
+      membershipRole: role,
+      grantedByUserId: null,
+    });
+    return {
+      type: "board" as const,
+      userId,
+      companyIds: [companyId],
+      memberships: [{ companyId, membershipRole: role, status: "active" }],
+      isInstanceAdmin: false,
+      source: "session" as const,
+    };
   }
 
   async function seed() {
@@ -117,14 +164,33 @@ describePostgres("company work projection", () => {
       runtimeConfig: {},
       permissions: {},
     });
+    await insertProjectionCredential(companyId, "controller-read", token, credentialId);
+    return { companyId, otherCompanyId, agentId, credentialId, token };
+  }
+
+  async function insertProjectionCredential(
+    companyId: string,
+    name: string,
+    token: string,
+    credentialId = randomUUID(),
+  ) {
+    const audit = await db.insert(activityLog).values({
+      companyId,
+      actorType: "user",
+      actorId: "synthetic-owner",
+      action: "company_work_projection.credential_created",
+      entityType: "company_work_projection_credential",
+      entityId: credentialId,
+    }).returning({ id: activityLog.id }).then((rows) => rows[0]);
     await db.insert(companyWorkProjectionCredentials).values({
       id: credentialId,
       companyId,
-      name: "controller-read",
+      name,
       keyHash: createHash("sha256").update(token).digest("hex"),
       tokenVersion: 1,
+      creationActivityId: audit.id,
     });
-    return { companyId, otherCompanyId, agentId, credentialId, token };
+    return credentialId;
   }
 
   async function addIssue(
@@ -142,6 +208,52 @@ describePostgres("company work projection", () => {
       assigneeAgentId: input.assigneeAgentId ?? null,
     });
     return id;
+  }
+
+  async function snapshotProjectionMaterialization(companyId: string) {
+    const counter = await db.select().from(companyWorkProjectionRevisions)
+      .where(eq(companyWorkProjectionRevisions.companyId, companyId))
+      .then((rows) => rows[0]);
+    if (!counter) throw new Error("synthetic projection counter missing");
+    return {
+      counter,
+      history: await db.select().from(issueWorkProjectionVersions)
+        .where(eq(issueWorkProjectionVersions.companyId, companyId)),
+      sourceEvents: await db.select().from(companyWorkProjectionSourceEvents)
+        .where(eq(companyWorkProjectionSourceEvents.companyId, companyId)),
+    };
+  }
+
+  async function replaceProjectionMaterialization(
+    companyId: string,
+    state: Awaited<ReturnType<typeof snapshotProjectionMaterialization>>,
+  ) {
+    await db.execute(sql.raw(
+      "ALTER TABLE public.issue_work_projection_versions DISABLE TRIGGER USER; "
+      + "ALTER TABLE public.company_work_projection_source_events DISABLE TRIGGER USER",
+    ));
+    try {
+      await db.transaction(async (tx) => {
+        await tx.delete(companyWorkProjectionSourceEvents)
+          .where(eq(companyWorkProjectionSourceEvents.companyId, companyId));
+        await tx.delete(issueWorkProjectionVersions)
+          .where(eq(issueWorkProjectionVersions.companyId, companyId));
+        if (state.history.length > 0) await tx.insert(issueWorkProjectionVersions).values(state.history);
+        if (state.sourceEvents.length > 0) {
+          await tx.insert(companyWorkProjectionSourceEvents).values(state.sourceEvents);
+        }
+        await tx.update(companyWorkProjectionRevisions).set({
+          currentRevision: state.counter.currentRevision,
+          currentIntegrityToken: state.counter.currentIntegrityToken,
+          updatedAt: state.counter.updatedAt,
+        }).where(eq(companyWorkProjectionRevisions.companyId, companyId));
+      });
+    } finally {
+      await db.execute(sql.raw(
+        "ALTER TABLE public.issue_work_projection_versions ENABLE TRIGGER USER; "
+        + "ALTER TABLE public.company_work_projection_source_events ENABLE TRIGGER USER",
+      ));
+    }
   }
 
   async function getProjection(token: string, companyId: string, query = "") {
@@ -172,7 +284,9 @@ describePostgres("company work projection", () => {
       activity: await db.select().from(activityLog),
       recovery: await db.select().from(issueRecoveryActions),
       revisions: await db.select().from(companyWorkProjectionRevisions),
+      witnesses: await db.select().from(companyWorkProjectionSourceWitnesses),
       versions: await db.select().from(issueWorkProjectionVersions),
+      sourceEvents: await db.select().from(companyWorkProjectionSourceEvents),
     };
     const response = await getProjection(seeded.token, seeded.companyId);
     expect(response.status).toBe(200);
@@ -193,7 +307,9 @@ describePostgres("company work projection", () => {
     expect(await db.select().from(activityLog)).toEqual(before.activity);
     expect(await db.select().from(issueRecoveryActions)).toEqual(before.recovery);
     expect(await db.select().from(companyWorkProjectionRevisions)).toEqual(before.revisions);
+    expect(await db.select().from(companyWorkProjectionSourceWitnesses)).toEqual(before.witnesses);
     expect(await db.select().from(issueWorkProjectionVersions)).toEqual(before.versions);
+    expect(await db.select().from(companyWorkProjectionSourceEvents)).toEqual(before.sourceEvents);
 
     const conditional = await request(app())
       .get(`/api/v1/companies/${seeded.companyId}/work-projection`)
@@ -227,12 +343,22 @@ describePostgres("company work projection", () => {
 
     const malformedToken = `pcwp_v1_${"b".repeat(48)}`;
     const sharedHash = createHash("sha256").update(malformedToken).digest("hex");
-    await db.insert(companyWorkProjectionCredentials).values({
+    const malformedAudit = await db.insert(activityLog).values({
       companyId: seeded.companyId,
-      name: "malformed-version",
-      keyHash: sharedHash,
-      tokenVersion: 999,
-    });
+      actorType: "user",
+      actorId: "synthetic-owner",
+      action: "company_work_projection.credential_created",
+      entityType: "company_work_projection_credential",
+      entityId: randomUUID(),
+    }).returning({ id: activityLog.id }).then((rows) => rows[0]);
+    await db.execute(sql`
+      INSERT INTO public.company_work_projection_credentials (
+        company_id, name, key_hash, token_version, creation_activity_id
+      ) VALUES (
+        ${seeded.companyId}::uuid, 'malformed-version', ${sharedHash}, 999,
+        ${malformedAudit.id}::uuid
+      )
+    `).catch(() => undefined);
     await db.insert(agentApiKeys).values({
       agentId: seeded.agentId,
       companyId: seeded.companyId,
@@ -249,10 +375,129 @@ describePostgres("company work projection", () => {
     expect(mixedCollision[0]?.lastUsedAt).toBeNull();
     expect(await legacyAgentKeyLookup(seeded.token)).toEqual([]);
 
-    await db.update(companyWorkProjectionCredentials)
-      .set({ revokedAt: new Date() })
-      .where(eq(companyWorkProjectionCredentials.id, seeded.credentialId));
+    await companyWorkProjectionCredentialService(db).revoke(
+      seeded.companyId,
+      seeded.credentialId,
+      "synthetic-owner",
+    );
     expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(401);
+  });
+
+  it("limits credential lifecycle to owner/admin and keeps mutation plus audit atomic and idempotent", async () => {
+    const seeded = await seed();
+    const owner = await boardMember(seeded.companyId, "owner");
+    const admin = await boardMember(seeded.companyId, "admin");
+    const operator = await boardMember(seeded.companyId, "operator");
+
+    const denied = await request(managementApp(operator))
+      .post(`/api/v1/companies/${seeded.companyId}/work-projection-credentials`)
+      .send({ name: "operator-must-not-create" });
+    expect(denied.status).toBe(403);
+
+    const ownerCreated = await request(managementApp(owner))
+      .post(`/api/v1/companies/${seeded.companyId}/work-projection-credentials`)
+      .send({ name: "owner-created" });
+    expect(ownerCreated.status).toBe(201);
+    expect(ownerCreated.body.token).toMatch(/^pcwp_v1_/);
+    const adminList = await request(managementApp(admin))
+      .get(`/api/v1/companies/${seeded.companyId}/work-projection-credentials`);
+    expect(adminList.status).toBe(200);
+    expect(adminList.body.map((row: { id: string }) => row.id)).toContain(ownerCreated.body.id);
+
+    await db.update(companyMemberships).set({ membershipRole: "operator", updatedAt: new Date() })
+      .where(and(
+        eq(companyMemberships.companyId, seeded.companyId),
+        eq(companyMemberships.principalId, owner.userId),
+      ));
+    const staleOwnerActor = await request(managementApp(owner))
+      .post(`/api/v1/companies/${seeded.companyId}/work-projection-credentials`)
+      .send({ name: "stale-owner-role" });
+    expect(staleOwnerActor.status).toBe(403);
+    await db.update(companyMemberships).set({ membershipRole: "owner", updatedAt: new Date() })
+      .where(and(
+        eq(companyMemberships.companyId, seeded.companyId),
+        eq(companyMemberships.principalId, owner.userId),
+      ));
+
+    const missingCompanyId = randomUUID();
+    for (const lifecycleRequest of [
+      (instance: express.Express, companyId: string) => request(instance)
+        .get(`/api/v1/companies/${companyId}/work-projection-credentials`),
+      (instance: express.Express, companyId: string) => request(instance)
+        .post(`/api/v1/companies/${companyId}/work-projection-credentials`)
+        .send({ name: "oracle-resistant" }),
+      (instance: express.Express, companyId: string) => request(instance)
+        .delete(`/api/v1/companies/${companyId}/work-projection-credentials/${randomUUID()}`),
+    ]) {
+      const missing = await lifecycleRequest(managementApp(owner), missingCompanyId);
+      const inaccessible = await lifecycleRequest(managementApp(owner), seeded.otherCompanyId);
+      expect({ status: missing.status, body: missing.body }).toEqual({
+        status: inaccessible.status,
+        body: inaccessible.body,
+      });
+      expect(missing.status).toBe(404);
+    }
+
+    await db.execute(sql.raw(`
+      CREATE OR REPLACE FUNCTION public.synthetic_fail_projection_credential_audit() RETURNS trigger
+      LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.action IN (
+          'company_work_projection.credential_created',
+          'company_work_projection.credential_revoked'
+        ) THEN RAISE EXCEPTION 'synthetic audit failure'; END IF;
+        RETURN NEW;
+      END;
+      $$;
+      CREATE TRIGGER synthetic_fail_projection_credential_audit
+      BEFORE INSERT ON public.activity_log
+      FOR EACH ROW EXECUTE FUNCTION public.synthetic_fail_projection_credential_audit()
+    `));
+    try {
+      const failedCreate = await request(managementApp(owner))
+        .post(`/api/v1/companies/${seeded.companyId}/work-projection-credentials`)
+        .send({ name: "audit-failed-create" });
+      expect(failedCreate.status).toBe(500);
+      expect(await db.select().from(companyWorkProjectionCredentials)
+        .where(eq(companyWorkProjectionCredentials.name, "audit-failed-create"))).toEqual([]);
+
+      const failedRevoke = await request(managementApp(owner))
+        .delete(`/api/v1/companies/${seeded.companyId}/work-projection-credentials/${ownerCreated.body.id}`);
+      expect(failedRevoke.status).toBe(500);
+      const stillActive = await db.select().from(companyWorkProjectionCredentials)
+        .where(eq(companyWorkProjectionCredentials.id, ownerCreated.body.id))
+        .then((rows) => rows[0]);
+      expect(stillActive.revokedAt).toBeNull();
+      expect(stillActive.revocationActivityId).toBeNull();
+    } finally {
+      await db.execute(sql.raw(`
+        DROP TRIGGER IF EXISTS synthetic_fail_projection_credential_audit ON public.activity_log;
+        DROP FUNCTION IF EXISTS public.synthetic_fail_projection_credential_audit()
+      `));
+    }
+
+    const [firstRevoke, replayRevoke] = await Promise.all([
+      request(managementApp(owner))
+        .delete(`/api/v1/companies/${seeded.companyId}/work-projection-credentials/${ownerCreated.body.id}`),
+      request(managementApp(admin))
+        .delete(`/api/v1/companies/${seeded.companyId}/work-projection-credentials/${ownerCreated.body.id}`),
+    ]);
+    expect(firstRevoke.status).toBe(200);
+    expect(replayRevoke.status).toBe(200);
+    expect(firstRevoke.body).toEqual(replayRevoke.body);
+    const revokeAudits = await db.select().from(activityLog).where(and(
+      eq(activityLog.entityId, ownerCreated.body.id),
+      eq(activityLog.action, "company_work_projection.credential_revoked"),
+    ));
+    expect(revokeAudits).toHaveLength(1);
+
+    await expect(db.insert(companyWorkProjectionCredentials).values({
+      companyId: seeded.companyId,
+      name: "unlogged-active",
+      keyHash: createHash("sha256").update("synthetic-unlogged").digest("hex"),
+      tokenVersion: 1,
+      creationActivityId: undefined as never,
+    })).rejects.toThrow();
   });
 
   it("clears implicit board authority for malformed projection-family tokens", async () => {
@@ -349,15 +594,77 @@ describePostgres("company work projection", () => {
     expect(fresh.body.items.find((item: { id: string }) => item.id === thirdId).priority).toBe("critical");
   });
 
+  it("replays signed snapshots byte-identically across project, agent, and member lifecycle drift", async () => {
+    const seeded = await seed();
+    const projectId = randomUUID();
+    const userId = "synthetic-historical-owner";
+    await db.insert(projects).values({
+      id: projectId,
+      companyId: seeded.companyId,
+      name: "Synthetic replay project",
+    });
+    const membership = await db.insert(companyMemberships).values({
+      companyId: seeded.companyId,
+      principalType: "user",
+      principalId: userId,
+      status: "active",
+      membershipRole: "operator",
+    }).returning().then((rows) => rows[0]);
+    await db.insert(issues).values({
+      id: randomUUID(),
+      companyId: seeded.companyId,
+      projectId,
+      title: "Synthetic agent-owned replay issue",
+      identifier: "REPLAY-1",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId: seeded.agentId,
+    });
+    await db.insert(issues).values({
+      id: randomUUID(),
+      companyId: seeded.companyId,
+      title: "Synthetic user-owned replay issue",
+      identifier: "REPLAY-2",
+      status: "todo",
+      priority: "medium",
+      assigneeUserId: userId,
+    });
+
+    const first = await getProjection(seeded.token, seeded.companyId, "?pageSize=1");
+    const cursorPath = `?cursor=${encodeURIComponent(first.body.page.nextCursor)}`;
+    const historicalPage = await getProjection(seeded.token, seeded.companyId, cursorPath);
+    expect(historicalPage.status).toBe(200);
+
+    await db.update(projects).set({ archivedAt: new Date(), updatedAt: new Date() })
+      .where(eq(projects.id, projectId));
+    await db.update(agents).set({ status: "pending_approval", updatedAt: new Date() })
+      .where(eq(agents.id, seeded.agentId));
+    await db.update(companyMemberships).set({ status: "archived", updatedAt: new Date() })
+      .where(eq(companyMemberships.id, membership.id));
+
+    const replay = await getProjection(seeded.token, seeded.companyId, cursorPath);
+    expect(replay.body).toEqual(historicalPage.body);
+    const freshInvalid = await getProjection(seeded.token, seeded.companyId, "?pageSize=10");
+    expect(freshInvalid.status).toBe(409);
+    expect(JSON.stringify(freshInvalid.body)).not.toContain(projectId);
+    expect(JSON.stringify(freshInvalid.body)).not.toContain(seeded.agentId);
+    expect(JSON.stringify(freshInvalid.body)).not.toContain(userId);
+
+    await db.update(projects).set({ archivedAt: null, updatedAt: new Date() })
+      .where(eq(projects.id, projectId));
+    await db.update(agents).set({ status: "idle", updatedAt: new Date() })
+      .where(eq(agents.id, seeded.agentId));
+    await db.update(companyMemberships).set({ status: "active", updatedAt: new Date() })
+      .where(eq(companyMemberships.id, membership.id));
+    const freshReactivated = await getProjection(seeded.token, seeded.companyId, "?pageSize=10");
+    expect(freshReactivated.status).toBe(200);
+    expect(freshReactivated.body.items).toHaveLength(2);
+  });
+
   it("projects delete, hide, harness, company-move, and plugin-operation transitions without gaps", async () => {
     const seeded = await seed();
     const targetToken = `pcwp_v1_${"c".repeat(48)}`;
-    await db.insert(companyWorkProjectionCredentials).values({
-      companyId: seeded.otherCompanyId,
-      name: "target-reader",
-      keyHash: createHash("sha256").update(targetToken).digest("hex"),
-      tokenVersion: 1,
-    });
+    await insertProjectionCredential(seeded.otherCompanyId, "target-reader", targetToken);
 
     const lifecycleId = await addIssue(seeded.companyId);
     const pluginId = randomUUID();
@@ -408,6 +715,50 @@ describePostgres("company work projection", () => {
     }
   });
 
+  it("detects paired history/counter rollback after insert, update, delete, company move, and revision zero", async () => {
+    const seeded = await seed();
+    const targetToken = `pcwp_v1_${"f".repeat(48)}`;
+    await insertProjectionCredential(seeded.otherCompanyId, "target-reader", targetToken);
+
+    const revisionZero = await snapshotProjectionMaterialization(seeded.companyId);
+    const issueId = await addIssue(seeded.companyId);
+    const afterInsert = await snapshotProjectionMaterialization(seeded.companyId);
+    await replaceProjectionMaterialization(seeded.companyId, revisionZero);
+    expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(409);
+    await replaceProjectionMaterialization(seeded.companyId, afterInsert);
+
+    const beforeUpdate = await snapshotProjectionMaterialization(seeded.companyId);
+    await db.update(issues).set({ priority: "high", updatedAt: new Date() })
+      .where(eq(issues.id, issueId));
+    const afterUpdate = await snapshotProjectionMaterialization(seeded.companyId);
+    await replaceProjectionMaterialization(seeded.companyId, beforeUpdate);
+    expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(409);
+    await replaceProjectionMaterialization(seeded.companyId, afterUpdate);
+
+    const beforeDelete = await snapshotProjectionMaterialization(seeded.companyId);
+    await db.delete(issues).where(eq(issues.id, issueId));
+    const afterDelete = await snapshotProjectionMaterialization(seeded.companyId);
+    await replaceProjectionMaterialization(seeded.companyId, beforeDelete);
+    expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(409);
+    await replaceProjectionMaterialization(seeded.companyId, afterDelete);
+
+    const movingIssueId = await addIssue(seeded.companyId);
+    const sourceBeforeMove = await snapshotProjectionMaterialization(seeded.companyId);
+    const targetBeforeMove = await snapshotProjectionMaterialization(seeded.otherCompanyId);
+    await db.update(issues).set({ companyId: seeded.otherCompanyId, updatedAt: new Date() })
+      .where(eq(issues.id, movingIssueId));
+    const sourceAfterMove = await snapshotProjectionMaterialization(seeded.companyId);
+    const targetAfterMove = await snapshotProjectionMaterialization(seeded.otherCompanyId);
+    await replaceProjectionMaterialization(seeded.companyId, sourceBeforeMove);
+    await replaceProjectionMaterialization(seeded.otherCompanyId, targetBeforeMove);
+    expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(409);
+    expect((await getProjection(targetToken, seeded.otherCompanyId)).status).toBe(409);
+    await replaceProjectionMaterialization(seeded.companyId, sourceAfterMove);
+    await replaceProjectionMaterialization(seeded.otherCompanyId, targetAfterMove);
+    expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(200);
+    expect((await getProjection(targetToken, seeded.otherCompanyId)).status).toBe(200);
+  });
+
   it("separates unauthorized, forbidden, malformed, stale, expired, incompatible, and rate-limited results", async () => {
     const seeded = await seed();
     await addIssue(seeded.companyId);
@@ -415,10 +766,6 @@ describePostgres("company work projection", () => {
     expect((await request(app()).get(`/api/v1/companies/${seeded.companyId}/work-projection`)).status).toBe(401);
     expect((await getProjection(seeded.token, seeded.otherCompanyId)).status).toBe(403);
     expect((await getProjection(seeded.token, seeded.companyId, "?pageSize=9999")).status).toBe(400);
-    expect((await request(app(0))
-      .get(`/api/v1/companies/${seeded.companyId}/work-projection`)
-      .set("Authorization", `Bearer ${seeded.token}`)).status).toBe(429);
-
     const standardToken = `pc_standard_${randomUUID()}`;
     await db.insert(agentApiKeys).values({
       agentId: seeded.agentId,
@@ -430,12 +777,13 @@ describePostgres("company work projection", () => {
     });
     expect((await getProjection(standardToken, seeded.companyId)).status).toBe(403);
 
+    const cursorIssuedAt = new Date();
     const baseCursor = {
       apiVersion: "paperclip.company-work-projection/v1" as const,
       schemaVersion: 1 as const,
       companyId: seeded.companyId,
-      issuedAt: "2026-08-14T20:00:00.000Z",
-      expiresAt: "2099-08-14T20:05:00.000Z",
+      issuedAt: cursorIssuedAt.toISOString(),
+      expiresAt: new Date(cursorIssuedAt.getTime() + 5 * 60 * 1000).toISOString(),
       afterRevision: "0",
       afterIssueId: null,
       pageSize: 100,
@@ -472,6 +820,43 @@ describePostgres("company work projection", () => {
     expect(incompatibleResponse.body.code).toBe("WORK_PROJECTION_INCOMPATIBLE");
   });
 
+  it("enforces the shared PostgreSQL admission bound across independent connections", async () => {
+    const seeded = await seed();
+    let acquiredCount = 0;
+    let markAllAcquired: () => void = () => undefined;
+    let releaseBlockers: () => void = () => undefined;
+    const allAcquired = new Promise<void>((resolve) => {
+      markAllAcquired = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      releaseBlockers = resolve;
+    });
+    const blockerTransactions = Array.from({ length: 4 }, (_, slot) => db.transaction(async (tx) => {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(
+            ${`company-work-projection-admission:v1:${seeded.credentialId}:${slot}`},
+            0
+          )
+        )
+      `);
+      acquiredCount += 1;
+      if (acquiredCount === 4) markAllAcquired();
+      await blocked;
+    }));
+    try {
+      await allAcquired;
+      const limited = await getProjection(seeded.token, seeded.companyId);
+      expect(limited.status).toBe(429);
+      expect(limited.headers["retry-after"]).toBe("1");
+      expect(limited.body.code).toBe("WORK_PROJECTION_RATE_LIMITED");
+    } finally {
+      releaseBlockers();
+      await Promise.all(blockerTransactions);
+    }
+    expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(200);
+  });
+
   it("returns an explicit unavailable result when the projection store cannot be read", async () => {
     const companyId = randomUUID();
     const unavailableApp = express();
@@ -498,6 +883,7 @@ describePostgres("company work projection", () => {
 
   it("rejects every non-projection or mutation use without role-drift authority", async () => {
     const seeded = await seed();
+    const beforeActivity = await db.select().from(activityLog);
     const before = await db.select().from(companyWorkProjectionCredentials)
       .where(eq(companyWorkProjectionCredentials.id, seeded.credentialId));
     await db.update(agents).set({ role: "ceo", permissions: { "tasks:assign": true } })
@@ -533,10 +919,10 @@ describePostgres("company work projection", () => {
     expect(jwtResponse.body.code).toBe("WORK_PROJECTION_FORBIDDEN");
     expect(await db.select().from(companyWorkProjectionCredentials)
       .where(eq(companyWorkProjectionCredentials.id, seeded.credentialId))).toEqual(before);
-    expect(await db.select().from(activityLog)).toEqual([]);
+    expect(await db.select().from(activityLog)).toEqual(beforeActivity);
   });
 
-  it("fails closed for revision gaps and unknown current planning state", async () => {
+  it("rejects runtime history deletion and fails closed for witness-event loss or unknown source state", async () => {
     const seeded = await seed();
     const issueId = await addIssue(seeded.companyId);
     await db.update(issues).set({ status: "unknown_state", updatedAt: new Date() }).where(eq(issues.id, issueId));
@@ -545,20 +931,34 @@ describePostgres("company work projection", () => {
     expect(unknown.body.code).toBe("WORK_PROJECTION_INCOMPATIBLE");
 
     await db.update(issues).set({ status: "todo", updatedAt: new Date() }).where(eq(issues.id, issueId));
-    await db.delete(issueWorkProjectionVersions).where(and(
-      eq(issueWorkProjectionVersions.companyId, seeded.companyId),
-      eq(issueWorkProjectionVersions.revision, 2n),
-    ));
+    try {
+      await db.delete(issueWorkProjectionVersions).where(and(
+        eq(issueWorkProjectionVersions.companyId, seeded.companyId),
+        eq(issueWorkProjectionVersions.revision, 2n),
+      ));
+      throw new Error("expected append-only deletion rejection");
+    } catch (error) {
+      expect((error as { cause?: { message?: string } }).cause?.message).toContain("append-only");
+    }
+
+    const complete = await snapshotProjectionMaterialization(seeded.companyId);
+    const missingCurrentEvent = {
+      ...complete,
+      sourceEvents: complete.sourceEvents.filter(
+        (event) => event.revision !== complete.counter.currentRevision,
+      ),
+    };
+    await replaceProjectionMaterialization(seeded.companyId, missingCurrentEvent);
     const gap = await getProjection(seeded.token, seeded.companyId);
     expect(gap.status).toBe(409);
     expect(gap.body.code).toBe("WORK_PROJECTION_INCOMPATIBLE");
+    await replaceProjectionMaterialization(seeded.companyId, complete);
   });
 
-  it("fails closed for missing, behind, ahead, and partially restored revision state", async () => {
+  it("fails closed for missing, behind, ahead, and partially restored materialization state", async () => {
     const seeded = await seed();
     await addIssue(seeded.companyId);
-    const originalHistory = await db.select().from(issueWorkProjectionVersions)
-      .where(eq(issueWorkProjectionVersions.companyId, seeded.companyId));
+    const complete = await snapshotProjectionMaterialization(seeded.companyId);
 
     await db.delete(companyWorkProjectionRevisions)
       .where(eq(companyWorkProjectionRevisions.companyId, seeded.companyId));
@@ -567,6 +967,7 @@ describePostgres("company work projection", () => {
     await db.insert(companyWorkProjectionRevisions).values({
       companyId: seeded.companyId,
       currentRevision: 1n,
+      currentIntegrityToken: complete.counter.currentIntegrityToken,
     });
     await db.update(companyWorkProjectionRevisions).set({ currentRevision: 0n })
       .where(eq(companyWorkProjectionRevisions.companyId, seeded.companyId));
@@ -576,13 +977,14 @@ describePostgres("company work projection", () => {
       .where(eq(companyWorkProjectionRevisions.companyId, seeded.companyId));
     expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(409);
 
-    await db.update(companyWorkProjectionRevisions).set({ currentRevision: 1n })
-      .where(eq(companyWorkProjectionRevisions.companyId, seeded.companyId));
-    await db.delete(issueWorkProjectionVersions)
-      .where(eq(issueWorkProjectionVersions.companyId, seeded.companyId));
+    await replaceProjectionMaterialization(seeded.companyId, {
+      counter: complete.counter,
+      history: [],
+      sourceEvents: [],
+    });
     expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(409);
 
-    await db.insert(issueWorkProjectionVersions).values(originalHistory);
+    await replaceProjectionMaterialization(seeded.companyId, complete);
     expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(200);
   });
 
@@ -624,6 +1026,32 @@ describePostgres("company work projection", () => {
     expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(409);
     await db.update(issues).set({ assigneeUserId: null }).where(eq(issues.id, issueId));
     expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(200);
+  });
+
+  it("rejects empty or whitespace-normalized source identities before evidence hashing", async () => {
+    const seeded = await seed();
+    const issueId = await addIssue(seeded.companyId);
+    await db.update(issues).set({ identifier: "  SYN-UNSAFE  ", updatedAt: new Date() })
+      .where(eq(issues.id, issueId));
+    expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(409);
+
+    await db.update(issues).set({ identifier: "SYN-SAFE", updatedAt: new Date() })
+      .where(eq(issues.id, issueId));
+    const whitespaceUserId = "  synthetic-user  ";
+    await db.insert(companyMemberships).values({
+      companyId: seeded.companyId,
+      principalType: "user",
+      principalId: whitespaceUserId,
+      status: "active",
+      membershipRole: "operator",
+    });
+    await db.update(issues).set({ assigneeUserId: whitespaceUserId, updatedAt: new Date() })
+      .where(eq(issues.id, issueId));
+    expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(409);
+
+    await db.update(issues).set({ assigneeUserId: null, identifier: "", updatedAt: new Date() })
+      .where(eq(issues.id, issueId));
+    expect((await getProjection(seeded.token, seeded.companyId)).status).toBe(409);
   });
 
   it("records trigger revisions transactionally and PostgreSQL rejects writes inside projection reads", async () => {

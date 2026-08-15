@@ -87,4 +87,55 @@ describe("company work projection cursor", () => {
       "WORK_PROJECTION_INCOMPATIBLE",
     );
   });
+
+  it("accepts an outstanding five-minute cursor through one previous signing key only", () => {
+    const companyId = randomUUID();
+    const oldSecret = "synthetic-old-cursor-secret";
+    const newSecret = "synthetic-new-cursor-secret";
+    const value = cursor(companyId);
+    const outstanding = encodeCompanyWorkProjectionCursor(value, oldSecret);
+    expect(decodeCompanyWorkProjectionCursor(
+      outstanding,
+      companyId,
+      new Date("2026-08-14T20:04:59Z"),
+      newSecret,
+      oldSecret,
+    )).toEqual(value);
+    expectCode(
+      () => decodeCompanyWorkProjectionCursor(
+        outstanding,
+        companyId,
+        new Date("2026-08-14T20:04:59Z"),
+        newSecret,
+      ),
+      400,
+      "WORK_PROJECTION_MALFORMED",
+    );
+    expectCode(
+      () => decodeCompanyWorkProjectionCursor(
+        outstanding,
+        companyId,
+        new Date("2026-08-14T20:05:00Z"),
+        newSecret,
+        oldSecret,
+      ),
+      410,
+      "WORK_PROJECTION_SNAPSHOT_EXPIRED",
+    );
+
+    const overlong = encodeCompanyWorkProjectionCursor({
+      ...value,
+      expiresAt: "2026-08-14T20:05:00.001Z",
+    }, newSecret);
+    expectCode(
+      () => decodeCompanyWorkProjectionCursor(
+        overlong,
+        companyId,
+        new Date("2026-08-14T20:01:00Z"),
+        newSecret,
+      ),
+      400,
+      "WORK_PROJECTION_MALFORMED",
+    );
+  });
 });

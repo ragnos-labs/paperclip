@@ -1,9 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
-import express from "express";
-import request from "supertest";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { errorHandler } from "../middleware/error-handler.js";
-import { companyWorkProjectionRoutes } from "../routes/company-work-projection.js";
 import { canonicalCompanyWorkProjectionJson } from "../services/company-work-projection.js";
 
 describe("company work projection route", () => {
@@ -14,58 +10,36 @@ describe("company work projection route", () => {
       .toBe("1ddc151ac0e74d66d6f122fe9e0d709f50340765cb97df5e047d3896c0adfb08");
   });
 
-  it("rate limits genuinely overlapping reads per credential", async () => {
-    const companyId = randomUUID();
-    const credentialId = randomUUID();
-    let releaseRead: () => void = () => undefined;
-    let markEntered: () => void = () => undefined;
-    const entered = new Promise<void>((resolve) => {
-      markEntered = resolve;
+  it("matches the RFC 8785 number, escaping, Unicode, and key-order vectors", () => {
+    const canonical = canonicalCompanyWorkProjectionJson({
+      numbers: [333333333.33333329, 1e30, 4.50, 2e-3, 1e-27],
+      string: "€$\u000f\nA'B\"\\\"/",
+      literals: [null, true, false],
     });
-    const blocked = new Promise<void>((resolve) => {
-      releaseRead = resolve;
-    });
-    const instance = express();
-    instance.use((req, _res, next) => {
-      req.actor = {
-        type: "none",
-        companyId,
-        credentialId,
-        source: "none",
-      };
-      next();
-    });
-    instance.use("/api", companyWorkProjectionRoutes({} as never, {
-      maxConcurrentReadsPerCredential: 1,
-      readSnapshot: async () => {
-        markEntered();
-        await blocked;
-        return {
-          apiVersion: "paperclip.company-work-projection/v1",
-          schemaVersion: 1,
-          companyId,
-          snapshot: {
-            revision: "0",
-            issuedAt: "2026-08-14T20:00:00.000Z",
-            expiresAt: "2026-08-14T20:05:00.000Z",
-          },
-          items: [],
-          page: { size: 0, hasMore: false, nextCursor: null, completeness: "complete" },
-          etag: `"${"a".repeat(64)}"`,
-        };
-      },
-    }));
-    instance.use(errorHandler);
+    expect(canonical).toBe(
+      "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"€$\\u000f\\nA'B\\\"\\\\\\\"/\"}",
+    );
 
-    const first = request(instance)
-      .get(`/api/v1/companies/${companyId}/work-projection`)
-      .then((response) => response);
-    await entered;
-    const second = await request(instance).get(`/api/v1/companies/${companyId}/work-projection`);
-    expect(second.status).toBe(429);
-    expect(second.headers["retry-after"]).toBe("1");
-
-    releaseRead();
-    expect((await first).status).toBe(200);
+    const propertyOrder = canonicalCompanyWorkProjectionJson({
+      "\u20ac": "Euro Sign",
+      "\r": "Carriage Return",
+      "\ufb33": "Hebrew Letter Dalet With Dagesh",
+      "1": "One",
+      "😀": "Emoji: Grinning Face",
+      "\u0080": "Control",
+      "ö": "Latin Small Letter O With Diaeresis",
+    });
+    const expectedValueOrder = [
+      "Carriage Return",
+      "One",
+      "Control",
+      "Latin Small Letter O With Diaeresis",
+      "Euro Sign",
+      "Emoji: Grinning Face",
+      "Hebrew Letter Dalet With Dagesh",
+    ];
+    expect(expectedValueOrder.map((value) => propertyOrder.indexOf(value)))
+      .toEqual([...expectedValueOrder.map((value) => propertyOrder.indexOf(value))].sort((a, b) => a - b));
+    expect(() => canonicalCompanyWorkProjectionJson("\ud800")).toThrow("lone Unicode surrogates");
   });
 });

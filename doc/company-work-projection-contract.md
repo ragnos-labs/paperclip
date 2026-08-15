@@ -24,9 +24,17 @@ has no agent identity, and is bound to the company recorded at creation. Later
 membership, role, or permission changes cannot expand it. Global middleware
 rejects this credential on every other path and on every non-GET method.
 
-Board operators can create, list, and revoke these credentials through the
-company-scoped `/api/v1/companies/:companyId/work-projection-credentials`
-routes. Plaintext is returned once at creation. Older Paperclip binaries query
+Only active company owners/admins with the dedicated
+`work_projection_credentials:manage` permission (plus the existing local board
+and explicitly company-authorized instance-admin paths) can create, list, or
+revoke these credentials through the company-scoped
+`/api/v1/companies/:companyId/work-projection-credentials` routes. Missing and
+inaccessible companies both return the same `404` on every lifecycle route.
+Creation/revocation and their required activity rows commit in one database
+transaction. Credential rows carry a required creation-activity reference, and
+an active credential cannot exist without that audit row. Revocation is
+lock-serialized and idempotent, with exactly one revocation activity reference.
+Plaintext is returned once at creation. Older Paperclip binaries query
 only `agent_api_keys`, so they cannot discover or reinterpret these hashes. The
 amended unreleased migration also revokes any residue from the earlier
 agent-scope candidate. Malformed and unknown token versions stay inside the
@@ -59,7 +67,12 @@ An item contains only:
 Digests are SHA-256 over the UTF-8 bytes of RFC 8785 JSON Canonicalization
 Scheme output. Object keys are lexicographically sorted, arrays preserve order,
 and only JSON strings, finite numbers, booleans, null, arrays, and objects are
-accepted. This makes evidence and ETag values reproducible across languages.
+accepted. Official RFC number, escaping, Unicode, and property-order vectors
+are regression-tested, and lone Unicode surrogates are rejected. Source fields
+are first parsed by the closed response-field schema; only those parsed values
+are hashed. Empty or whitespace-padded identity evidence is incompatible rather
+than silently normalized. This makes evidence and ETag values reproducible
+across languages.
 
 It never contains titles, descriptions, prompts, comments, adapter or execution
 configuration, credentials, workspaces or local paths, recovery internals, raw
@@ -67,24 +80,36 @@ payloads, or private metadata. An issue with an ambiguous owner, unknown state,
 unknown priority, oversized identifier, or malformed timestamp makes the
 snapshot incompatible; the server fails closed instead of dropping or guessing
 the value. A project, agent owner, or user owner that does not belong to the
-issue company also fails closed rather than leaking the foreign identifier.
+issue company, or is no longer eligible because the project is archived, the
+agent is pending/terminated, or the user membership is inactive, also fails
+closed rather than leaking the reference. Those validity facts are stored in
+each history row. Project, agent, and membership lifecycle changes append new
+issue projection versions, so a signed historical snapshot never joins mutable
+current reference state and replays byte-identically.
 
 ## Snapshot and pagination semantics
 
 Migration `0184_company_work_projection` takes `SHARE ROW EXCLUSIVE` locks on
-`public.companies` and `public.issues` for its full transaction. This blocks
-company and issue writes while counter rows are seeded, triggers are installed,
-and existing work is backfilled, eliminating the pre-trigger gap. The lock is
-held for the duration of the schema work plus an O(visible issue count)
-backfill; operators should use a maintenance window for large tables.
+`public.companies`, `public.issues`, `public.projects`, `public.agents`, and
+`public.company_memberships` for its full transaction. This blocks every write
+that can affect collection membership or reference validity while counters and
+source witnesses are seeded, capture triggers are installed, and existing work
+is backfilled. The lock is held for the duration of the schema work plus an
+O(visible issue count) backfill; operators must estimate that count and use a
+maintenance window for large tables.
 
-Every existing company receives an explicit revision-zero row and an
-`AFTER INSERT` company trigger creates one for future companies. The issue
+Every existing company receives an explicit revision-zero counter and an
+independent source-integrity witness with the same random token; an `AFTER
+INSERT` company trigger creates both for future companies. The issue
 trigger records each visible insert, update, hide, unhide, harness toggle,
 plugin-visibility toggle, company move, and delete in the same transaction as
-the source mutation. Normal work-list semantics apply: hidden, harness, and
-plugin-operation issues are excluded. Deletions and removals are tombstones.
-Revisions are contiguous within a company.
+the source mutation. Each eligible source change advances the independent
+witness and materialized counter to a new random integrity token and appends a
+matching immutable source event plus safe history row. Normal work-list
+semantics apply: hidden, harness, and plugin-operation issues are excluded.
+Deletions and removals are tombstones. Revisions are contiguous within a
+company; reverse referential integrity and append-only guards prevent a runtime
+history gap.
 
 The first page fixes a high-water revision. Each later page selects the latest
 version of every issue at or below that high-water mark, orders by item revision
@@ -94,10 +119,13 @@ issue time, and expiry. It is HMAC-signed with an instance- and company-derived
 key. No process-local cursor state is required, so replay and restart are
 deterministic until expiry.
 
-Reads require the company counter row and validate full history count, minimum,
-and maximum against the current counter before serving any snapshot. Missing,
-behind, ahead, gapped, or partially restored state is incompatible; it is never
-interpreted as empty or complete.
+Reads require the counter, independent source witness, current source event,
+and current history row to agree on revision and integrity token before serving
+any snapshot. These are primary-key/index lookups rather than a full-history
+scan; a 100,000-revision PostgreSQL query-plan regression prohibits sequential
+scans and enforces the API's 250 ms latency ceiling. Missing, behind, ahead,
+gapped, or partially restored state is incompatible; it is never interpreted
+as empty or complete.
 
 Snapshots expire after five minutes. Replaying a cursor returns the same page;
 clients may safely deduplicate by item ID and revision. A concurrent issue
@@ -121,6 +149,23 @@ returns `503` even for empty or one-page collections. Every page has a strong
 `ETag`. `If-None-Match` follows HTTP weak comparison for GET, including tag
 lists, weak tags, and `*`; a match returns `304`. The response also sets API
 version, schema version, and snapshot revision headers.
+
+New cursors use `PAPERCLIP_WORK_PROJECTION_CURSOR_SECRET` when configured,
+falling back to the existing instance signing material. During rotation, one
+`PAPERCLIP_WORK_PROJECTION_CURSOR_PREVIOUS_SECRET` may validate already-issued
+cursors. Cursor lifetime is structurally capped at five minutes, so operators
+retain the previous key for at least five minutes after switching the current
+key and then remove it. No cursor is emitted with the previous key.
+
+Admission is enforced by four PostgreSQL transaction-scoped advisory-lock slots
+per credential. This limit is shared by every API process connected to the same
+primary PostgreSQL database, persists no operational read data, and fails with
+`429` when all slots are occupied. Supported multi-process deployments must
+route every process to that same primary database. This is a concurrency bound,
+not distributed requests-per-second enforcement: the deployment edge must also
+enforce a sustained limit of 20 requests/second per credential and return `429`
+with `Retry-After`. Multi-primary or independently sharded database topologies
+are unsupported for this v1 contract.
 
 ## Result states
 
@@ -146,16 +191,29 @@ normal-list issue while writes are locked and capture triggers are already
 installed. Existing issue APIs and rows are unchanged. Deployments must apply
 the migration before enabling clients.
 
-If revision integrity fails, stop serving the projection and restore the
-projection tables from a database backup or rebuild them during a controlled
-maintenance window from authoritative issues. Never reset a counter while
-clients may hold cursors. A rollback must disable the route before dropping the
-trigger, functions, and two projection tables; outstanding cursors then become
-unavailable rather than silently changing meaning.
+If revision integrity fails, disable the route and preserve the independent
+`company_work_projection_source_witnesses` and
+`company_work_projection_source_events` tables. During a maintenance window,
+restore/rebuild only `company_work_projection_revisions` and
+`issue_work_projection_versions`, then verify their current revision/token
+against both source-witness tables before re-enabling reads. Never reset a
+counter while clients may hold cursors. A partial restore of the materialized
+counter/history to an older self-consistent prefix is detected because the
+independent witness remains newer. A full-database point-in-time restore can
+reset issues, both witness tables, and both materialization tables together;
+that is outside the partial-restore guarantee and must be treated as a new
+database epoch with the route disabled, all projection credentials revoked,
+and all cursors allowed to expire before clients restart.
 
-Rolling the application binary back leaves dedicated projection hashes in a
-table older versions do not query, so those credentials become unusable rather
-than becoming standard agents. The append-only table has no automatic pruning
-in v1. A later retention policy
+Rollback rehearsal is two-version and fail closed: first disable the route,
+wait five minutes for cursors to expire, retain the dedicated credential table,
+then roll back the application binary. Older binaries query only
+`agent_api_keys`, so `pcwp_v1_` hashes remain undiscoverable and unusable. Do
+not copy those hashes into `agent_api_keys`. Forward recovery reapplies this
+migration/contract, verifies the indexed witness query and credential audit
+foreign keys, rotates the cursor key if the database epoch changed, and only
+then re-enables the route.
+
+The append-only tables have no automatic pruning in v1. A later retention policy
 must preserve every unexpired high-water snapshot and requires a separate
 reviewed storage decision.

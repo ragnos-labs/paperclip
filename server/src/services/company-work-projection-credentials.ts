@@ -1,6 +1,6 @@
-import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, isNull } from "drizzle-orm";
-import { companyWorkProjectionCredentials, type Db } from "@paperclipai/db";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { activityLog, companyWorkProjectionCredentials, type Db } from "@paperclipai/db";
 import {
   COMPANY_WORK_PROJECTION_CREDENTIAL_TOKEN_VERSION,
   companyWorkProjectionCredentialSchema,
@@ -59,18 +59,40 @@ export async function authenticateCompanyWorkProjectionCredential(
 
 export function companyWorkProjectionCredentialService(db: Db) {
   return {
-    create: async (companyId: string, name: string): Promise<CreatedCompanyWorkProjectionCredential> => {
+    create: async (
+      companyId: string,
+      name: string,
+      actorId: string,
+    ): Promise<CreatedCompanyWorkProjectionCredential> => {
       const token = `pcwp_v1_${randomBytes(24).toString("hex")}`;
-      const row = await db
-        .insert(companyWorkProjectionCredentials)
-        .values({
+      const credentialId = randomUUID();
+      const normalizedName = name.trim();
+      const row = await db.transaction(async (tx) => {
+        const audit = await tx.insert(activityLog).values({
           companyId,
-          name: name.trim(),
-          keyHash: hashToken(token),
-          tokenVersion: COMPANY_WORK_PROJECTION_CREDENTIAL_TOKEN_VERSION,
-        })
-        .returning()
-        .then((rows) => rows[0]);
+          actorType: "user",
+          actorId,
+          action: "company_work_projection.credential_created",
+          entityType: "company_work_projection_credential",
+          entityId: credentialId,
+          details: {
+            name: normalizedName,
+            tokenVersion: COMPANY_WORK_PROJECTION_CREDENTIAL_TOKEN_VERSION,
+          },
+        }).returning({ id: activityLog.id }).then((rows) => rows[0]);
+        return tx
+          .insert(companyWorkProjectionCredentials)
+          .values({
+            id: credentialId,
+            companyId,
+            name: normalizedName,
+            keyHash: hashToken(token),
+            tokenVersion: COMPANY_WORK_PROJECTION_CREDENTIAL_TOKEN_VERSION,
+            creationActivityId: audit.id,
+          })
+          .returning()
+          .then((rows) => rows[0]);
+      });
       const serialized = serializeCredential(row);
       if (!serialized) {
         throw new Error("Created work projection credential did not satisfy its runtime schema");
@@ -90,17 +112,45 @@ export function companyWorkProjectionCredentialService(db: Db) {
       return rows.map(serializeCredential).filter((value): value is CompanyWorkProjectionCredential => value !== null);
     },
 
-    revoke: async (companyId: string, credentialId: string): Promise<CompanyWorkProjectionCredential | null> => {
-      const row = await db
-        .update(companyWorkProjectionCredentials)
-        .set({ revokedAt: new Date() })
-        .where(and(
-          eq(companyWorkProjectionCredentials.id, credentialId),
-          eq(companyWorkProjectionCredentials.companyId, companyId),
-          isNull(companyWorkProjectionCredentials.revokedAt),
-        ))
-        .returning()
-        .then((rows) => rows[0] ?? null);
+    revoke: async (
+      companyId: string,
+      credentialId: string,
+      actorId: string,
+    ): Promise<CompanyWorkProjectionCredential | null> => {
+      const row = await db.transaction(async (tx) => {
+        await tx.execute(sql`
+          SELECT id
+          FROM public.company_work_projection_credentials
+          WHERE company_id = ${companyId}::uuid
+            AND id = ${credentialId}::uuid
+          FOR UPDATE
+        `);
+        const existing = await tx.select().from(companyWorkProjectionCredentials)
+          .where(and(
+            eq(companyWorkProjectionCredentials.id, credentialId),
+            eq(companyWorkProjectionCredentials.companyId, companyId),
+          ))
+          .then((rows) => rows[0] ?? null);
+        if (!existing || existing.revokedAt) return existing;
+
+        const audit = await tx.insert(activityLog).values({
+          companyId,
+          actorType: "user",
+          actorId,
+          action: "company_work_projection.credential_revoked",
+          entityType: "company_work_projection_credential",
+          entityId: credentialId,
+        }).returning({ id: activityLog.id }).then((rows) => rows[0]);
+        return tx.update(companyWorkProjectionCredentials)
+          .set({ revokedAt: new Date(), revocationActivityId: audit.id })
+          .where(and(
+            eq(companyWorkProjectionCredentials.id, credentialId),
+            eq(companyWorkProjectionCredentials.companyId, companyId),
+            isNull(companyWorkProjectionCredentials.revokedAt),
+          ))
+          .returning()
+          .then((rows) => rows[0] ?? existing);
+      });
       return row ? serializeCredential(row) : null;
     },
   };

@@ -9,16 +9,20 @@ export const COMPANY_WORK_PROJECTION_CREDENTIAL_TOKEN_VERSION = 1 as const;
 
 const revisionSchema = z.string().regex(/^(0|[1-9][0-9]*)$/);
 const instantSchema = z.string().datetime({ offset: true });
+const evidenceIdentitySchema = (maximum: number) => z.string()
+  .min(1)
+  .max(maximum)
+  .refine((value) => value === value.trim(), "Identity values must already be normalized");
 
 export const companyWorkProjectionOwnerSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("agent"), id: z.string().uuid() }).strict(),
-  z.object({ type: z.literal("user"), id: z.string().trim().min(1).max(256) }).strict(),
+  z.object({ type: z.literal("user"), id: evidenceIdentitySchema(256) }).strict(),
   z.object({ type: z.literal("unassigned") }).strict(),
 ]);
 
-export const companyWorkProjectionItemSchema = z.object({
+export const companyWorkProjectionItemFieldsSchema = z.object({
   id: z.string().uuid(),
-  identifier: z.string().trim().min(1).max(256).nullable(),
+  identifier: evidenceIdentitySchema(256).nullable(),
   owner: companyWorkProjectionOwnerSchema,
   projectId: z.string().uuid().nullable(),
   priority: z.enum(ISSUE_PRIORITIES),
@@ -31,6 +35,9 @@ export const companyWorkProjectionItemSchema = z.object({
     cancelledAt: instantSchema.nullable(),
   }).strict(),
   revision: revisionSchema,
+}).strict();
+
+export const companyWorkProjectionItemSchema = companyWorkProjectionItemFieldsSchema.extend({
   evidence: z.object({
     algorithm: z.literal("sha256"),
     digest: z.string().regex(/^[a-f0-9]{64}$/),

@@ -1,6 +1,7 @@
 import {
   bigint,
   boolean,
+  foreignKey,
   index,
   integer,
   pgTable,
@@ -11,6 +12,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
+import { activityLog } from "./activity_log.js";
 
 /**
  * Dedicated machine credentials for the work projection. These hashes never
@@ -27,8 +29,13 @@ export const companyWorkProjectionCredentials = pgTable(
     name: text("name").notNull(),
     keyHash: text("key_hash").notNull(),
     tokenVersion: integer("token_version").notNull().default(1),
+    creationActivityId: uuid("creation_activity_id")
+      .notNull()
+      .references(() => activityLog.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revocationActivityId: uuid("revocation_activity_id")
+      .references(() => activityLog.id),
   },
   (table) => ({
     keyHashUniqueIdx: uniqueIndex("company_work_projection_credentials_key_hash_idx")
@@ -43,8 +50,26 @@ export const companyWorkProjectionRevisions = pgTable("company_work_projection_r
     .primaryKey()
     .references(() => companies.id, { onDelete: "cascade" }),
   currentRevision: bigint("current_revision", { mode: "bigint" }).notNull().default(0n),
+  currentIntegrityToken: uuid("current_integrity_token").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Independent source-integrity witness. Operational projection-table restores
+ * exclude this table, so restoring the counter/history to an older prefix is
+ * detected before any response is served.
+ */
+export const companyWorkProjectionSourceWitnesses = pgTable(
+  "company_work_projection_source_witnesses",
+  {
+    companyId: uuid("company_id")
+      .primaryKey()
+      .references(() => companies.id, { onDelete: "cascade" }),
+    currentRevision: bigint("current_revision", { mode: "bigint" }).notNull().default(0n),
+    currentIntegrityToken: uuid("current_integrity_token").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+);
 
 /**
  * Append-only safe-field history used to materialize immutable company work
@@ -64,6 +89,9 @@ export const issueWorkProjectionVersions = pgTable(
     projectId: uuid("project_id"),
     assigneeAgentId: uuid("assignee_agent_id"),
     assigneeUserId: text("assignee_user_id"),
+    projectReferenceValid: boolean("project_reference_valid").notNull().default(true),
+    assigneeAgentReferenceValid: boolean("assignee_agent_reference_valid").notNull().default(true),
+    assigneeUserReferenceValid: boolean("assignee_user_reference_valid").notNull().default(true),
     status: text("status"),
     priority: text("priority"),
     startedAt: timestamp("started_at", { withTimezone: true }),
@@ -71,11 +99,39 @@ export const issueWorkProjectionVersions = pgTable(
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }),
+    integrityToken: uuid("integrity_token").notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     pk: primaryKey({ columns: [table.companyId, table.revision] }),
     companyIssueRevisionIdx: index("issue_work_projection_versions_company_issue_revision_idx")
       .on(table.companyId, table.issueId, table.revision),
+    companyRevisionTokenUniqueIdx: uniqueIndex(
+      "issue_work_projection_versions_company_revision_token_idx",
+    ).on(table.companyId, table.revision, table.integrityToken),
+  }),
+);
+
+export const companyWorkProjectionSourceEvents = pgTable(
+  "company_work_projection_source_events",
+  {
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "cascade" }),
+    revision: bigint("revision", { mode: "bigint" }).notNull(),
+    integrityToken: uuid("integrity_token").notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.companyId, table.revision] }),
+    historyFk: foreignKey({
+      columns: [table.companyId, table.revision, table.integrityToken],
+      foreignColumns: [
+        issueWorkProjectionVersions.companyId,
+        issueWorkProjectionVersions.revision,
+        issueWorkProjectionVersions.integrityToken,
+      ],
+      name: "company_work_projection_source_events_history_fk",
+    }),
   }),
 );

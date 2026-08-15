@@ -256,21 +256,31 @@ Hosted AWS provider notes live in [SECRETS-AWS-PROVIDER.md](./SECRETS-AWS-PROVID
 
 ## Company work projection
 
-`company_work_projection_revisions` stores the current monotonic revision for
-each company. `issue_work_projection_versions` is an append-only history of only
-the issue fields approved for the machine read projection. The
-`issues_work_projection_capture` trigger appends a version or tombstone in the
-same transaction as every projected issue change. The projection read checks
-the required counter plus full-history count/minimum/maximum and executes under
-a PostgreSQL read-only transaction. Dedicated hashes live in
-`company_work_projection_credentials`, never `agent_api_keys`.
+`company_work_projection_revisions` stores the materialized current revision.
+`company_work_projection_source_witnesses` and its immutable source-event rows
+form the independent monotonic integrity boundary; they are excluded from a
+counter/history-only restore. `issue_work_projection_versions` is an append-only
+history of only the issue fields and reference-validity facts approved for the
+machine read projection. Source and reference capture triggers append a version
+or tombstone in the same transaction as every eligible issue, project, agent,
+or membership change. The projection read compares the counter, witness,
+current source event, and current history token through indexed lookups and
+executes under a PostgreSQL read-only transaction. Dedicated hashes live in
+`company_work_projection_credentials`, never `agent_api_keys`; required
+creation/revocation activity references make credential mutations auditable in
+the same transaction.
 
-Migration `0184` holds `SHARE ROW EXCLUSIVE` locks on `public.companies` and
-`public.issues` across counter seeding, trigger installation, and the complete
-backfill. The lock blocks company/issue writes for the duration of the migration
-and its O(visible issue count) backfill, so large installations should schedule
-a maintenance window. Existing and future companies receive deterministic
-revision-zero rows; missing rows are corruption, not an empty collection.
+Migration `0184` holds `SHARE ROW EXCLUSIVE` locks on `public.companies`,
+`public.issues`, `public.projects`, `public.agents`, and
+`public.company_memberships` across witness/counter seeding, trigger
+installation, and the complete backfill. The lock blocks affected source writes
+for the duration of the migration and its O(visible issue count) backfill, so
+large installations should estimate visible issue volume and schedule a
+maintenance window. Existing and future companies receive explicit
+revision-zero counter/witness tokens; missing rows are corruption, not an empty
+collection. A full-database point-in-time restore can reset source and witness
+together and therefore requires the new-database-epoch procedure in the full
+contract; partial projection-table restore is detected.
 
 The full authority, pagination, failure, upgrade, and rollback contract is in
 [company-work-projection-contract.md](./company-work-projection-contract.md).

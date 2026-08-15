@@ -7,11 +7,16 @@ import { applyPendingMigrations, createDb } from "./client.js";
 import {
   agentApiKeys,
   agents,
+  activityLog,
   companies,
   companyWorkProjectionCredentials,
   companyWorkProjectionRevisions,
+  companyWorkProjectionSourceEvents,
+  companyWorkProjectionSourceWitnesses,
+  companyMemberships,
   issueWorkProjectionVersions,
   issues,
+  projects,
 } from "./schema/index.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -31,8 +36,15 @@ if (!support.supported) {
 const DROP_0184_SQL = `
   DROP TRIGGER IF EXISTS issues_work_projection_capture ON public.issues;
   DROP TRIGGER IF EXISTS companies_work_projection_initialize ON public.companies;
+  DROP TRIGGER IF EXISTS projects_work_projection_reference_capture ON public.projects;
+  DROP TRIGGER IF EXISTS agents_work_projection_reference_capture ON public.agents;
+  DROP TRIGGER IF EXISTS company_memberships_work_projection_reference_capture ON public.company_memberships;
   DROP FUNCTION IF EXISTS public.capture_issue_work_projection_change();
   DROP FUNCTION IF EXISTS public.initialize_company_work_projection_revision();
+  DROP FUNCTION IF EXISTS public.capture_project_work_projection_reference_change();
+  DROP FUNCTION IF EXISTS public.capture_agent_work_projection_reference_change();
+  DROP FUNCTION IF EXISTS public.capture_membership_work_projection_reference_change();
+  DROP FUNCTION IF EXISTS public.append_current_issue_work_projection_version(public.issues);
   DROP FUNCTION IF EXISTS public.append_issue_work_projection_version(
     uuid, uuid, boolean, text, uuid, uuid, text, text, text,
     timestamp with time zone, timestamp with time zone, timestamp with time zone,
@@ -41,12 +53,18 @@ const DROP_0184_SQL = `
   DROP FUNCTION IF EXISTS public.company_work_projection_issue_is_visible(
     timestamp with time zone, text, text
   );
+  DROP FUNCTION IF EXISTS public.company_work_projection_project_reference_is_valid(uuid, uuid);
+  DROP FUNCTION IF EXISTS public.company_work_projection_agent_reference_is_valid(uuid, uuid);
+  DROP FUNCTION IF EXISTS public.company_work_projection_user_reference_is_valid(uuid, text);
   DROP TABLE IF EXISTS public.company_work_projection_credentials;
+  DROP TABLE IF EXISTS public.company_work_projection_source_events;
   DROP TABLE IF EXISTS public.issue_work_projection_versions;
+  DROP TABLE IF EXISTS public.company_work_projection_source_witnesses;
   DROP TABLE IF EXISTS public.company_work_projection_revisions;
+  DROP FUNCTION IF EXISTS public.reject_company_work_projection_append_only_mutation();
 `;
 
-async function waitForBlockedIssueWriters(connectionString: string) {
+async function waitForBlockedSourceWriters(connectionString: string) {
   const inspector = postgres(connectionString, { max: 1, onnotice: () => undefined });
   try {
     const deadline = Date.now() + 2_000;
@@ -57,13 +75,13 @@ async function waitForBlockedIssueWriters(connectionString: string) {
         JOIN pg_class AS relations ON relations.oid = locks.relation
         JOIN pg_namespace AS namespaces ON namespaces.oid = relations.relnamespace
         WHERE namespaces.nspname = 'public'
-          AND relations.relname = 'issues'
+          AND relations.relname IN ('issues', 'projects', 'agents', 'company_memberships')
           AND locks.granted = false
       `;
-      if ((rows[0]?.waiting ?? 0) >= 4) return;
+      if ((rows[0]?.waiting ?? 0) >= 7) return;
       await new Promise<void>((resolve) => setTimeout(resolve, 20));
     }
-    throw new Error("concurrent issue writers did not block on migration lock");
+    throw new Error("concurrent projection-source writers did not block on migration lock");
   } finally {
     await inspector.end();
   }
@@ -99,6 +117,10 @@ describePostgres("0184 company work projection migration", () => {
     const moveIssueId = randomUUID();
     const insertIssueId = randomUUID();
     const pluginIssueId = randomUUID();
+    const referenceIssueId = randomUUID();
+    const userReferenceIssueId = randomUUID();
+    const projectId = randomUUID();
+    const userId = "synthetic-migration-user";
     const agentId = randomUUID();
     const legacyToken = `pcp_${"d".repeat(48)}`;
 
@@ -116,6 +138,18 @@ describePostgres("0184 company work projection migration", () => {
       adapterConfig: {},
       runtimeConfig: {},
       permissions: {},
+    });
+    await db.insert(projects).values({
+      id: projectId,
+      companyId: sourceCompanyId,
+      name: "Synthetic migration project",
+    });
+    await db.insert(companyMemberships).values({
+      companyId: sourceCompanyId,
+      principalType: "user",
+      principalId: userId,
+      status: "active",
+      membershipRole: "operator",
     });
     await db.execute(sql`
       INSERT INTO public.agent_api_keys (
@@ -167,6 +201,27 @@ describePostgres("0184 company work projection migration", () => {
         originKind: "plugin:synthetic:operation",
         updatedAt: new Date("2026-08-14T20:03:00Z"),
       },
+      {
+        id: referenceIssueId,
+        companyId: sourceCompanyId,
+        projectId,
+        title: "Synthetic reference lifecycle",
+        identifier: "MIG-REFERENCE",
+        status: "todo",
+        priority: "low",
+        assigneeAgentId: agentId,
+        updatedAt: new Date("2026-08-14T20:04:00Z"),
+      },
+      {
+        id: userReferenceIssueId,
+        companyId: sourceCompanyId,
+        title: "Synthetic membership lifecycle",
+        identifier: "MIG-MEMBER",
+        status: "todo",
+        priority: "low",
+        assigneeUserId: userId,
+        updatedAt: new Date("2026-08-14T20:05:00Z"),
+      },
     ]);
 
     const migration = await readFile(
@@ -178,7 +233,7 @@ describePostgres("0184 company work projection migration", () => {
       .map((value) => value.trim())
       .filter(Boolean);
     const migrationConnection = postgres(connectionString, { max: 1, onnotice: () => undefined });
-    const writers = postgres(connectionString, { max: 4, onnotice: () => undefined });
+    const writers = postgres(connectionString, { max: 7, onnotice: () => undefined });
     try {
       await migrationConnection.unsafe("BEGIN");
       await migrationConnection.unsafe(statements[0]);
@@ -197,9 +252,23 @@ describePostgres("0184 company work projection migration", () => {
           UPDATE public.issues SET company_id = ${targetCompanyId}::uuid, updated_at = now()
           WHERE id = ${moveIssueId}::uuid
         `,
+        writers`
+          UPDATE public.projects SET archived_at = now(), updated_at = now()
+          WHERE id = ${projectId}::uuid
+        `,
+        writers`
+          UPDATE public.agents SET status = 'pending_approval', updated_at = now()
+          WHERE id = ${agentId}::uuid
+        `,
+        writers`
+          UPDATE public.company_memberships SET status = 'archived', updated_at = now()
+          WHERE company_id = ${sourceCompanyId}::uuid
+            AND principal_type = 'user'
+            AND principal_id = ${userId}
+        `,
       ]);
 
-      await waitForBlockedIssueWriters(connectionString);
+      await waitForBlockedSourceWriters(connectionString);
       for (const statement of statements.slice(1)) {
         await migrationConnection.unsafe(statement);
       }
@@ -232,6 +301,17 @@ describePostgres("0184 company work projection migration", () => {
     expect(sourceHistory.some((row) => row.issueId === moveIssueId && row.deleted)).toBe(true);
     expect(targetHistory.some((row) => row.issueId === moveIssueId && !row.deleted)).toBe(true);
     expect(sourceHistory.some((row) => row.issueId === pluginIssueId)).toBe(false);
+    const latestReference = sourceHistory
+      .filter((row) => row.issueId === referenceIssueId)
+      .sort((left, right) => Number(right.revision - left.revision))[0];
+    expect(latestReference).toMatchObject({
+      projectReferenceValid: false,
+      assigneeAgentReferenceValid: false,
+    });
+    const latestUserReference = sourceHistory
+      .filter((row) => row.issueId === userReferenceIssueId)
+      .sort((left, right) => Number(right.revision - left.revision))[0];
+    expect(latestUserReference?.assigneeUserReferenceValid).toBe(false);
 
     for (const [companyId, history] of [
       [sourceCompanyId, sourceHistory],
@@ -240,6 +320,12 @@ describePostgres("0184 company work projection migration", () => {
       const counter = await db.select().from(companyWorkProjectionRevisions)
         .where(eq(companyWorkProjectionRevisions.companyId, companyId));
       expect(counter[0]?.currentRevision).toBe(BigInt(history.length));
+      const witness = await db.select().from(companyWorkProjectionSourceWitnesses)
+        .where(eq(companyWorkProjectionSourceWitnesses.companyId, companyId));
+      expect(witness[0]?.currentRevision).toBe(counter[0]?.currentRevision);
+      expect(witness[0]?.currentIntegrityToken).toBe(counter[0]?.currentIntegrityToken);
+      expect(await db.select().from(companyWorkProjectionSourceEvents)
+        .where(eq(companyWorkProjectionSourceEvents.companyId, companyId))).toHaveLength(history.length);
     }
 
     const futureCompanyId = randomUUID();
@@ -252,17 +338,137 @@ describePostgres("0184 company work projection migration", () => {
       .where(eq(companyWorkProjectionRevisions.companyId, futureCompanyId))).toMatchObject([
       { companyId: futureCompanyId, currentRevision: 0n },
     ]);
+    const futureCounter = await db.select().from(companyWorkProjectionRevisions)
+      .where(eq(companyWorkProjectionRevisions.companyId, futureCompanyId))
+      .then((rows) => rows[0]);
+    expect(await db.select().from(companyWorkProjectionSourceWitnesses)
+      .where(eq(companyWorkProjectionSourceWitnesses.companyId, futureCompanyId))).toMatchObject([
+      {
+        companyId: futureCompanyId,
+        currentRevision: 0n,
+        currentIntegrityToken: futureCounter.currentIntegrityToken,
+      },
+    ]);
 
     const projectionToken = `pcwp_v1_${"e".repeat(48)}`;
     const projectionHash = createHash("sha256").update(projectionToken).digest("hex");
+    const credentialId = randomUUID();
+    const audit = await db.insert(activityLog).values({
+      companyId: sourceCompanyId,
+      actorType: "user",
+      actorId: "synthetic-owner",
+      action: "company_work_projection.credential_created",
+      entityType: "company_work_projection_credential",
+      entityId: credentialId,
+    }).returning({ id: activityLog.id }).then((rows) => rows[0]);
     await db.insert(companyWorkProjectionCredentials).values({
+      id: credentialId,
       companyId: sourceCompanyId,
       name: "Synthetic dedicated reader",
       keyHash: projectionHash,
       tokenVersion: 1,
+      creationActivityId: audit.id,
     });
     expect(await db.select().from(agentApiKeys).where(eq(agentApiKeys.keyHash, projectionHash))).toEqual([]);
     expect(await db.select().from(companyWorkProjectionCredentials)
       .where(eq(companyWorkProjectionCredentials.keyHash, projectionHash))).toHaveLength(1);
+  }, 30_000);
+
+  it("keeps source-integrity readiness indexed and below the API latency budget at 100k revisions", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Synthetic scale company",
+      issuePrefix: `Q${companyId.slice(0, 6)}`,
+    });
+    await db.execute(sql`
+      WITH generated AS (
+        SELECT
+          ${companyId}::uuid AS company_id,
+          gen_random_uuid() AS issue_id,
+          sequence::bigint AS revision,
+          gen_random_uuid() AS integrity_token
+        FROM generate_series(1, 100000) AS sequence
+      )
+      INSERT INTO public.issue_work_projection_versions (
+        company_id, issue_id, revision, deleted, identifier,
+        project_reference_valid, assignee_agent_reference_valid,
+        assignee_user_reference_valid, status, priority, created_at, updated_at,
+        integrity_token, recorded_at
+      )
+      SELECT
+        company_id, issue_id, revision, false, 'SCALE-' || revision::text,
+        true, true, true, 'todo', 'medium', now(), now(), integrity_token, now()
+      FROM generated
+    `);
+    await db.execute(sql`
+      INSERT INTO public.company_work_projection_source_events (
+        company_id, revision, integrity_token, recorded_at
+      )
+      SELECT company_id, revision, integrity_token, recorded_at
+      FROM public.issue_work_projection_versions
+      WHERE company_id = ${companyId}::uuid
+    `);
+    await db.execute(sql`
+      WITH latest AS (
+        SELECT revision, integrity_token
+        FROM public.issue_work_projection_versions
+        WHERE company_id = ${companyId}::uuid
+        ORDER BY revision DESC
+        LIMIT 1
+      )
+      UPDATE public.company_work_projection_revisions
+      SET current_revision = latest.revision,
+          current_integrity_token = latest.integrity_token,
+          updated_at = now()
+      FROM latest
+      WHERE company_id = ${companyId}::uuid
+    `);
+    await db.execute(sql`
+      WITH latest AS (
+        SELECT revision, integrity_token
+        FROM public.issue_work_projection_versions
+        WHERE company_id = ${companyId}::uuid
+        ORDER BY revision DESC
+        LIMIT 1
+      )
+      UPDATE public.company_work_projection_source_witnesses
+      SET current_revision = latest.revision,
+          current_integrity_token = latest.integrity_token,
+          updated_at = now()
+      FROM latest
+      WHERE company_id = ${companyId}::uuid
+    `);
+
+    const client = postgres(connectionString, { max: 1, onnotice: () => undefined });
+    try {
+      const explain = await client.unsafe(`
+        EXPLAIN (ANALYZE, FORMAT JSON)
+        SELECT
+          revisions.current_revision,
+          revisions.current_integrity_token,
+          witnesses.current_revision AS witness_revision,
+          witnesses.current_integrity_token AS witness_integrity_token,
+          history.integrity_token AS history_integrity_token,
+          source_event.integrity_token AS source_event_integrity_token
+        FROM public.company_work_projection_revisions AS revisions
+        JOIN public.company_work_projection_source_witnesses AS witnesses
+          ON witnesses.company_id = revisions.company_id
+        LEFT JOIN public.issue_work_projection_versions AS history
+          ON history.company_id = revisions.company_id
+          AND history.revision = revisions.current_revision
+        LEFT JOIN public.company_work_projection_source_events AS source_event
+          ON source_event.company_id = revisions.company_id
+          AND source_event.revision = revisions.current_revision
+        WHERE revisions.company_id = '${companyId}'::uuid
+      `);
+      const plan = explain[0]?.["QUERY PLAN"]?.[0];
+      const serializedPlan = JSON.stringify(plan);
+      expect(serializedPlan).toContain("Index Scan");
+      expect(serializedPlan).not.toContain("Seq Scan");
+      expect(plan?.["Execution Time"]).toBeLessThan(250);
+    } finally {
+      await client.end();
+    }
   }, 30_000);
 });

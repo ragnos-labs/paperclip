@@ -194,14 +194,19 @@ Invariant: plaintext key shown once at creation; only hash stored.
 - `name` text not null
 - `key_hash` text unique not null
 - `token_version` int not null; currently exactly `1`
+- `creation_activity_id` uuid fk `activity_log.id` not null
 - `created_at` timestamptz not null
 - `revoked_at` timestamptz null
+- `revocation_activity_id` uuid fk `activity_log.id` null
 
 Invariants: plaintext `pcwp_v1_` credential shown once at creation; only its
 hash is stored. This table has no agent, role, membership, permission, or
 `last_used_at` relation. Older application versions inspect only
 `agent_api_keys`, so application rollback cannot reinterpret this capability
-as a standard agent key.
+as a standard agent key. Only current owner/admin board principals with
+`work_projection_credentials:manage` (plus existing local/instance admin
+authority) manage credentials. Creation/revocation and required activity rows
+are one transaction; active credentials cannot be unlogged.
 
 ## 7.4 `goals`
 
@@ -574,6 +579,12 @@ side-effect free, and raw live-events WebSocket upgrades reject this token
 family before observation. The strict response, snapshot, cursor, error,
 migration-lock, and recovery contract is defined in
 [company-work-projection-contract.md](./company-work-projection-contract.md).
+The independent source witness advances transactionally with every eligible
+source change and is not part of the projection counter/history restore unit.
+Reference validity is historical data, not a join against mutable current
+project, agent, or membership rows. Reads use shared PostgreSQL advisory-lock
+admission and require an external sustained request-rate limit as defined in the
+contract.
 
 ## 9.4 Permission Terminology and Default Visibility Rule
 

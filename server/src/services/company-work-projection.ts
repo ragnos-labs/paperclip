@@ -6,6 +6,7 @@ import {
   COMPANY_WORK_PROJECTION_DEFAULT_PAGE_SIZE,
   COMPANY_WORK_PROJECTION_MAX_PAGE_SIZE,
   COMPANY_WORK_PROJECTION_SCHEMA_VERSION,
+  companyWorkProjectionItemFieldsSchema,
   companyWorkProjectionItemSchema,
   companyWorkProjectionResponseSchema,
   type CompanyWorkProjectionItem,
@@ -42,11 +43,15 @@ type ProjectionRow = {
 
 type SnapshotInput = {
   companyId: string;
+  credentialId: string;
   cursor?: string;
   pageSize?: number;
   now?: Date;
   cursorSecretForTest?: string;
+  cursorPreviousSecretForTest?: string;
 };
+
+const MAX_SHARED_CONCURRENT_READS_PER_CREDENTIAL = 4;
 
 function projectionError(status: number, message: string, code: string): never {
   throw new HttpError(status, message, { code });
@@ -80,11 +85,32 @@ function nullableInstant(value: Date | string | null): string | null {
   return date.toISOString();
 }
 
-/** RFC 8785-compatible canonical JSON for this contract's JSON value subset. */
+function assertWellFormedUnicode(value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        throw new TypeError("Canonical JSON rejects lone Unicode surrogates");
+      }
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      throw new TypeError("Canonical JSON rejects lone Unicode surrogates");
+    }
+  }
+}
+
+function canonicalString(value: string): string {
+  assertWellFormedUnicode(value);
+  return JSON.stringify(value);
+}
+
+/** RFC 8785 JSON Canonicalization Scheme for JSON-domain values. */
 export function canonicalCompanyWorkProjectionJson(value: unknown): string {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
+  if (value === null || typeof value === "boolean") {
     return JSON.stringify(value);
   }
+  if (typeof value === "string") return canonicalString(value);
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new TypeError("Canonical JSON does not support non-finite numbers");
     return JSON.stringify(value);
@@ -93,10 +119,14 @@ export function canonicalCompanyWorkProjectionJson(value: unknown): string {
     return `[${value.map(canonicalCompanyWorkProjectionJson).join(",")}]`;
   }
   if (typeof value === "object") {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError("Canonical JSON supports only plain JSON objects");
+    }
     const record = value as Record<string, unknown>;
     return `{${Object.keys(record)
       .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalCompanyWorkProjectionJson(record[key])}`)
+      .map((key) => `${canonicalString(key)}:${canonicalCompanyWorkProjectionJson(record[key])}`)
       .join(",")}}`;
   }
   throw new TypeError("Canonical JSON supports only JSON values");
@@ -137,9 +167,13 @@ function toItem(row: ProjectionRow): CompanyWorkProjectionItem {
     },
     revision: decimal(row.revision),
   };
+  const parsedFields = companyWorkProjectionItemFieldsSchema.safeParse(safeFields);
+  if (!parsedFields.success) {
+    projectionError(409, "Work projection contains incompatible source data", "WORK_PROJECTION_INCOMPATIBLE");
+  }
   const candidate = {
-    ...safeFields,
-    evidence: { algorithm: "sha256" as const, digest: canonicalDigest(safeFields) },
+    ...parsedFields.data,
+    evidence: { algorithm: "sha256" as const, digest: canonicalDigest(parsedFields.data) },
   };
   const parsed = companyWorkProjectionItemSchema.safeParse(candidate);
   if (!parsed.success) {
@@ -165,6 +199,7 @@ export function companyWorkProjectionService(db: Db) {
             input.companyId,
             now,
             input.cursorSecretForTest,
+            input.cursorPreviousSecretForTest,
           )
         : null;
       if (decoded && input.pageSize !== undefined && input.pageSize !== decoded.pageSize) {
@@ -182,40 +217,76 @@ export function companyWorkProjectionService(db: Db) {
         // the application tests that compare every projection-adjacent table.
         await tx.execute(sql.raw("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"));
 
+        let admitted = false;
+        for (let slot = 0; slot < MAX_SHARED_CONCURRENT_READS_PER_CREDENTIAL; slot += 1) {
+          const admissionRows = Array.from(await tx.execute(sql<{ acquired: boolean }>`
+            SELECT pg_try_advisory_xact_lock(
+              hashtextextended(
+                ${`company-work-projection-admission:v1:${input.credentialId}:${slot}`},
+                0
+              )
+            ) AS acquired
+          `));
+          if (admissionRows[0]?.acquired) {
+            admitted = true;
+            break;
+          }
+        }
+        if (!admitted) {
+          projectionError(429, "Work projection read is rate limited", "WORK_PROJECTION_RATE_LIMITED");
+        }
+
         const revisionRows = Array.from(await tx.execute(sql<{
           current_revision: string | number | bigint;
+          current_integrity_token: string;
+          witness_revision: string | number | bigint;
+          witness_integrity_token: string;
+          history_integrity_token: string | null;
+          source_event_integrity_token: string | null;
         }>`
-          SELECT current_revision
-          FROM public.company_work_projection_revisions
-          WHERE company_id = ${input.companyId}::uuid
+          SELECT
+            revisions.current_revision,
+            revisions.current_integrity_token,
+            witnesses.current_revision AS witness_revision,
+            witnesses.current_integrity_token AS witness_integrity_token,
+            history.integrity_token AS history_integrity_token,
+            source_event.integrity_token AS source_event_integrity_token
+          FROM public.company_work_projection_revisions AS revisions
+          JOIN public.company_work_projection_source_witnesses AS witnesses
+            ON witnesses.company_id = revisions.company_id
+          LEFT JOIN public.issue_work_projection_versions AS history
+            ON history.company_id = revisions.company_id
+            AND history.revision = revisions.current_revision
+          LEFT JOIN public.company_work_projection_source_events AS source_event
+            ON source_event.company_id = revisions.company_id
+            AND source_event.revision = revisions.current_revision
+          WHERE revisions.company_id = ${input.companyId}::uuid
         `));
         if (!revisionRows[0]) {
-          projectionError(409, "Work projection counter is missing", "WORK_PROJECTION_INCOMPATIBLE");
+          projectionError(409, "Work projection integrity state is missing", "WORK_PROJECTION_INCOMPATIBLE");
         }
-        const currentRevision = decimal(revisionRows[0].current_revision);
+        const integrity = revisionRows[0];
+        const currentRevision = decimal(integrity.current_revision);
+        const witnessRevision = decimal(integrity.witness_revision);
+        const expectedEmpty = currentRevision === "0";
+        if (
+          witnessRevision !== currentRevision
+          || integrity.witness_integrity_token !== integrity.current_integrity_token
+          || (!expectedEmpty && (
+            integrity.history_integrity_token !== integrity.current_integrity_token
+            || integrity.source_event_integrity_token !== integrity.current_integrity_token
+          ))
+          || (expectedEmpty && (
+            integrity.history_integrity_token !== null
+            || integrity.source_event_integrity_token !== null
+          ))
+        ) {
+          projectionError(409, "Work projection source witness does not match", "WORK_PROJECTION_INCOMPATIBLE");
+        }
         const issuedAt = decoded?.issuedAt ?? bucketedNow(now).toISOString();
         const expiresAt = decoded?.expiresAt
           ?? new Date(new Date(issuedAt).getTime() + SNAPSHOT_TTL_MS).toISOString();
         const snapshotRevision = decoded?.snapshotRevision ?? currentRevision;
-
-        const integrityRows = Array.from(await tx.execute(sql<{
-          row_count: string | number | bigint;
-          min_revision: string | number | bigint | null;
-          max_revision: string | number | bigint | null;
-        }>`
-          SELECT count(*) AS row_count, min(revision) AS min_revision, max(revision) AS max_revision
-          FROM public.issue_work_projection_versions
-          WHERE company_id = ${input.companyId}::uuid
-        `));
-        const integrity = integrityRows[0];
-        const rowCount = decimal(integrity?.row_count ?? 0);
-        const expectedEmpty = currentRevision === "0";
-        if (
-          rowCount !== currentRevision ||
-          (!expectedEmpty && (decimal(integrity?.min_revision ?? 0) !== "1" || decimal(integrity?.max_revision ?? 0) !== currentRevision))
-        ) {
-          projectionError(409, "Work projection snapshot has a revision gap", "WORK_PROJECTION_INCOMPATIBLE");
-        }
 
         if (BigInt(snapshotRevision) > BigInt(currentRevision)) {
           projectionError(410, "Work projection snapshot is stale", "WORK_PROJECTION_SNAPSHOT_STALE");
@@ -230,7 +301,9 @@ export function companyWorkProjectionService(db: Db) {
           WITH latest AS (
             SELECT DISTINCT ON (issue_id)
               issue_id, revision, deleted, identifier, project_id,
-              assignee_agent_id, assignee_user_id, status, priority,
+              assignee_agent_id, assignee_user_id,
+              project_reference_valid, assignee_agent_reference_valid,
+              assignee_user_reference_valid, status, priority,
               started_at, completed_at, cancelled_at, created_at, updated_at
             FROM public.issue_work_projection_versions
             WHERE company_id = ${input.companyId}::uuid
@@ -241,23 +314,8 @@ export function companyWorkProjectionService(db: Db) {
             issue_id, revision, identifier, project_id,
             assignee_agent_id, assignee_user_id, status, priority,
             started_at, completed_at, cancelled_at, created_at, updated_at,
-            CASE WHEN project_id IS NULL THEN true ELSE EXISTS (
-              SELECT 1 FROM public.projects
-              WHERE public.projects.id = latest.project_id
-                AND public.projects.company_id = ${input.companyId}::uuid
-            ) END AS project_reference_valid,
-            CASE WHEN assignee_agent_id IS NULL THEN true ELSE EXISTS (
-              SELECT 1 FROM public.agents
-              WHERE public.agents.id = latest.assignee_agent_id
-                AND public.agents.company_id = ${input.companyId}::uuid
-            ) END AS assignee_agent_reference_valid,
-            CASE WHEN assignee_user_id IS NULL THEN true ELSE EXISTS (
-              SELECT 1 FROM public.company_memberships
-              WHERE public.company_memberships.company_id = ${input.companyId}::uuid
-                AND public.company_memberships.principal_type = 'user'
-                AND public.company_memberships.principal_id = latest.assignee_user_id
-                AND public.company_memberships.status = 'active'
-            ) END AS assignee_user_reference_valid
+            project_reference_valid, assignee_agent_reference_valid,
+            assignee_user_reference_valid
           FROM latest
           WHERE deleted = false
             AND (
