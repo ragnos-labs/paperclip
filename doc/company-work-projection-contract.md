@@ -13,22 +13,32 @@ and planning lifecycle. This contract gives a machine client a bounded,
 company-scoped projection of that authority. It does not add an orchestration
 service, executor, recovery mechanism, UI, or write path.
 
-The only route is:
+The only machine read route is:
 
 `GET /api/v1/companies/:companyId/work-projection`
 
-`HEAD` has the same authorization boundary and headers. The route requires an
-agent API key whose immutable scope is exactly
-`company_work_projection_read`. A session, board key, standard agent key,
-task-bridge key, skill-test key, or agent JWT is rejected. The key is bound to
-the company recorded at creation. Later membership, role, or permission changes
-do not expand it. Global middleware rejects this credential on every other
-path and on every non-GET/HEAD method.
+`HEAD` is not part of the contract and is denied. The route requires a
+dedicated `pcwp_v1_` credential stored only in
+`company_work_projection_credentials`. It is not an agent API key or JWT scope,
+has no agent identity, and is bound to the company recorded at creation. Later
+membership, role, or permission changes cannot expand it. Global middleware
+rejects this credential on every other path and on every non-GET method.
+
+Board operators can create, list, and revoke these credentials through the
+company-scoped `/api/v1/companies/:companyId/work-projection-credentials`
+routes. Plaintext is returned once at creation. Older Paperclip binaries query
+only `agent_api_keys`, so they cannot discover or reinterpret these hashes. The
+amended unreleased migration also revokes any residue from the earlier
+agent-scope candidate. Malformed and unknown token versions stay inside the
+reserved `pcwp_` family and fail closed without falling through to another auth
+mechanism.
 
 Authenticating or reading through this scope does not update
-`agent_api_keys.last_used_at`, insert activity or denial records, repair
-recovery state, initialize schema, or persist any other observation. The read
-service also starts its database transaction with PostgreSQL
+credential metadata, insert activity or denial records, repair recovery state,
+initialize schema, or persist any other observation. Projection credentials
+are rejected before the live-events WebSocket performs any key-table update,
+upgrade, subscription, or event delivery. The read service also starts its
+database transaction with PostgreSQL
 `READ ONLY`, so an accidental write fails at the database boundary.
 
 ## Bounded response
@@ -46,20 +56,35 @@ An item contains only:
 - timezone-aware created, updated, started, completed, and cancelled instants;
 - the item revision and a SHA-256 digest of the safe fields.
 
+Digests are SHA-256 over the UTF-8 bytes of RFC 8785 JSON Canonicalization
+Scheme output. Object keys are lexicographically sorted, arrays preserve order,
+and only JSON strings, finite numbers, booleans, null, arrays, and objects are
+accepted. This makes evidence and ETag values reproducible across languages.
+
 It never contains titles, descriptions, prompts, comments, adapter or execution
 configuration, credentials, workspaces or local paths, recovery internals, raw
 payloads, or private metadata. An issue with an ambiguous owner, unknown state,
 unknown priority, oversized identifier, or malformed timestamp makes the
 snapshot incompatible; the server fails closed instead of dropping or guessing
-the value.
+the value. A project, agent owner, or user owner that does not belong to the
+issue company also fails closed rather than leaking the foreign identifier.
 
 ## Snapshot and pagination semantics
 
-Migration `0184_company_work_projection` adds a per-company monotonic revision
-and append-only safe-field history. An issue trigger records each visible,
-non-harness insert, update, hide, unhide, company move, and delete in the same
-database transaction as the source mutation. Deletions and removals from the
-projection are tombstones. Revisions are contiguous within a company.
+Migration `0184_company_work_projection` takes `SHARE ROW EXCLUSIVE` locks on
+`public.companies` and `public.issues` for its full transaction. This blocks
+company and issue writes while counter rows are seeded, triggers are installed,
+and existing work is backfilled, eliminating the pre-trigger gap. The lock is
+held for the duration of the schema work plus an O(visible issue count)
+backfill; operators should use a maintenance window for large tables.
+
+Every existing company receives an explicit revision-zero row and an
+`AFTER INSERT` company trigger creates one for future companies. The issue
+trigger records each visible insert, update, hide, unhide, harness toggle,
+plugin-visibility toggle, company move, and delete in the same transaction as
+the source mutation. Normal work-list semantics apply: hidden, harness, and
+plugin-operation issues are excluded. Deletions and removals are tombstones.
+Revisions are contiguous within a company.
 
 The first page fixes a high-water revision. Each later page selects the latest
 version of every issue at or below that high-water mark, orders by item revision
@@ -69,6 +94,11 @@ issue time, and expiry. It is HMAC-signed with an instance- and company-derived
 key. No process-local cursor state is required, so replay and restart are
 deterministic until expiry.
 
+Reads require the company counter row and validate full history count, minimum,
+and maximum against the current counter before serving any snapshot. Missing,
+behind, ahead, gapped, or partially restored state is incompatible; it is never
+interpreted as empty or complete.
+
 Snapshots expire after five minutes. Replaying a cursor returns the same page;
 clients may safely deduplicate by item ID and revision. A concurrent issue
 mutation advances the live collection but cannot alter an existing snapshot.
@@ -77,13 +107,20 @@ cursor, a high-water revision ahead of current storage, a revision gap, a
 tampered cursor, or an incompatible version, it returns an explicit error and
 never marks the result complete.
 
+A cursor presented to a different company is reported as malformed. The
+endpoint does not provide an authorization oracle about whether that cursor is
+valid for another company.
+
 Page size defaults to 100 and is capped at 500. `hasMore=true` always pairs with
 `completeness="partial"` and a cursor. A terminal page, including an empty
 collection, uses `hasMore=false`, `nextCursor=null`, and
 `completeness="complete"`.
 
-Every page has a strong `ETag`. `If-None-Match` returns `304`. The response also
-sets API version, schema version, and snapshot revision headers.
+Cursor signing is an endpoint-readiness requirement: missing signing material
+returns `503` even for empty or one-page collections. Every page has a strong
+`ETag`. `If-None-Match` follows HTTP weak comparison for GET, including tag
+lists, weak tags, and `*`; a match returns `304`. The response also sets API
+version, schema version, and snapshot revision headers.
 
 ## Result states
 
@@ -105,8 +142,9 @@ expired, rate-limited, and unavailable remain distinct machine states.
 ## Upgrade, recovery, and rollback
 
 The migration backfills one deterministic safe version per currently visible
-non-harness issue, then installs the trigger. Existing issue APIs and rows are
-unchanged. Deployments must apply the migration before enabling clients.
+normal-list issue while writes are locked and capture triggers are already
+installed. Existing issue APIs and rows are unchanged. Deployments must apply
+the migration before enabling clients.
 
 If revision integrity fails, stop serving the projection and restore the
 projection tables from a database backup or rebuild them during a controlled
@@ -115,6 +153,9 @@ clients may hold cursors. A rollback must disable the route before dropping the
 trigger, functions, and two projection tables; outstanding cursors then become
 unavailable rather than silently changing meaning.
 
-The append-only table has no automatic pruning in v1. A later retention policy
+Rolling the application binary back leaves dedicated projection hashes in a
+table older versions do not query, so those credentials become unusable rather
+than becoming standard agents. The append-only table has no automatic pruning
+in v1. A later retention policy
 must preserve every unexpired high-water snapshot and requires a separate
 reviewed storage decision.

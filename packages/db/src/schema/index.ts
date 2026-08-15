@@ -38,6 +38,7 @@ export { goals } from "./goals.js";
 export { folders } from "./folders.js";
 export { issues } from "./issues.js";
 export {
+  companyWorkProjectionCredentials,
   companyWorkProjectionRevisions,
   issueWorkProjectionVersions,
 } from "./company_work_projection.js";

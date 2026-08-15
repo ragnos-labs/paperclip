@@ -1,5 +1,42 @@
-import { bigint, boolean, index, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import {
+  bigint,
+  boolean,
+  index,
+  integer,
+  pgTable,
+  primaryKey,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
+
+/**
+ * Dedicated machine credentials for the work projection. These hashes never
+ * live in agent_api_keys, so a binary that predates this capability cannot
+ * reinterpret a restrictive credential as a standard agent key.
+ */
+export const companyWorkProjectionCredentials = pgTable(
+  "company_work_projection_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    keyHash: text("key_hash").notNull(),
+    tokenVersion: integer("token_version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (table) => ({
+    keyHashUniqueIdx: uniqueIndex("company_work_projection_credentials_key_hash_idx")
+      .on(table.keyHash),
+    companyCreatedIdx: index("company_work_projection_credentials_company_created_idx")
+      .on(table.companyId, table.createdAt),
+  }),
+);
 
 export const companyWorkProjectionRevisions = pgTable("company_work_projection_revisions", {
   companyId: uuid("company_id")

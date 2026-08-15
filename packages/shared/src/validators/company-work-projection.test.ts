@@ -1,15 +1,28 @@
 import { describe, expect, it } from "vitest";
 import {
   COMPANY_WORK_PROJECTION_API_VERSION,
+  createCompanyWorkProjectionCredentialSchema,
+  createdCompanyWorkProjectionCredentialSchema,
   companyWorkProjectionResponseSchema,
 } from "./company-work-projection.js";
 import { agentApiKeyScopeSchema } from "./agent.js";
 
 describe("company work projection contracts", () => {
-  it("accepts the immutable machine read scope", () => {
-    expect(agentApiKeyScopeSchema.parse({ kind: "company_work_projection_read" })).toEqual({
-      kind: "company_work_projection_read",
-    });
+  it("keeps projection credentials outside normal agent scope composition", () => {
+    expect(agentApiKeyScopeSchema.safeParse({ kind: "company_work_projection_read" }).success).toBe(false);
+    expect(createdCompanyWorkProjectionCredentialSchema.parse({
+      id: "00000000-0000-4000-8000-000000000003",
+      companyId: "00000000-0000-4000-8000-000000000001",
+      name: "Synthetic reader",
+      tokenVersion: 1,
+      token: `pcwp_v1_${"a".repeat(48)}`,
+      createdAt: "2026-08-14T20:00:00.000Z",
+      revokedAt: null,
+    }).token).toMatch(/^pcwp_v1_/);
+    expect(createCompanyWorkProjectionCredentialSchema.safeParse({
+      name: "Synthetic reader",
+      unexpected: "private",
+    }).success).toBe(false);
   });
 
   it("keeps the response closed and versioned", () => {

@@ -261,7 +261,16 @@ each company. `issue_work_projection_versions` is an append-only history of only
 the issue fields approved for the machine read projection. The
 `issues_work_projection_capture` trigger appends a version or tombstone in the
 same transaction as every projected issue change. The projection read checks
-revision contiguity and executes under a PostgreSQL read-only transaction.
+the required counter plus full-history count/minimum/maximum and executes under
+a PostgreSQL read-only transaction. Dedicated hashes live in
+`company_work_projection_credentials`, never `agent_api_keys`.
+
+Migration `0184` holds `SHARE ROW EXCLUSIVE` locks on `public.companies` and
+`public.issues` across counter seeding, trigger installation, and the complete
+backfill. The lock blocks company/issue writes for the duration of the migration
+and its O(visible issue count) backfill, so large installations should schedule
+a maintenance window. Existing and future companies receive deterministic
+revision-zero rows; missing rows are corruption, not an empty collection.
 
 The full authority, pagination, failure, upgrade, and rollback contract is in
 [company-work-projection-contract.md](./company-work-projection-contract.md).

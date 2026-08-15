@@ -18,7 +18,11 @@ import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
-import { forbidden, unprocessable } from "../errors.js";
+import { forbidden, HttpError, unprocessable } from "../errors.js";
+import {
+  authenticateCompanyWorkProjectionCredential,
+  isCompanyWorkProjectionCredentialToken,
+} from "../services/company-work-projection-credentials.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -226,6 +230,31 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       return;
     }
 
+    if (isCompanyWorkProjectionCredentialToken(token)) {
+      // A reserved projection-family token must replace local_trusted's
+      // implicit board actor even when the token is malformed, unknown,
+      // revoked, or from a future version. It must never fall through to a
+      // more powerful authentication mechanism.
+      req.actor = { type: "none", source: "none" };
+      try {
+        const credential = await authenticateCompanyWorkProjectionCredential(db, token);
+        if (credential) {
+          req.actor = {
+            type: "none",
+            companyId: credential.companyId,
+            credentialId: credential.credentialId,
+            source: "none",
+          };
+        }
+        next();
+      } catch {
+        next(new HttpError(503, "Work projection authentication is unavailable", {
+          code: "WORK_PROJECTION_UNAVAILABLE",
+        }));
+      }
+      return;
+    }
+
     const boardKey = await boardAuth.findBoardApiKeyByToken(token);
     if (boardKey) {
       const access = await boardAuth.resolveBoardAccess(boardKey.userId);
@@ -279,23 +308,6 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       }
 
       const normalizedJwtScope = normalizeAgentApiKeyScope(claims.key_scope);
-      if (normalizedJwtScope.kind === "company_work_projection_read") {
-        // This capability is key-only. Preserve the scope so the global guard
-        // can reject it without performing run-header audits or membership
-        // resolution, both of which are outside its side-effect-free boundary.
-        req.actor = {
-          type: "agent",
-          agentId: claims.sub,
-          companyId: claims.company_id,
-          keyScope: normalizedJwtScope,
-          runId: claims.run_id,
-          onBehalfOfUserId: null,
-          onBehalfOfMemberships: [],
-          source: "agent_jwt",
-        };
-        next();
-        return;
-      }
 
       const normalizedRunIdHeader = normalizeOptionalString(runIdHeader);
       if (normalizedRunIdHeader && normalizedRunIdHeader !== claims.run_id) {
@@ -345,16 +357,10 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     }
 
     const normalizedKeyScope = normalizeAgentApiKeyScope(key.scopeConfig);
-    const isCompanyWorkProjectionReader = normalizedKeyScope.kind === "company_work_projection_read";
-
-    // Projection credentials are deliberately non-observing: authentication
-    // must not mutate last_used_at or append a denial/audit record.
-    if (!isCompanyWorkProjectionReader) {
-      await db
-        .update(agentApiKeys)
-        .set({ lastUsedAt: new Date() })
-        .where(eq(agentApiKeys.id, key.id));
-    }
+    await db
+      .update(agentApiKeys)
+      .set({ lastUsedAt: new Date() })
+      .where(eq(agentApiKeys.id, key.id));
 
     const agentRecord = await db
       .select()
@@ -368,22 +374,6 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       agentRecord.status === "terminated" ||
       agentRecord.status === "pending_approval"
     ) {
-      next();
-      return;
-    }
-
-    if (isCompanyWorkProjectionReader) {
-      req.actor = {
-        type: "agent",
-        agentId: key.agentId,
-        companyId: key.companyId,
-        keyId: key.id,
-        keyScope: normalizedKeyScope,
-        onBehalfOfUserId: null,
-        onBehalfOfMemberships: [],
-        runId: runIdHeader || undefined,
-        source: "agent_key",
-      };
       next();
       return;
     }

@@ -156,19 +156,24 @@ describe("openapi routes", () => {
     expect(res.body.paths["/api/agents/{id}/keys"].post.summary).toBe("Create an agent API key");
     expect(res.body.paths["/api/v1/companies/{companyId}/work-projection"].get).toMatchObject({
       summary: "Read an immutable, company-scoped work snapshot",
-      security: [{ AgentBearerAuth: [] }],
+      security: [{ CompanyWorkProjectionBearerAuth: [] }],
       "x-paperclip-authorization": {
-        actor: "agent_key",
-        scope: "company_work_projection_read",
+        actor: "company_work_projection_key",
+        tokenVersion: 1,
         companyBound: true,
       },
     });
     expect(res.body.components.schemas.CompanyWorkProjectionV1.properties).toHaveProperty("items");
     expect(res.body.components.schemas.CompanyWorkProjectionV1.additionalProperties).toBe(false);
+    expect(res.body.components.schemas.CompanyWorkProjectionCredentialV1.additionalProperties).toBe(false);
+    expect(res.body.components.schemas.Error.additionalProperties).toBeUndefined();
+    expect(res.body.paths["/api/v1/companies/{companyId}/work-projection-credentials"].post["x-paperclip-authorization"])
+      .toEqual({ actor: "board" });
     expect(res.body.components.securitySchemes).toMatchObject({
       BoardSessionAuth: { type: "apiKey", in: "cookie" },
       BoardApiKeyAuth: { type: "http", scheme: "bearer" },
       AgentBearerAuth: { type: "http", scheme: "bearer" },
+      CompanyWorkProjectionBearerAuth: { type: "http", scheme: "bearer" },
     });
     expect(res.body.paths["/api/health"].get.security).toEqual([]);
     expect(res.body.paths["/mcp/gateways/{gatewayPublicId}"].post.security).toEqual([]);

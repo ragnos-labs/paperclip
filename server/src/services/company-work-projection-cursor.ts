@@ -47,6 +47,13 @@ function signature(payload: string, companyId: string, secretOverride?: string):
   return createHmac("sha256", signingKey(companyId, secretOverride)).update(payload).digest("base64url");
 }
 
+export function assertCompanyWorkProjectionCursorSigningReady(
+  companyId: string,
+  secretOverride?: string,
+): void {
+  signingKey(companyId, secretOverride);
+}
+
 export function encodeCompanyWorkProjectionCursor(
   value: CompanyWorkProjectionCursor,
   secretOverride?: string,
@@ -92,7 +99,8 @@ export function decodeCompanyWorkProjectionCursor(
   }
 
   if (parsed.data.companyId !== expectedCompanyId) {
-    cursorError("Work projection cursor belongs to another company", "WORK_PROJECTION_FORBIDDEN", 403);
+    // Do not disclose whether the signed cursor belongs to another company.
+    cursorError("Malformed work projection cursor");
   }
 
   if (new Date(parsed.data.expiresAt).getTime() <= now.getTime()) {

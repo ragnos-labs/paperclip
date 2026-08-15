@@ -202,6 +202,9 @@ import {
   companyWorkProjectionQuerySchema,
   companyWorkProjectionResponseSchema,
   companyWorkProjectionErrorSchema,
+  createCompanyWorkProjectionCredentialSchema,
+  companyWorkProjectionCredentialSchema,
+  createdCompanyWorkProjectionCredentialSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -276,7 +279,7 @@ function applyNumberChecks(jsonSchema: JsonSchema, checks: Array<Record<string, 
   }
 }
 
-function zodToOpenApiSchema(schema: z.ZodTypeAny): JsonSchema {
+function zodToOpenApiSchema(schema: z.ZodTypeAny, closeStrictObjects = false): JsonSchema {
   const unwrapped = unwrapSchema(schema);
   const typeName = zodTypeName(unwrapped);
 
@@ -313,28 +316,28 @@ function zodToOpenApiSchema(schema: z.ZodTypeAny): JsonSchema {
   }
 
   if (typeName === "ZodArray") {
-    return { type: "array", items: zodToOpenApiSchema(unwrapped._def.type) };
+    return { type: "array", items: zodToOpenApiSchema(unwrapped._def.type, closeStrictObjects) };
   }
 
   if (typeName === "ZodRecord") {
     return {
       type: "object",
-      additionalProperties: zodToOpenApiSchema(unwrapped._def.valueType),
+      additionalProperties: zodToOpenApiSchema(unwrapped._def.valueType, closeStrictObjects),
     };
   }
 
   if (typeName === "ZodNullable") {
-    return { ...zodToOpenApiSchema(unwrapped._def.innerType), nullable: true };
+    return { ...zodToOpenApiSchema(unwrapped._def.innerType, closeStrictObjects), nullable: true };
   }
 
   if (typeName === "ZodUnion") {
-    return { oneOf: unwrapped._def.options.map((option: z.ZodTypeAny) => zodToOpenApiSchema(option)) };
+    return { oneOf: unwrapped._def.options.map((option: z.ZodTypeAny) => zodToOpenApiSchema(option, closeStrictObjects)) };
   }
 
   if (typeName === "ZodDiscriminatedUnion") {
     return {
       oneOf: Array.from(unwrapped._def.options.values()).map((option) =>
-        zodToOpenApiSchema(option as z.ZodTypeAny),
+        zodToOpenApiSchema(option as z.ZodTypeAny, closeStrictObjects),
       ),
     };
   }
@@ -342,8 +345,8 @@ function zodToOpenApiSchema(schema: z.ZodTypeAny): JsonSchema {
   if (typeName === "ZodIntersection") {
     return {
       allOf: [
-        zodToOpenApiSchema(unwrapped._def.left),
-        zodToOpenApiSchema(unwrapped._def.right),
+        zodToOpenApiSchema(unwrapped._def.left, closeStrictObjects),
+        zodToOpenApiSchema(unwrapped._def.right, closeStrictObjects),
       ],
     };
   }
@@ -354,12 +357,14 @@ function zodToOpenApiSchema(schema: z.ZodTypeAny): JsonSchema {
     const required: string[] = [];
     for (const [key, value] of Object.entries(shape)) {
       const propertySchema = value as z.ZodTypeAny;
-      properties[key] = zodToOpenApiSchema(propertySchema);
+      properties[key] = zodToOpenApiSchema(propertySchema, closeStrictObjects);
       if (!isOptionalSchema(propertySchema)) required.push(key);
     }
     const jsonSchema: JsonSchema = { type: "object", properties };
     if (required.length > 0) jsonSchema.required = required;
-    if (unwrapped._def.unknownKeys === "strict") jsonSchema.additionalProperties = false;
+    if (closeStrictObjects && unwrapped._def.unknownKeys === "strict") {
+      jsonSchema.additionalProperties = false;
+    }
     return jsonSchema;
   }
 
@@ -422,8 +427,8 @@ class OpenAPIRegistry {
   private readonly schemas: Record<string, JsonSchema> = {};
   private readonly paths: Array<OpenApiPathRegistration> = [];
 
-  register(name: string, schema: z.ZodTypeAny) {
-    this.schemas[name] = zodToOpenApiSchema(schema);
+  register(name: string, schema: z.ZodTypeAny, options: { closeStrictObjects?: boolean } = {}) {
+    this.schemas[name] = zodToOpenApiSchema(schema, options.closeStrictObjects ?? false);
     return { $ref: `#/components/schemas/${name}` };
   }
 
@@ -475,10 +480,22 @@ const ErrorSchema = registry.register(
 const CompanyWorkProjectionResponseSchema = registry.register(
   "CompanyWorkProjectionV1",
   companyWorkProjectionResponseSchema,
+  { closeStrictObjects: true },
 );
 const CompanyWorkProjectionErrorSchema = registry.register(
   "CompanyWorkProjectionErrorV1",
   companyWorkProjectionErrorSchema,
+  { closeStrictObjects: true },
+);
+const CompanyWorkProjectionCredentialSchema = registry.register(
+  "CompanyWorkProjectionCredentialV1",
+  companyWorkProjectionCredentialSchema,
+  { closeStrictObjects: true },
+);
+const CreatedCompanyWorkProjectionCredentialSchema = registry.register(
+  "CreatedCompanyWorkProjectionCredentialV1",
+  createdCompanyWorkProjectionCredentialSchema,
+  { closeStrictObjects: true },
 );
 
 const responses = {
@@ -670,6 +687,7 @@ type OpenApiAuthLevel =
 const BOARD_SESSION_AUTH_SCHEME = "BoardSessionAuth";
 const BOARD_API_KEY_AUTH_SCHEME = "BoardApiKeyAuth";
 const AGENT_BEARER_AUTH_SCHEME = "AgentBearerAuth";
+const COMPANY_WORK_PROJECTION_AUTH_SCHEME = "CompanyWorkProjectionBearerAuth";
 
 function securityRequirement(name: string): Record<string, string[]> {
   return { [name]: [] };
@@ -720,6 +738,9 @@ const BOARD_ONLY_PREFIXES = [
 ];
 
 const BOARD_ONLY_OPERATIONS = new Set([
+  "GET /api/v1/companies/{companyId}/work-projection-credentials",
+  "POST /api/v1/companies/{companyId}/work-projection-credentials",
+  "DELETE /api/v1/companies/{companyId}/work-projection-credentials/{credentialId}",
   "GET /api/companies",
   "POST /api/companies",
   "GET /api/companies/stats",
@@ -861,6 +882,7 @@ const INSTANCE_ADMIN_OPERATIONS = new Set([
 ]);
 
 const CREATED_OPERATIONS = new Set([
+  "POST /api/v1/companies/{companyId}/work-projection-credentials",
   "POST /api/adapters/install",
   "POST /api/companies/{companyId}/agent-hires",
   "POST /api/companies/{companyId}/agents",
@@ -984,6 +1006,12 @@ function applyDocumentFixups(document: any): any {
       description:
         "Agent API key or Paperclip-issued local agent JWT presented in the Authorization bearer header.",
     },
+    [COMPANY_WORK_PROJECTION_AUTH_SCHEME]: {
+      type: "http",
+      scheme: "bearer",
+      bearerFormat: "pcwp_v1_ credential",
+      description: "Dedicated company-bound work projection credential. It is not an agent API key.",
+    },
   };
   document.security = AUTHENTICATED_SECURITY;
 
@@ -995,7 +1023,7 @@ function applyDocumentFixups(document: any): any {
       } else if (authLevel === "authenticated") {
         operation.security = AUTHENTICATED_SECURITY;
       } else if (authLevel === "company_work_projection") {
-        operation.security = [securityRequirement(AGENT_BEARER_AUTH_SCHEME)];
+        operation.security = [securityRequirement(COMPANY_WORK_PROJECTION_AUTH_SCHEME)];
       } else {
         operation.security = BOARD_SECURITY;
       }
@@ -1007,8 +1035,8 @@ function applyDocumentFixups(document: any): any {
             ? { actor: "board" }
             : authLevel === "company_work_projection"
               ? {
-                  actor: "agent_key",
-                  scope: "company_work_projection_read",
+                  actor: "company_work_projection_key",
+                  tokenVersion: 1,
                   companyBound: true,
                 }
             : authLevel === "authenticated"
@@ -1127,11 +1155,11 @@ registry.registerPath({
   path: "/api/v1/companies/{companyId}/work-projection",
   tags: ["companies"],
   summary: "Read an immutable, company-scoped work snapshot",
-  description: "Machine-only GET projection. Requires a company_work_projection_read agent key.",
-  security: [{ AgentBearerAuth: [] }],
+  description: "Machine-only GET projection. Requires a dedicated company-bound pcwp_v1_ credential.",
+  security: [{ CompanyWorkProjectionBearerAuth: [] }],
   "x-paperclip-authorization": {
-    actor: "agent_key",
-    scope: "company_work_projection_read",
+    actor: "company_work_projection_key",
+    tokenVersion: 1,
     companyBound: true,
   },
   request: {
@@ -1148,6 +1176,53 @@ registry.registerPath({
     410: { description: "Snapshot is expired or stale", content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } } },
     429: { description: "Credential concurrency limit reached", content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } } },
     503: { description: "Projection store or signing key unavailable", content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/v1/companies/{companyId}/work-projection-credentials",
+  tags: ["companies"],
+  summary: "List work projection credentials",
+  request: { params: z.object({ companyId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Credential metadata",
+      content: {
+        "application/json": {
+          schema: { type: "array", items: CompanyWorkProjectionCredentialSchema },
+        },
+      },
+    },
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/v1/companies/{companyId}/work-projection-credentials",
+  tags: ["companies"],
+  summary: "Create a work projection credential",
+  request: {
+    params: z.object({ companyId: z.string().uuid() }),
+    body: jsonBody(createCompanyWorkProjectionCredentialSchema),
+  },
+  responses: {
+    201: { description: "Credential created", content: { "application/json": { schema: CreatedCompanyWorkProjectionCredentialSchema } } },
+    400: r.badRequest,
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/v1/companies/{companyId}/work-projection-credentials/{credentialId}",
+  tags: ["companies"],
+  summary: "Revoke a work projection credential",
+  request: { params: z.object({ companyId: z.string().uuid(), credentialId: z.string().uuid() }) },
+  responses: {
+    200: { description: "Credential revoked", content: { "application/json": { schema: CompanyWorkProjectionCredentialSchema } } },
+    404: r.notFound,
   },
 });
 

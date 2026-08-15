@@ -13,6 +13,7 @@ import {
 } from "@paperclipai/shared";
 import { HttpError } from "../errors.js";
 import {
+  assertCompanyWorkProjectionCursorSigningReady,
   decodeCompanyWorkProjectionCursor,
   encodeCompanyWorkProjectionCursor,
 } from "./company-work-projection-cursor.js";
@@ -34,6 +35,9 @@ type ProjectionRow = {
   cancelled_at: Date | string | null;
   created_at: Date | string | null;
   updated_at: Date | string | null;
+  project_reference_valid: boolean;
+  assignee_agent_reference_valid: boolean;
+  assignee_user_reference_valid: boolean;
 };
 
 type SnapshotInput = {
@@ -76,11 +80,40 @@ function nullableInstant(value: Date | string | null): string | null {
   return date.toISOString();
 }
 
+/** RFC 8785-compatible canonical JSON for this contract's JSON value subset. */
+export function canonicalCompanyWorkProjectionJson(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError("Canonical JSON does not support non-finite numbers");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalCompanyWorkProjectionJson).join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalCompanyWorkProjectionJson(record[key])}`)
+      .join(",")}}`;
+  }
+  throw new TypeError("Canonical JSON supports only JSON values");
+}
+
 function canonicalDigest(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  return createHash("sha256").update(canonicalCompanyWorkProjectionJson(value), "utf8").digest("hex");
 }
 
 function toItem(row: ProjectionRow): CompanyWorkProjectionItem {
+  if (
+    !row.project_reference_valid
+    || !row.assignee_agent_reference_valid
+    || !row.assignee_user_reference_valid
+  ) {
+    projectionError(409, "Work projection contains a cross-company reference", "WORK_PROJECTION_INCOMPATIBLE");
+  }
   if (row.assignee_agent_id && row.assignee_user_id) {
     projectionError(409, "Work projection contains an ambiguous owner", "WORK_PROJECTION_INCOMPATIBLE");
   }
@@ -123,6 +156,9 @@ export function companyWorkProjectionService(db: Db) {
   return {
     readSnapshot: async (input: SnapshotInput): Promise<CompanyWorkProjectionResponse> => {
       const now = input.now ?? new Date();
+      // Signing readiness is part of endpoint readiness even when an empty or
+      // one-page response would not otherwise need to emit a cursor.
+      assertCompanyWorkProjectionCursorSigningReady(input.companyId, input.cursorSecretForTest);
       const decoded = input.cursor
         ? decodeCompanyWorkProjectionCursor(
             input.cursor,
@@ -150,21 +186,17 @@ export function companyWorkProjectionService(db: Db) {
           current_revision: string | number | bigint;
         }>`
           SELECT current_revision
-          FROM company_work_projection_revisions
+          FROM public.company_work_projection_revisions
           WHERE company_id = ${input.companyId}::uuid
         `));
-        const currentRevision = decimal(revisionRows[0]?.current_revision ?? 0);
+        if (!revisionRows[0]) {
+          projectionError(409, "Work projection counter is missing", "WORK_PROJECTION_INCOMPATIBLE");
+        }
+        const currentRevision = decimal(revisionRows[0].current_revision);
         const issuedAt = decoded?.issuedAt ?? bucketedNow(now).toISOString();
         const expiresAt = decoded?.expiresAt
           ?? new Date(new Date(issuedAt).getTime() + SNAPSHOT_TTL_MS).toISOString();
         const snapshotRevision = decoded?.snapshotRevision ?? currentRevision;
-
-        if (BigInt(snapshotRevision) > BigInt(currentRevision)) {
-          projectionError(410, "Work projection snapshot is stale", "WORK_PROJECTION_SNAPSHOT_STALE");
-        }
-        if (decoded && BigInt(decoded.afterRevision) > BigInt(snapshotRevision)) {
-          projectionError(400, "Malformed work projection cursor position", "WORK_PROJECTION_MALFORMED");
-        }
 
         const integrityRows = Array.from(await tx.execute(sql<{
           row_count: string | number | bigint;
@@ -172,18 +204,24 @@ export function companyWorkProjectionService(db: Db) {
           max_revision: string | number | bigint | null;
         }>`
           SELECT count(*) AS row_count, min(revision) AS min_revision, max(revision) AS max_revision
-          FROM issue_work_projection_versions
+          FROM public.issue_work_projection_versions
           WHERE company_id = ${input.companyId}::uuid
-            AND revision <= ${snapshotRevision}::bigint
         `));
         const integrity = integrityRows[0];
         const rowCount = decimal(integrity?.row_count ?? 0);
-        const expectedEmpty = snapshotRevision === "0";
+        const expectedEmpty = currentRevision === "0";
         if (
-          rowCount !== snapshotRevision ||
-          (!expectedEmpty && (decimal(integrity?.min_revision ?? 0) !== "1" || decimal(integrity?.max_revision ?? 0) !== snapshotRevision))
+          rowCount !== currentRevision ||
+          (!expectedEmpty && (decimal(integrity?.min_revision ?? 0) !== "1" || decimal(integrity?.max_revision ?? 0) !== currentRevision))
         ) {
           projectionError(409, "Work projection snapshot has a revision gap", "WORK_PROJECTION_INCOMPATIBLE");
+        }
+
+        if (BigInt(snapshotRevision) > BigInt(currentRevision)) {
+          projectionError(410, "Work projection snapshot is stale", "WORK_PROJECTION_SNAPSHOT_STALE");
+        }
+        if (decoded && BigInt(decoded.afterRevision) > BigInt(snapshotRevision)) {
+          projectionError(400, "Malformed work projection cursor position", "WORK_PROJECTION_MALFORMED");
         }
 
         const afterRevision = decoded?.afterRevision ?? "0";
@@ -194,7 +232,7 @@ export function companyWorkProjectionService(db: Db) {
               issue_id, revision, deleted, identifier, project_id,
               assignee_agent_id, assignee_user_id, status, priority,
               started_at, completed_at, cancelled_at, created_at, updated_at
-            FROM issue_work_projection_versions
+            FROM public.issue_work_projection_versions
             WHERE company_id = ${input.companyId}::uuid
               AND revision <= ${snapshotRevision}::bigint
             ORDER BY issue_id, revision DESC
@@ -202,7 +240,24 @@ export function companyWorkProjectionService(db: Db) {
           SELECT
             issue_id, revision, identifier, project_id,
             assignee_agent_id, assignee_user_id, status, priority,
-            started_at, completed_at, cancelled_at, created_at, updated_at
+            started_at, completed_at, cancelled_at, created_at, updated_at,
+            CASE WHEN project_id IS NULL THEN true ELSE EXISTS (
+              SELECT 1 FROM public.projects
+              WHERE public.projects.id = latest.project_id
+                AND public.projects.company_id = ${input.companyId}::uuid
+            ) END AS project_reference_valid,
+            CASE WHEN assignee_agent_id IS NULL THEN true ELSE EXISTS (
+              SELECT 1 FROM public.agents
+              WHERE public.agents.id = latest.assignee_agent_id
+                AND public.agents.company_id = ${input.companyId}::uuid
+            ) END AS assignee_agent_reference_valid,
+            CASE WHEN assignee_user_id IS NULL THEN true ELSE EXISTS (
+              SELECT 1 FROM public.company_memberships
+              WHERE public.company_memberships.company_id = ${input.companyId}::uuid
+                AND public.company_memberships.principal_type = 'user'
+                AND public.company_memberships.principal_id = latest.assignee_user_id
+                AND public.company_memberships.status = 'active'
+            ) END AS assignee_user_reference_valid
           FROM latest
           WHERE deleted = false
             AND (

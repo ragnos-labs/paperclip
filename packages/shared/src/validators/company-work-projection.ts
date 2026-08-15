@@ -5,6 +5,7 @@ export const COMPANY_WORK_PROJECTION_API_VERSION = "paperclip.company-work-proje
 export const COMPANY_WORK_PROJECTION_SCHEMA_VERSION = 1 as const;
 export const COMPANY_WORK_PROJECTION_DEFAULT_PAGE_SIZE = 100 as const;
 export const COMPANY_WORK_PROJECTION_MAX_PAGE_SIZE = 500 as const;
+export const COMPANY_WORK_PROJECTION_CREDENTIAL_TOKEN_VERSION = 1 as const;
 
 const revisionSchema = z.string().regex(/^(0|[1-9][0-9]*)$/);
 const instantSchema = z.string().datetime({ offset: true });
@@ -61,6 +62,23 @@ export const companyWorkProjectionQuerySchema = z.object({
     .optional(),
 }).strict();
 
+export const createCompanyWorkProjectionCredentialSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+}).strict();
+
+export const companyWorkProjectionCredentialSchema = z.object({
+  id: z.string().uuid(),
+  companyId: z.string().uuid(),
+  name: z.string().trim().min(1).max(120),
+  tokenVersion: z.literal(COMPANY_WORK_PROJECTION_CREDENTIAL_TOKEN_VERSION),
+  createdAt: instantSchema,
+  revokedAt: instantSchema.nullable(),
+}).strict();
+
+export const createdCompanyWorkProjectionCredentialSchema = companyWorkProjectionCredentialSchema.extend({
+  token: z.string().regex(/^pcwp_v1_[a-f0-9]{48}$/),
+}).strict();
+
 export const companyWorkProjectionErrorCodeSchema = z.enum([
   "WORK_PROJECTION_UNAUTHORIZED",
   "WORK_PROJECTION_FORBIDDEN",
@@ -81,3 +99,7 @@ export const companyWorkProjectionErrorSchema = z.object({
 export type CompanyWorkProjectionResponse = z.infer<typeof companyWorkProjectionResponseSchema>;
 export type CompanyWorkProjectionItem = z.infer<typeof companyWorkProjectionItemSchema>;
 export type CompanyWorkProjectionQuery = z.infer<typeof companyWorkProjectionQuerySchema>;
+export type CompanyWorkProjectionCredential = z.infer<typeof companyWorkProjectionCredentialSchema>;
+export type CreatedCompanyWorkProjectionCredential = z.infer<
+  typeof createdCompanyWorkProjectionCredentialSchema
+>;

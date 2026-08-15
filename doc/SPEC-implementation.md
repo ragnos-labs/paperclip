@@ -187,6 +187,22 @@ Invariants:
 
 Invariant: plaintext key shown once at creation; only hash stored.
 
+### 7.3.1 `company_work_projection_credentials`
+
+- `id` uuid pk
+- `company_id` uuid fk `companies.id` not null
+- `name` text not null
+- `key_hash` text unique not null
+- `token_version` int not null; currently exactly `1`
+- `created_at` timestamptz not null
+- `revoked_at` timestamptz null
+
+Invariants: plaintext `pcwp_v1_` credential shown once at creation; only its
+hash is stored. This table has no agent, role, membership, permission, or
+`last_used_at` relation. Older application versions inspect only
+`agent_api_keys`, so application rollback cannot reinterpret this capability
+as a standard agent key.
+
 ## 7.4 `goals`
 
 - `id` uuid pk
@@ -549,12 +565,14 @@ Detailed ownership, execution, blocker, active-run watchdog, crash-recovery, and
 
 ### 9.3.1 Machine-only company work projection
 
-The `company_work_projection_read` API-key scope is a non-composable,
-company-bound capability for the versioned GET/HEAD work projection. It has no
-standard agent authority and cannot inherit mutation access from agent role,
-membership, or permission drift. Authentication and projection reads are
-side-effect free. The strict response, snapshot, cursor, error, and recovery
-contract is defined in
+The dedicated `pcwp_v1_` credential is a non-composable, company-bound
+capability for the versioned GET work projection. Its hash is stored in
+`company_work_projection_credentials`, never `agent_api_keys`; it has no agent
+identity or standard agent authority and cannot inherit mutation access from
+role, membership, or permission drift. Authentication and projection reads are
+side-effect free, and raw live-events WebSocket upgrades reject this token
+family before observation. The strict response, snapshot, cursor, error,
+migration-lock, and recovery contract is defined in
 [company-work-projection-contract.md](./company-work-projection-contract.md).
 
 ## 9.4 Permission Terminology and Default Visibility Rule
