@@ -95,6 +95,8 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Build plugin SDK test dependencies
+        run: pnpm --filter @paperclipai/plugin-sdk ensure-build-deps
       - name: Run full Vitest suite
         run: pnpm test:run
 
