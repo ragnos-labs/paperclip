@@ -926,4 +926,5 @@ export {
 } from "./tool-access.js";
 export * from "./skill-policy.js";
 export * from "./company-work-projection.js";
+export * from "./company-work-projection-v2.js";
 export * from "./app-definition.js";

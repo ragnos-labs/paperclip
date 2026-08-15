@@ -4,6 +4,7 @@ import {
   foreignKey,
   index,
   integer,
+  jsonb,
   pgTable,
   primaryKey,
   text,
@@ -14,6 +15,7 @@ import {
 import { sql } from "drizzle-orm";
 import { companies } from "./companies.js";
 import { activityLog } from "./activity_log.js";
+import type { IssueWorkProjectionContext } from "@paperclipai/shared";
 
 /**
  * Dedicated machine credentials for the work projection. These hashes never
@@ -100,7 +102,8 @@ export const companyWorkProjectionVerifications = pgTable(
 
 /**
  * Append-only safe-field history used to materialize immutable company work
- * snapshots. Deliberately omits title, description, execution/recovery state,
+ * snapshots. V2 adds only explicit, human-approved work projection context.
+ * The history still omits title, description, execution/recovery state,
  * adapter configuration, workspace paths, credentials, and private payloads.
  */
 export const issueWorkProjectionVersions = pgTable(
@@ -119,6 +122,8 @@ export const issueWorkProjectionVersions = pgTable(
     projectReferenceValid: boolean("project_reference_valid").notNull().default(true),
     assigneeAgentReferenceValid: boolean("assignee_agent_reference_valid").notNull().default(true),
     assigneeUserReferenceValid: boolean("assignee_user_reference_valid").notNull().default(true),
+    delegationAuthorizerReferenceValid: boolean("delegation_authorizer_reference_valid").notNull().default(true),
+    workProjectionContext: jsonb("work_projection_context").$type<IssueWorkProjectionContext | null>(),
     status: text("status"),
     priority: text("priority"),
     startedAt: timestamp("started_at", { withTimezone: true }),
