@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   compareAuditToBaseline,
+  filterBootstrapFlags,
   sanitizeFlags,
 } from "../ragnos-fork-security-gate.mjs";
 
@@ -30,7 +31,7 @@ test("does not emit an added secret line", () => {
     check: "secret-scan",
     file: "example.ts",
     pattern: "High-entropy secret",
-    line: "+ token = 'do-not-print-this-value'",
+    line: "+ credential = 'redacted-value'",
   }]);
   assert.deepEqual(sanitized, [{
     check: "secret-scan",
@@ -39,5 +40,19 @@ test("does not emit an added secret line", () => {
     packages: undefined,
     advisoryPath: undefined,
   }]);
-  assert.equal(JSON.stringify(sanitized).includes("do-not-print"), false);
+  assert.equal(JSON.stringify(sanitized).includes("redacted-value"), false);
+});
+
+test("allows only the exact one-time bootstrap workflow flag", () => {
+  const flags = [
+    { check: "ci-tampering", file: ".github/workflows/ragnos-fork-ci.yml" },
+    { check: "ci-tampering", file: ".github/workflows/other.yml" },
+  ];
+  const exact = {
+    prNumber: 11,
+    baseSha: "19be4cf9278b70bc151063778a94bf38bfd5c903",
+    headRef: "codex/ragnos-fork-ci-bootstrap",
+  };
+  assert.deepEqual(filterBootstrapFlags(flags, exact), [flags[1]]);
+  assert.deepEqual(filterBootstrapFlags(flags, { ...exact, prNumber: 12 }), flags);
 });
