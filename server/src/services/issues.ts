@@ -3125,6 +3125,7 @@ const issueListSelect = {
   billingCode: issues.billingCode,
   assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
   executionPolicy: sql<null>`null`,
+  workProjectionContext: sql<null>`null`,
   executionState: sql<null>`null`,
   monitorNextCheckAt: issues.monitorNextCheckAt,
   monitorWakeRequestedAt: issues.monitorWakeRequestedAt,

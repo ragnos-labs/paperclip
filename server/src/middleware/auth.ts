@@ -281,6 +281,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
             type: "none",
             companyId: credential.companyId,
             credentialId: credential.credentialId,
+            credentialTokenVersion: credential.tokenVersion,
             source: "none",
           };
         }

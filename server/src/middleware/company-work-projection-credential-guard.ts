@@ -1,7 +1,7 @@
 import type { RequestHandler } from "express";
 import { forbidden } from "../errors.js";
 
-const PROJECTION_PATH = /^\/api\/v1\/companies\/([^/]+)\/work-projection\/?$/;
+const PROJECTION_PATH = /^\/api\/v([12])\/companies\/([^/]+)\/work-projection\/?$/;
 
 /**
  * A projection credential is a capability, not an agent role. It is rejected
@@ -15,12 +15,14 @@ export function companyWorkProjectionCredentialGuard(): RequestHandler {
     }
 
     const match = PROJECTION_PATH.exec(req.path);
-    const companyId = match?.[1];
+    const tokenVersion = match?.[1] ? Number(match[1]) : null;
+    const companyId = match?.[2];
     const allowedMethod = req.method === "GET";
     if (
       !allowedMethod ||
       !companyId ||
-      companyId !== req.actor.companyId
+      companyId !== req.actor.companyId ||
+      tokenVersion !== req.actor.credentialTokenVersion
     ) {
       next(forbidden("Projection credential cannot access this resource", {
         code: "WORK_PROJECTION_FORBIDDEN",

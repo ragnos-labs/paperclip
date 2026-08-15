@@ -52,6 +52,12 @@ const DROP_0218_SQL = `
     timestamp with time zone, timestamp with time zone, timestamp with time zone,
     timestamp with time zone, timestamp with time zone
   );
+  DROP FUNCTION IF EXISTS public.append_issue_work_projection_version_v2(
+    uuid, uuid, boolean, text, uuid, uuid, text, jsonb, text, text,
+    timestamp with time zone, timestamp with time zone, timestamp with time zone,
+    timestamp with time zone, timestamp with time zone
+  );
+  DROP FUNCTION IF EXISTS public.company_work_projection_delegation_authorizer_is_valid(uuid, jsonb);
   DROP FUNCTION IF EXISTS public.company_work_projection_issue_is_visible(
     timestamp with time zone, text, text
   );
@@ -238,6 +244,14 @@ describePostgres("0218 company work projection migration", () => {
       .split("--> statement-breakpoint")
       .map((value) => value.trim())
       .filter(Boolean);
+    const v2Migration = await readFile(
+      new URL("./migrations/0219_quick_captain_britain.sql", import.meta.url),
+      "utf8",
+    );
+    const v2Statements = v2Migration
+      .split("--> statement-breakpoint")
+      .map((value) => value.trim())
+      .filter(Boolean);
     const migrationConnection = postgres(connectionString, { max: 1, onnotice: () => undefined });
     const writers = postgres(connectionString, { max: 7, onnotice: () => undefined });
     try {
@@ -276,6 +290,9 @@ describePostgres("0218 company work projection migration", () => {
 
       await waitForBlockedSourceWriters(connectionString);
       for (const statement of statements.slice(1)) {
+        await migrationConnection.unsafe(statement);
+      }
+      for (const statement of v2Statements) {
         await migrationConnection.unsafe(statement);
       }
       await migrationConnection.unsafe("COMMIT");

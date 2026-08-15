@@ -230,6 +230,9 @@ import {
   createCompanyWorkProjectionCredentialSchema,
   companyWorkProjectionCredentialSchema,
   createdCompanyWorkProjectionCredentialSchema,
+  companyWorkProjectionV2ResponseSchema,
+  companyWorkProjectionV2CredentialSchema,
+  createdCompanyWorkProjectionV2CredentialSchema,
 } from "@paperclipai/shared";
 import {
   COMPANY_IMPORT_TRANSFERS_API_PATH,
@@ -535,6 +538,21 @@ const CreatedCompanyWorkProjectionCredentialSchema = registry.register(
   createdCompanyWorkProjectionCredentialSchema,
   { closeStrictObjects: true },
 );
+const CompanyWorkProjectionV2ResponseSchema = registry.register(
+  "CompanyWorkProjectionV2",
+  companyWorkProjectionV2ResponseSchema,
+  { closeStrictObjects: true },
+);
+const CompanyWorkProjectionV2CredentialSchema = registry.register(
+  "CompanyWorkProjectionCredentialV2",
+  companyWorkProjectionV2CredentialSchema,
+  { closeStrictObjects: true },
+);
+const CreatedCompanyWorkProjectionV2CredentialSchema = registry.register(
+  "CreatedCompanyWorkProjectionCredentialV2",
+  createdCompanyWorkProjectionV2CredentialSchema,
+  { closeStrictObjects: true },
+);
 
 const responses = {
   ok: (schema: z.ZodTypeAny = z.record(z.unknown())) => ({
@@ -784,6 +802,7 @@ const AUTHENTICATED_SECURITY: Array<Record<string, string[]>> = [
 
 const COMPANY_WORK_PROJECTION_OPERATIONS = new Set([
   "GET /api/v1/companies/{companyId}/work-projection",
+  "GET /api/v2/companies/{companyId}/work-projection",
 ]);
 
 const PUBLIC_OPERATIONS = new Set([
@@ -819,6 +838,9 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/v1/companies/{companyId}/work-projection-credentials",
   "POST /api/v1/companies/{companyId}/work-projection-credentials",
   "DELETE /api/v1/companies/{companyId}/work-projection-credentials/{credentialId}",
+  "GET /api/v2/companies/{companyId}/work-projection-credentials",
+  "POST /api/v2/companies/{companyId}/work-projection-credentials",
+  "DELETE /api/v2/companies/{companyId}/work-projection-credentials/{credentialId}",
   "GET /api/cloud/stacks",
   "GET /api/companies",
   "POST /api/companies",
@@ -1093,7 +1115,7 @@ function applyDocumentFixups(document: any): any {
     [COMPANY_WORK_PROJECTION_AUTH_SCHEME]: {
       type: "http",
       scheme: "bearer",
-      bearerFormat: "pcwp_v1_ credential",
+      bearerFormat: "pcwp_v1_ or pcwp_v2_ credential",
       description:
         "Dedicated company-bound work projection credential. It is not an agent API key.",
     },
@@ -1121,7 +1143,7 @@ function applyDocumentFixups(document: any): any {
             : authLevel === "company_work_projection"
               ? {
                   actor: "company_work_projection_key",
-                  tokenVersion: 1,
+                  tokenVersion: path.startsWith("/api/v2/") ? 2 : 1,
                   companyBound: true,
                 }
             : authLevel === "authenticated"
@@ -1338,6 +1360,62 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/api/v2/companies/{companyId}/work-projection",
+  tags: ["companies"],
+  summary: "Read export-approved work packet context",
+  description:
+    "Machine-only GET projection. Requires a dedicated company-bound pcwp_v2_ credential.",
+  security: [{ CompanyWorkProjectionBearerAuth: [] }],
+  "x-paperclip-authorization": {
+    actor: "company_work_projection_key",
+    tokenVersion: 2,
+    companyBound: true,
+  },
+  request: {
+    params: z.object({ companyId: z.string().uuid() }),
+    query: companyWorkProjectionQuerySchema,
+  },
+  responses: {
+    200: {
+      description: "Snapshot page with packet context",
+      content: {
+        "application/json": { schema: CompanyWorkProjectionV2ResponseSchema },
+      },
+    },
+    304: { description: "ETag matched" },
+    400: {
+      description: "Malformed request or cursor",
+      content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } },
+    },
+    401: {
+      description: "Projection credential required",
+      content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } },
+    },
+    403: {
+      description: "Credential is not authorized for this company or contract version",
+      content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } },
+    },
+    409: {
+      description: "Schema, source state, delegation, or snapshot is incompatible",
+      content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } },
+    },
+    410: {
+      description: "Snapshot is expired or stale",
+      content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } },
+    },
+    429: {
+      description: "Credential concurrency limit reached",
+      content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } },
+    },
+    503: {
+      description: "Projection store or signing key unavailable",
+      content: { "application/json": { schema: CompanyWorkProjectionErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/api/v1/companies/{companyId}/work-projection-credentials",
   tags: ["companies"],
   summary: "List work projection credentials",
@@ -1397,6 +1475,68 @@ registry.registerPath({
       description: "Credential revoked",
       content: {
         "application/json": { schema: CompanyWorkProjectionCredentialSchema },
+      },
+    },
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/v2/companies/{companyId}/work-projection-credentials",
+  tags: ["companies"],
+  summary: "List v2 work projection credentials",
+  request: { params: z.object({ companyId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "V2 credential metadata",
+      content: {
+        "application/json": {
+          schema: { type: "array", items: CompanyWorkProjectionV2CredentialSchema },
+        },
+      },
+    },
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/v2/companies/{companyId}/work-projection-credentials",
+  tags: ["companies"],
+  summary: "Create a v2 work projection credential",
+  request: {
+    params: z.object({ companyId: z.string().uuid() }),
+    body: jsonBody(createCompanyWorkProjectionCredentialSchema),
+  },
+  responses: {
+    201: {
+      description: "V2 credential created",
+      content: {
+        "application/json": { schema: CreatedCompanyWorkProjectionV2CredentialSchema },
+      },
+    },
+    400: r.badRequest,
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/v2/companies/{companyId}/work-projection-credentials/{credentialId}",
+  tags: ["companies"],
+  summary: "Revoke a v2 work projection credential",
+  request: {
+    params: z.object({
+      companyId: z.string().uuid(),
+      credentialId: z.string().uuid(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "V2 credential revoked",
+      content: {
+        "application/json": { schema: CompanyWorkProjectionV2CredentialSchema },
       },
     },
     404: r.notFound,

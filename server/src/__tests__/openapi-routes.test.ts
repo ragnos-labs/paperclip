@@ -184,6 +184,18 @@ describe("openapi routes", () => {
     expect(res.body.components.schemas.CompanyWorkProjectionV1.properties).toHaveProperty("items");
     expect(res.body.components.schemas.CompanyWorkProjectionV1.additionalProperties).toBe(false);
     expect(res.body.components.schemas.CompanyWorkProjectionCredentialV1.additionalProperties).toBe(false);
+    expect(res.body.paths["/api/v2/companies/{companyId}/work-projection"].get).toMatchObject({
+      summary: "Read export-approved work packet context",
+      security: [{ CompanyWorkProjectionBearerAuth: [] }],
+      "x-paperclip-authorization": {
+        actor: "company_work_projection_key",
+        tokenVersion: 2,
+        companyBound: true,
+      },
+    });
+    expect(res.body.components.schemas.CompanyWorkProjectionV2.properties).toHaveProperty("items");
+    expect(res.body.components.schemas.CompanyWorkProjectionV2.additionalProperties).toBe(false);
+    expect(res.body.components.schemas.CompanyWorkProjectionCredentialV2.additionalProperties).toBe(false);
     expect(res.body.components.schemas.Error.additionalProperties).toBeUndefined();
     expect(
       res.body.paths["/api/v1/companies/{companyId}/work-projection-credentials"].post[
