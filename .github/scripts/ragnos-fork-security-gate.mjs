@@ -45,6 +45,18 @@ const approvedPaperclipAlphaFlags = Object.freeze([
   "suspicious-test:.github/scripts/tests/registry-reference-guard.test.mjs:shell-exec",
 ]);
 
+const approvedPaperclipWorkProjectionCanaryPullRequest = Object.freeze({
+  prNumber: 18,
+  headRef: "feat/nonmutating-work-projection-canary",
+  headSha: "95f277d77b9f3a4e555aac581e8aff3c953f330d",
+});
+
+const approvedPaperclipWorkProjectionCanaryFlags = Object.freeze([
+  "ci-tampering:.github/workflows/ragnos-alpha-release.yml",
+  "ci-tampering:.github/workflows/release-verify.yml",
+  "secret-scan:scripts/smoke/work-projection-canary.sh:High-entropy secret",
+]);
+
 export function compareAuditToBaseline(audit, baseline) {
   const failures = [];
   const advisories = audit?.advisories ?? {};
@@ -154,6 +166,22 @@ export function filterApprovedPaperclipAlphaFlags(flags, context) {
   return isExactFlagSet ? [] : flags;
 }
 
+export function filterApprovedPaperclipWorkProjectionCanaryFlags(flags, context) {
+  const isExactPullRequest = context.prNumber === approvedPaperclipWorkProjectionCanaryPullRequest.prNumber
+    && context.headRef === approvedPaperclipWorkProjectionCanaryPullRequest.headRef
+    && context.apiHeadRef === approvedPaperclipWorkProjectionCanaryPullRequest.headRef
+    && context.headSha === approvedPaperclipWorkProjectionCanaryPullRequest.headSha;
+  if (!isExactPullRequest) return flags;
+
+  const detected = flags
+    .map((flag) => [flag.check, flag.file, flag.pattern].filter(Boolean).join(":"))
+    .sort();
+  const approved = [...approvedPaperclipWorkProjectionCanaryFlags].sort();
+  const isExactFlagSet = detected.length === approved.length
+    && detected.every((flag, index) => flag === approved[index]);
+  return isExactFlagSet ? [] : flags;
+}
+
 async function runAuditGate() {
   const baselineUrl = new URL("../ragnos-production-audit-baseline.json", import.meta.url);
   const baseline = JSON.parse(await readFile(baselineUrl, "utf8"));
@@ -199,9 +227,12 @@ async function runPullRequestScan() {
       ? pullRequestAfter?.head?.sha
       : undefined,
   };
-  const flags = filterApprovedPaperclipAlphaFlags(
-    filterApprovedReleaseSafetyFlags(
-      filterBootstrapFlags(detectedFlags, context),
+  const flags = filterApprovedPaperclipWorkProjectionCanaryFlags(
+    filterApprovedPaperclipAlphaFlags(
+      filterApprovedReleaseSafetyFlags(
+        filterBootstrapFlags(detectedFlags, context),
+        context,
+      ),
       context,
     ),
     context,

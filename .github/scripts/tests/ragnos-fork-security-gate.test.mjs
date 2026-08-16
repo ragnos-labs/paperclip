@@ -163,3 +163,63 @@ test("allows only the exact Paperclip alpha release pull request flags", async (
     { check: "ci-tampering", file: ".github/workflows/other.yml" },
   ], exact).length, 4);
 });
+
+test("allows only the exact Paperclip work projection canary pull request flags", async () => {
+  const { filterApprovedPaperclipWorkProjectionCanaryFlags } = await import("../ragnos-fork-security-gate.mjs");
+  const flags = [
+    {
+      check: "secret-scan",
+      file: "scripts/smoke/work-projection-canary.sh",
+      pattern: "High-entropy secret",
+    },
+    { check: "ci-tampering", file: ".github/workflows/ragnos-alpha-release.yml" },
+    { check: "ci-tampering", file: ".github/workflows/release-verify.yml" },
+  ];
+  const exact = {
+    prNumber: 18,
+    headRef: "feat/nonmutating-work-projection-canary",
+    apiHeadRef: "feat/nonmutating-work-projection-canary",
+    headSha: "95f277d77b9f3a4e555aac581e8aff3c953f330d",
+  };
+
+  assert.deepEqual(filterApprovedPaperclipWorkProjectionCanaryFlags(flags, exact), []);
+
+  const negativeCases = [
+    { flags, context: { ...exact, prNumber: 19 } },
+    { flags, context: { ...exact, headRef: "feat/other" } },
+    { flags, context: { ...exact, apiHeadRef: "feat/other" } },
+    { flags, context: { ...exact, headSha: "0".repeat(40) } },
+    { flags: flags.filter((_, index) => index !== 0), context: exact },
+    { flags: flags.filter((_, index) => index !== 1), context: exact },
+    { flags: flags.filter((_, index) => index !== 2), context: exact },
+    {
+      flags: [...flags, { check: "ci-tampering", file: ".github/workflows/other.yml" }],
+      context: exact,
+    },
+    {
+      flags: flags.map((flag, index) => index === 0
+        ? { ...flag, check: "suspicious-test" }
+        : flag),
+      context: exact,
+    },
+    {
+      flags: flags.map((flag, index) => index === 0
+        ? { ...flag, file: "scripts/smoke/other.sh" }
+        : flag),
+      context: exact,
+    },
+    {
+      flags: flags.map((flag, index) => index === 0
+        ? { ...flag, pattern: "Generic secret pattern" }
+        : flag),
+      context: exact,
+    },
+  ];
+
+  for (const candidate of negativeCases) {
+    assert.deepEqual(
+      filterApprovedPaperclipWorkProjectionCanaryFlags(candidate.flags, candidate.context),
+      candidate.flags,
+    );
+  }
+});
