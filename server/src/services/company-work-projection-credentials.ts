@@ -4,6 +4,7 @@ import { activityLog, companyWorkProjectionCredentials, type Db } from "@papercl
 import {
   COMPANY_WORK_PROJECTION_CREDENTIAL_TOKEN_VERSION,
   COMPANY_WORK_PROJECTION_V2_CREDENTIAL_TOKEN_VERSION,
+  WORK_PROJECTION_ADMIN_PERMISSION,
   companyWorkProjectionCredentialSchema,
   companyWorkProjectionV2CredentialSchema,
   createdCompanyWorkProjectionCredentialSchema,
@@ -45,7 +46,7 @@ async function lockCurrentCredentialManager(
     WHERE company_id = ${companyId}::uuid
       AND principal_type = 'user'
       AND principal_id = ${actorId}
-      AND permission_key = 'work_projection_credentials:manage'
+      AND permission_key = ${WORK_PROJECTION_ADMIN_PERMISSION}
     FOR UPDATE
   `));
   if (!grants[0]) {

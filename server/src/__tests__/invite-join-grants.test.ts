@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { WORK_PROJECTION_ADMIN_PERMISSION } from "@paperclipai/shared";
 import {
   agentJoinGrantsFromDefaults,
   humanJoinGrantsFromDefaults,
@@ -73,7 +74,7 @@ describe("human invite roles", () => {
       { permissionKey: "environments:manage", scope: null },
       { permissionKey: "users:invite", scope: null },
       { permissionKey: "users:manage_permissions", scope: null },
-      { permissionKey: "work_projection_credentials:manage", scope: null },
+      { permissionKey: WORK_PROJECTION_ADMIN_PERMISSION, scope: null },
       { permissionKey: "tasks:assign", scope: null },
       { permissionKey: "joins:approve", scope: null },
     ]);
@@ -86,7 +87,7 @@ describe("human invite roles", () => {
       { permissionKey: "skills:create", scope: null },
       { permissionKey: "environments:manage", scope: null },
       { permissionKey: "users:invite", scope: null },
-      { permissionKey: "work_projection_credentials:manage", scope: null },
+      { permissionKey: WORK_PROJECTION_ADMIN_PERMISSION, scope: null },
       { permissionKey: "tasks:assign", scope: null },
       { permissionKey: "joins:approve", scope: null },
     ]);

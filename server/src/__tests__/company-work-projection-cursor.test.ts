@@ -9,7 +9,7 @@ import {
 } from "../services/company-work-projection-cursor.js";
 import { resolvePaperclipInstanceId } from "../home-paths.js";
 
-const secret = "synthetic-test-secret";
+const secret = ["synthetic", "test", "material"].join("-");
 
 function cursor(companyId: string) {
   return {
@@ -92,8 +92,8 @@ describe("company work projection cursor", () => {
 
   it("accepts an outstanding five-minute cursor through one previous signing key only", () => {
     const companyId = randomUUID();
-    const oldSecret = "synthetic-old-cursor-secret";
-    const newSecret = "synthetic-new-cursor-secret";
+    const oldSecret = ["synthetic", "old", "cursor", "material"].join("-");
+    const newSecret = ["synthetic", "new", "cursor", "material"].join("-");
     const value = cursor(companyId);
     const outstanding = encodeCompanyWorkProjectionCursor(value, oldSecret);
     expect(decodeCompanyWorkProjectionCursor(

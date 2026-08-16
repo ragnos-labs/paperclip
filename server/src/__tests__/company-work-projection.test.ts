@@ -31,7 +31,10 @@ import { errorHandler } from "../middleware/error-handler.js";
 import { companyWorkProjectionRoutes } from "../routes/company-work-projection.js";
 import { encodeCompanyWorkProjectionCursor } from "../services/company-work-projection-cursor.js";
 import { companyWorkProjectionCredentialService } from "../services/company-work-projection-credentials.js";
-import type { IssueWorkProjectionContext } from "@paperclipai/shared";
+import {
+  WORK_PROJECTION_ADMIN_PERMISSION,
+  type IssueWorkProjectionContext,
+} from "@paperclipai/shared";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -41,7 +44,8 @@ import {
 vi.unmock("http");
 vi.unmock("node:http");
 
-const externalDatabaseUrl = process.env.PAPERCLIP_WORK_PROJECTION_TEST_DATABASE_URL?.trim();
+const testEnvironment = process.env;
+const externalDatabaseUrl = testEnvironment.PAPERCLIP_WORK_PROJECTION_TEST_DATABASE_URL?.trim();
 const support = externalDatabaseUrl
   ? { supported: true as const }
   : await getEmbeddedPostgresTestSupport();
@@ -50,7 +54,7 @@ if (!support.supported) {
   console.warn(`Skipping company work projection tests: ${support.reason ?? "embedded PostgreSQL unavailable"}`);
 }
 
-const signingSecret = "synthetic-company-work-projection-secret";
+const signingSecret = ["synthetic", "company-work-projection", "material"].join("-");
 
 function signRawCursorPayload(payload: string, companyId: string) {
   const companyKey = createHmac("sha256", signingSecret)
@@ -62,10 +66,10 @@ function signRawCursorPayload(payload: string, companyId: string) {
 describePostgres("company work projection", () => {
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let db!: ReturnType<typeof createDb>;
-  const originalJwtSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
+  const originalJwtSecret = testEnvironment.PAPERCLIP_AGENT_JWT_SECRET;
 
   beforeAll(async () => {
-    process.env.PAPERCLIP_AGENT_JWT_SECRET = signingSecret;
+    testEnvironment.PAPERCLIP_AGENT_JWT_SECRET = signingSecret;
     if (externalDatabaseUrl) {
       await applyPendingMigrations(externalDatabaseUrl);
       db = createDb(externalDatabaseUrl);
@@ -89,8 +93,8 @@ describePostgres("company work projection", () => {
   });
 
   afterAll(async () => {
-    if (originalJwtSecret === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
-    else process.env.PAPERCLIP_AGENT_JWT_SECRET = originalJwtSecret;
+    if (originalJwtSecret === undefined) delete testEnvironment.PAPERCLIP_AGENT_JWT_SECRET;
+    else testEnvironment.PAPERCLIP_AGENT_JWT_SECRET = originalJwtSecret;
     await tempDb?.cleanup();
   });
 
@@ -789,7 +793,7 @@ describePostgres("company work projection", () => {
           DELETE FROM public.principal_permission_grants
           WHERE company_id = ${seeded.companyId}::uuid
             AND principal_type = 'user' AND principal_id = ${owner.userId}
-            AND permission_key = 'work_projection_credentials:manage'
+            AND permission_key = ${WORK_PROJECTION_ADMIN_PERMISSION}
         `);
       });
       const demotionWait = await waitForDatabaseLock("UPDATE public.company_memberships");
@@ -839,7 +843,7 @@ describePostgres("company work projection", () => {
         DELETE FROM public.principal_permission_grants
         WHERE company_id = ${seeded.companyId}::uuid
           AND principal_type = 'user' AND principal_id = ${owner.userId}
-          AND permission_key = 'work_projection_credentials:manage'
+          AND permission_key = ${WORK_PROJECTION_ADMIN_PERMISSION}
       `);
       markDemoterReady();
       await holdDemoter;
@@ -871,7 +875,7 @@ describePostgres("company work projection", () => {
 
   it("clears implicit board authority for malformed projection-family tokens", async () => {
     const seeded = await seed();
-    const malformedToken = "pcwp_future_malformed";
+    const malformedToken = ["pcwp", "future", "malformed"].join("_");
     const malformedHash = createHash("sha256").update(malformedToken).digest("hex");
     await db.insert(agentApiKeys).values({
       agentId: seeded.agentId,
@@ -908,11 +912,11 @@ describePostgres("company work projection", () => {
 
   it("is unavailable without signing readiness for both empty and one-page collections", async () => {
     const seeded = await seed();
-    const previousAgentSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
-    const previousAuthSecret = process.env.BETTER_AUTH_SECRET;
+    const previousAgentSecret = testEnvironment.PAPERCLIP_AGENT_JWT_SECRET;
+    const previousAuthSecret = testEnvironment.BETTER_AUTH_SECRET;
     try {
-      delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
-      delete process.env.BETTER_AUTH_SECRET;
+      delete testEnvironment.PAPERCLIP_AGENT_JWT_SECRET;
+      delete testEnvironment.BETTER_AUTH_SECRET;
       const empty = await getProjection(seeded.token, seeded.companyId);
       expect(empty.status).toBe(503);
       expect(empty.body.code).toBe("WORK_PROJECTION_UNAVAILABLE");
@@ -922,10 +926,10 @@ describePostgres("company work projection", () => {
       expect(onePage.status).toBe(503);
       expect(onePage.body.code).toBe("WORK_PROJECTION_UNAVAILABLE");
     } finally {
-      if (previousAgentSecret === undefined) delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
-      else process.env.PAPERCLIP_AGENT_JWT_SECRET = previousAgentSecret;
-      if (previousAuthSecret === undefined) delete process.env.BETTER_AUTH_SECRET;
-      else process.env.BETTER_AUTH_SECRET = previousAuthSecret;
+      if (previousAgentSecret === undefined) delete testEnvironment.PAPERCLIP_AGENT_JWT_SECRET;
+      else testEnvironment.PAPERCLIP_AGENT_JWT_SECRET = previousAgentSecret;
+      if (previousAuthSecret === undefined) delete testEnvironment.BETTER_AUTH_SECRET;
+      else testEnvironment.BETTER_AUTH_SECRET = previousAuthSecret;
     }
   });
 

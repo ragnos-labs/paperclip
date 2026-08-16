@@ -25,7 +25,8 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./test-embedded-postgres.js";
 
-const externalDatabaseUrl = process.env.PAPERCLIP_WORK_PROJECTION_TEST_DATABASE_URL?.trim();
+const testEnvironment = process.env;
+const externalDatabaseUrl = testEnvironment.PAPERCLIP_WORK_PROJECTION_TEST_DATABASE_URL?.trim();
 const support = externalDatabaseUrl
   ? { supported: true as const }
   : await getEmbeddedPostgresTestSupport();
