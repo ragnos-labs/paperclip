@@ -103,6 +103,11 @@ describe("company work projection artifact canary", () => {
     expect(wrongMethod.status).toBe(405);
     expect(wrongMethod.body).toMatchObject({ code: "CANARY_GET_ONLY" });
 
+    const headRequest = await request(instance)
+      .head(`/api/v2/companies/${companyId}/work-projection`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(headRequest.status).toBe(405);
+
     const managementSurface = await request(instance)
       .get(`/api/v2/companies/${companyId}/work-projection-credentials`)
       .set("Authorization", `Bearer ${token}`);

@@ -269,7 +269,7 @@ export function createCompanyWorkProjectionCanaryApp(config: CompanyWorkProjecti
   app.use((req, res, next) => {
     requestMethods[req.method] = (requestMethods[req.method] ?? 0) + 1;
     requestPaths.push(req.path);
-    if (req.method !== "GET" && req.method !== "HEAD") {
+    if (req.method !== "GET") {
       res.status(405).json({ error: "Canary accepts GET requests only", code: "CANARY_GET_ONLY" });
       return;
     }
