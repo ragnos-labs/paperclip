@@ -20,10 +20,12 @@ function app(fixture: CompanyWorkProjectionCanaryFixture) {
 
 describe("company work projection artifact canary", () => {
   it("rejects arbitrary launch credentials before the app can start", () => {
+    const invalidLaunchToken = deriveCompanyWorkProjectionCanaryToken(companyId, "empty")
+      .replace("pcwp_v2_", "pcwp_v1_");
     expect(() => createCompanyWorkProjectionCanaryApp({
       companyId,
       fixture: "empty",
-      token: "production-or-operator-supplied-token",
+      token: invalidLaunchToken,
     })).toThrow("Canary token must be the deterministic synthetic token");
   });
 
