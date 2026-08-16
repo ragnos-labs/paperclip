@@ -671,4 +671,3 @@ export function maybePersistWorktreeRuntimePorts(input: {
     writeConfigFile(context.configPath, config);
   }
 }
-
