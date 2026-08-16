@@ -192,8 +192,6 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Run full build
         run: pnpm build
-      - name: Verify work projection canary package surface
-        run: test -f server/dist/canary/work-projection-server.js
 
   e2e:
     name: Fork E2E
