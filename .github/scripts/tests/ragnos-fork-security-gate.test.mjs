@@ -101,3 +101,33 @@ test("keeps every release-safety flag when the detected set is not exact", () =>
   assert.deepEqual(filterApprovedReleaseSafetyFlags(extra, exact), extra);
   assert.deepEqual(filterApprovedReleaseSafetyFlags(wrongCheck, exact), wrongCheck);
 });
+
+test("allows only the exact Paperclip alpha release pull request flags", async () => {
+  const { filterApprovedPaperclipAlphaFlags } = await import("../ragnos-fork-security-gate.mjs");
+  const flags = [
+    { check: "ci-tampering", file: ".github/workflows/ragnos-alpha-release.yml" },
+    { check: "ci-tampering", file: ".github/workflows/release-verify.yml" },
+    {
+      check: "suspicious-test",
+      file: ".github/scripts/tests/registry-reference-guard.test.mjs",
+      pattern: "shell-exec",
+    },
+  ];
+  const exact = {
+    prNumber: 16,
+    headRef: "codex/paperclip-ragnos-alpha-release",
+    apiHeadRef: "codex/paperclip-ragnos-alpha-release",
+    headSha: "90e519b660bdbf2f4f0fa357d4eef51e36c96511",
+  };
+
+  assert.deepEqual(filterApprovedPaperclipAlphaFlags(flags, exact), []);
+  assert.deepEqual(filterApprovedPaperclipAlphaFlags(flags, { ...exact, prNumber: 17 }), flags);
+  assert.deepEqual(filterApprovedPaperclipAlphaFlags(flags, { ...exact, headRef: "codex/other" }), flags);
+  assert.deepEqual(filterApprovedPaperclipAlphaFlags(flags, { ...exact, apiHeadRef: "codex/other" }), flags);
+  assert.deepEqual(filterApprovedPaperclipAlphaFlags(flags, { ...exact, headSha: "0".repeat(40) }), flags);
+  assert.deepEqual(filterApprovedPaperclipAlphaFlags(flags.slice(0, 2), exact), flags.slice(0, 2));
+  assert.deepEqual(filterApprovedPaperclipAlphaFlags([
+    ...flags,
+    { check: "ci-tampering", file: ".github/workflows/other.yml" },
+  ], exact).length, 4);
+});
