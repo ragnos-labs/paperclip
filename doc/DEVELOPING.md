@@ -23,6 +23,15 @@ GitHub Actions owns `pnpm-lock.yaml`.
 - Pull request CI validates dependency resolution when manifests change.
 - Pushes to `master` regenerate `pnpm-lock.yaml` with `pnpm install --lockfile-only --no-frozen-lockfile`, commit it back if needed, and then run verification with `--frozen-lockfile`.
 
+## Release Publication Hold
+
+Source merges do not publish container images or npm packages. The Docker and
+Release workflows are manual verification-only workflows. They build or preview
+the requested source without registry login, package-write permission, tag
+creation, release creation, or publication. A separate reviewed change must add
+the release authority, protected environment, exact-source fence, immutable
+receipt, and recovery controls before either workflow can publish again.
+
 ## Start Dev
 
 From repo root:
