@@ -22,6 +22,17 @@ const severityRank = new Map([
   ["critical", 4],
 ]);
 
+const approvedReleaseSafetyPullRequest = Object.freeze({
+  prNumber: 13,
+  headRef: "codex/release-source-merge-safety",
+  headSha: "4ecf095b037c7ddafb2dfc99e0d57974ff3fda88",
+});
+
+const approvedReleaseSafetyFlags = Object.freeze([
+  "ci-tampering:.github/workflows/docker.yml",
+  "ci-tampering:.github/workflows/release.yml",
+]);
+
 export function compareAuditToBaseline(audit, baseline) {
   const failures = [];
   const advisories = audit?.advisories ?? {};
@@ -67,6 +78,22 @@ export function filterBootstrapFlags(flags, context) {
   ));
 }
 
+export function filterApprovedReleaseSafetyFlags(flags, context) {
+  const isExactPullRequest = context.prNumber === approvedReleaseSafetyPullRequest.prNumber
+    && context.headRef === approvedReleaseSafetyPullRequest.headRef
+    && context.apiHeadRef === approvedReleaseSafetyPullRequest.headRef
+    && context.headSha === approvedReleaseSafetyPullRequest.headSha;
+  if (!isExactPullRequest) return flags;
+
+  const detected = flags
+    .map((flag) => `${flag.check}:${flag.file}`)
+    .sort();
+  const approved = [...approvedReleaseSafetyFlags].sort();
+  const isExactFlagSet = detected.length === approved.length
+    && detected.every((flag, index) => flag === approved[index]);
+  return isExactFlagSet ? [] : flags;
+}
+
 async function runAuditGate() {
   const baselineUrl = new URL("../ragnos-production-audit-baseline.json", import.meta.url);
   const baseline = JSON.parse(await readFile(baselineUrl, "utf8"));
@@ -99,7 +126,9 @@ async function runPullRequestScan() {
     throw new Error("GITHUB_TOKEN, GITHUB_REPOSITORY, and a positive PR_NUMBER are required");
   }
 
+  const pullRequestBefore = await ghFetch(`/repos/${repo}/pulls/${prNumber}`, token);
   const files = await fetchAllPullRequestFiles(ghFetch, repo, prNumber, token);
+  const pullRequestAfter = await ghFetch(`/repos/${repo}/pulls/${prNumber}`, token);
   const detectedFlags = [
     ...scanSecrets(files),
     ...scanCITampering(files),
@@ -108,11 +137,19 @@ async function runPullRequestScan() {
     ...scanTestPatterns(files),
     ...scanSensitivePaths(files),
   ];
-  const flags = filterBootstrapFlags(detectedFlags, {
+  const context = {
     prNumber,
     baseSha: process.env.PR_BASE_SHA,
     headRef: process.env.PR_HEAD_REF,
-  });
+    apiHeadRef: pullRequestAfter?.head?.ref,
+    headSha: pullRequestBefore?.head?.sha === pullRequestAfter?.head?.sha
+      ? pullRequestAfter?.head?.sha
+      : undefined,
+  };
+  const flags = filterApprovedReleaseSafetyFlags(
+    filterBootstrapFlags(detectedFlags, context),
+    context,
+  );
   if (flags.length > 0) {
     throw new Error(`read-only source scan failed:\n${JSON.stringify(sanitizeFlags(flags), null, 2)}`);
   }

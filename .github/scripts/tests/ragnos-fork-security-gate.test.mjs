@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   compareAuditToBaseline,
+  filterApprovedReleaseSafetyFlags,
   filterBootstrapFlags,
   sanitizeFlags,
 } from "../ragnos-fork-security-gate.mjs";
@@ -55,4 +56,48 @@ test("allows only the exact one-time bootstrap workflow flag", () => {
   };
   assert.deepEqual(filterBootstrapFlags(flags, exact), [flags[1]]);
   assert.deepEqual(filterBootstrapFlags(flags, { ...exact, prNumber: 12 }), flags);
+});
+
+test("allows only the exact release-safety pull request flags", () => {
+  const flags = [
+    { check: "ci-tampering", file: ".github/workflows/docker.yml" },
+    { check: "ci-tampering", file: ".github/workflows/release.yml" },
+  ];
+  const exact = {
+    prNumber: 13,
+    headRef: "codex/release-source-merge-safety",
+    apiHeadRef: "codex/release-source-merge-safety",
+    headSha: "4ecf095b037c7ddafb2dfc99e0d57974ff3fda88",
+  };
+
+  assert.deepEqual(filterApprovedReleaseSafetyFlags(flags, exact), []);
+  assert.deepEqual(filterApprovedReleaseSafetyFlags(flags, { ...exact, prNumber: 14 }), flags);
+  assert.deepEqual(filterApprovedReleaseSafetyFlags(flags, { ...exact, headRef: "codex/other" }), flags);
+  assert.deepEqual(filterApprovedReleaseSafetyFlags(flags, { ...exact, apiHeadRef: "codex/other" }), flags);
+  assert.deepEqual(filterApprovedReleaseSafetyFlags(flags, { ...exact, headSha: "0".repeat(40) }), flags);
+});
+
+test("keeps every release-safety flag when the detected set is not exact", () => {
+  const exact = {
+    prNumber: 13,
+    headRef: "codex/release-source-merge-safety",
+    apiHeadRef: "codex/release-source-merge-safety",
+    headSha: "4ecf095b037c7ddafb2dfc99e0d57974ff3fda88",
+  };
+  const missing = [
+    { check: "ci-tampering", file: ".github/workflows/docker.yml" },
+  ];
+  const extra = [
+    ...missing,
+    { check: "ci-tampering", file: ".github/workflows/release.yml" },
+    { check: "ci-tampering", file: ".github/workflows/other.yml" },
+  ];
+  const wrongCheck = [
+    { check: "build-script", file: ".github/workflows/docker.yml" },
+    { check: "ci-tampering", file: ".github/workflows/release.yml" },
+  ];
+
+  assert.deepEqual(filterApprovedReleaseSafetyFlags(missing, exact), missing);
+  assert.deepEqual(filterApprovedReleaseSafetyFlags(extra, exact), extra);
+  assert.deepEqual(filterApprovedReleaseSafetyFlags(wrongCheck, exact), wrongCheck);
 });
