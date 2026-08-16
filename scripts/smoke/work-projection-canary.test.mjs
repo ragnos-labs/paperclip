@@ -148,25 +148,33 @@ test("cleanup failure prevents a pass receipt", () => {
     image_ref=test-image
     network_id=owned-network-id
     ownership_started=1
-    if complete_success; then exit 92; fi
+    complete_success
   `);
 
-  assert.notEqual(result.status, 92, result.stderr);
-  assert.equal(result.status, 0, result.stderr);
+  assert.notEqual(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stdout, /"status":\s*"passed"/);
   assert.match(result.dockerLog, /network rm owned-network-id/);
 });
 
-test("successful completion removes only exact-label owned resources before its receipt", () => {
+test("successful completion removes owned resources and preserves an unrelated container", () => {
   const result = runBash(`
     owned_container_exists=1
     owned_network_exists=1
+    foreign_container_exists=1
     docker() {
       printf '%s\\n' "$*" >> "$DOCKER_LOG"
-      if [ "$1 $2" = "container inspect" ] && [ "$3" = owned-container-id ]; then
-        [ "$owned_container_exists" -eq 1 ] || return 1
-        if [ "\${4:-}" = --format ]; then printf '%s\\n' "$run_id"; fi
-        return 0
+      if [ "$1 $2" = "container inspect" ]; then
+        if [ "$3" = owned-container-id ]; then
+          [ "$owned_container_exists" -eq 1 ] || return 1
+          if [ "\${4:-}" = --format ]; then printf '%s\\n' "$run_id"; fi
+          return 0
+        fi
+        if [ "$3" = foreign-container-id ]; then
+          [ "$foreign_container_exists" -eq 1 ] || return 1
+          if [ "\${4:-}" = --format ]; then printf '%s\\n' foreign-run-id; fi
+          return 0
+        fi
+        return 1
       fi
       if [ "$1 $2" = "network inspect" ] && [ "$3" = owned-network-id ]; then
         [ "$owned_network_exists" -eq 1 ] || return 1
@@ -197,6 +205,10 @@ test("successful completion removes only exact-label owned resources before its 
     network_id=owned-network-id
     ownership_started=1
     complete_success
+    container_exists foreign-container-id
+    [ "$owned_container_exists" -eq 0 ]
+    [ "$owned_network_exists" -eq 0 ]
+    [ "$foreign_container_exists" -eq 1 ]
   `);
 
   assert.equal(result.status, 0, result.stderr);
@@ -204,7 +216,8 @@ test("successful completion removes only exact-label owned resources before its 
   assert.match(result.stdout, /"status":\s*"verified"/);
   assert.match(result.dockerLog, /rm --force owned-container-id/);
   assert.match(result.dockerLog, /network rm owned-network-id/);
-  assert.doesNotMatch(result.dockerLog, /foreign|mislabeled/);
+  assert.match(result.dockerLog, /container inspect foreign-container-id/);
+  assert.doesNotMatch(result.dockerLog, /rm --force foreign-container-id/);
   assert.ok(
     result.dockerLog.lastIndexOf("network ls") > result.dockerLog.indexOf("network rm owned-network-id"),
     "absence verification must run after removal",
