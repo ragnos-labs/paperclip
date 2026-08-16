@@ -381,6 +381,7 @@ export {
   INVITE_JOIN_TYPES,
   JOIN_REQUEST_TYPES,
   JOIN_REQUEST_STATUSES,
+  WORK_PROJECTION_ADMIN_PERMISSION,
   PERMISSION_KEYS,
   TOOL_ACTION_REQUEST_STATUSES,
   TOOL_APPLICATION_STATUSES,
@@ -2361,6 +2362,8 @@ export {
   type EnvironmentCustomImageTerminalSessionToken,
 } from "./validators/environment-custom-images.js";
 export * from "./validators/skill-policy.js";
+export * from "./validators/company-work-projection.js";
+export * from "./validators/company-work-projection-v2.js";
 export {
   FEATURE_TIERS,
   INSTANCE_FEATURE_CATALOG,

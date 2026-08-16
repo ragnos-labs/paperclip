@@ -932,6 +932,8 @@ export type JoinRequestType = (typeof JOIN_REQUEST_TYPES)[number];
 export const JOIN_REQUEST_STATUSES = ["pending_approval", "approved", "rejected"] as const;
 export type JoinRequestStatus = (typeof JOIN_REQUEST_STATUSES)[number];
 
+export const WORK_PROJECTION_ADMIN_PERMISSION = "work_projection_credentials:manage" as const;
+
 export const PERMISSION_KEYS = [
   "agents:create",
   "agents:configure",
@@ -949,6 +951,7 @@ export const PERMISSION_KEYS = [
   "inbox:manage",
   "users:invite",
   "users:manage_permissions",
+  WORK_PROJECTION_ADMIN_PERMISSION,
   "tasks:assign",
   "tasks:assign_scope",
   "tasks:manage_active_checkouts",

@@ -39,6 +39,7 @@ import type {
   SourceTrustMetadata,
   TrustAuthorizationPolicy,
 } from "../trust-policy.js";
+import type { IssueWorkProjectionContext } from "../validators/company-work-projection-v2.js";
 
 export type { IssueWorkMode };
 
@@ -159,6 +160,7 @@ export interface AcceptedPlanDecompositionChild {
   billingCode?: string | null;
   assigneeAdapterOverrides?: IssueAssigneeAdapterOverrides | null;
   executionPolicy?: IssueExecutionPolicy | null;
+  workProjectionContext?: IssueWorkProjectionContext | null;
   executionWorkspaceId?: string | null;
   executionWorkspacePreference?: string | null;
   executionWorkspaceSettings?: IssueExecutionWorkspaceSettings | null;
@@ -802,6 +804,7 @@ export interface Issue {
   billingCode: string | null;
   assigneeAdapterOverrides: IssueAssigneeAdapterOverrides | null;
   executionPolicy?: IssueExecutionPolicy | null;
+  workProjectionContext?: IssueWorkProjectionContext | null;
   executionState?: IssueExecutionState | null;
   monitorNextCheckAt?: Date | null;
   monitorLastTriggeredAt?: Date | null;

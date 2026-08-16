@@ -1035,6 +1035,26 @@ describe("agent issue mutation checkout ownership", () => {
     );
   });
 
+  it("does not let an agent self-approve exportable work projection context", async () => {
+    const app = await createApp(ownerActor());
+    const res = await request(app).patch(`/api/issues/${issueId}`).send({
+      workProjectionContext: {
+        objective: "Agent-authored export approval must be rejected.",
+        objectiveExportApproved: true,
+        intent: {
+          type: "runtime_operation",
+          systemReference: "runtime:synthetic",
+          operation: "restart",
+        },
+        delegation: null,
+      },
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("human board actor");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
   it("stores the authenticated agent run id when creating work products", async () => {
     const app = await createApp(ownerActor());
 
@@ -1463,6 +1483,35 @@ describe("agent issue mutation checkout ownership", () => {
         }),
       }),
     );
+  });
+
+  it("does not let an agent self-approve exportable context through accepted-plan decomposition", async () => {
+    const app = await createApp(ownerActor());
+
+    const res = await request(app)
+      .post(`/api/issues/${issueId}/accepted-plan-decompositions`)
+      .send({
+        acceptedPlanRevisionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        children: [
+          {
+            title: "Agent-authored export approval must be rejected",
+            workProjectionContext: {
+              objective: "Export this child to the runtime controller.",
+              objectiveExportApproved: true,
+              intent: {
+                type: "runtime_operation",
+                systemReference: "runtime:synthetic",
+                operation: "restart",
+              },
+              delegation: null,
+            },
+          },
+        ],
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toContain("human board actor");
+    expect(mockIssueService.decomposeAcceptedPlan).not.toHaveBeenCalled();
   });
 
   it("allows board users to set explicit cheap issue assignee profile overrides", async () => {

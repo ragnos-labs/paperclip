@@ -1471,6 +1471,20 @@
       "when": 1786129601533,
       "tag": "0211_bright_morg",
       "breakpoints": true
+    },
+    {
+      "idx": 212,
+      "version": "7",
+      "when": 1786846300844,
+      "tag": "0212_company_work_projection",
+      "breakpoints": true
+    },
+    {
+      "idx": 213,
+      "version": "7",
+      "when": 1786846439160,
+      "tag": "0213_company_work_projection_v2",
+      "breakpoints": true
     }
   ]
 }
