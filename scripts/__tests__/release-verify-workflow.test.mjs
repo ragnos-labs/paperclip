@@ -10,18 +10,38 @@ function readWorkflow(name) {
   return readFileSync(path.join(repoRoot, ".github/workflows", name), "utf8");
 }
 
-test("release workflow delegates stable and canary verification to the reusable workflow", () => {
+test("release workflow delegates manual stable verification to the reusable workflow", () => {
   const releaseWorkflow = readWorkflow("release.yml");
 
   assert.match(
     releaseWorkflow,
-    /verify_canary:\n\s+if: github\.event_name == 'push'\n\s+uses: \.\/\.github\/workflows\/release-verify\.yml\n\s+with:\n\s+ref: \$\{\{ github\.sha \}\}/,
-  );
-  assert.match(
-    releaseWorkflow,
-    /verify_stable:\n\s+if: github\.event_name == 'workflow_dispatch'\n\s+uses: \.\/\.github\/workflows\/release-verify\.yml\n\s+with:\n\s+ref: \$\{\{ inputs\.source_ref \}\}/,
+    /verify_stable:\n\s+uses: \.\/\.github\/workflows\/release-verify\.yml\n\s+with:\n\s+ref: \$\{\{ inputs\.source_ref \}\}/,
   );
   assert.doesNotMatch(releaseWorkflow, /verify_(?:canary|stable):[\s\S]*?pnpm test:run(?:\n|$)/);
+});
+
+test("source merges cannot publish images, packages, tags, or releases", () => {
+  const dockerWorkflow = readWorkflow("docker.yml");
+  const releaseWorkflow = readWorkflow("release.yml");
+
+  for (const workflow of [dockerWorkflow, releaseWorkflow]) {
+    assert.match(workflow, /on:\n\s+workflow_dispatch:/);
+    assert.doesNotMatch(workflow, /\n\s+push:\s*(?:\n|$)/);
+    assert.doesNotMatch(workflow, /packages:\s*write/);
+    assert.doesNotMatch(workflow, /id-token:\s*write/);
+    assert.doesNotMatch(workflow, /contents:\s*write/);
+    assert.doesNotMatch(workflow, /git push/);
+  }
+
+  assert.doesNotMatch(dockerWorkflow, /docker\/login-action/);
+  assert.doesNotMatch(dockerWorkflow, /push:\s*true/);
+  assert.doesNotMatch(dockerWorkflow, /cache-to:\s*type=registry/);
+  assert.match(dockerWorkflow, /push:\s*false/g);
+
+  assert.match(releaseWorkflow, /--dry-run/);
+  assert.doesNotMatch(releaseWorkflow, /publish_(?:canary|stable):/);
+  assert.doesNotMatch(releaseWorkflow, /npm publish/);
+  assert.doesNotMatch(releaseWorkflow, /Create GitHub Release/);
 });
 
 test("release verify workflow covers the same split test surface as stable PR verification", () => {

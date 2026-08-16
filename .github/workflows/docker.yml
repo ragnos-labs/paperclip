@@ -1,19 +1,18 @@
-name: Docker
+name: Docker Verification
 
 on:
-  push:
-    branches:
-      - "master"
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Full commit SHA to build without publication
+        required: true
+        type: string
 
 permissions:
   contents: read
-  packages: write
 
-# Serialise builds per ref without killing an in-flight one: a newer push
-# supersedes only the pending slot, so the image build that is already
-# running always finishes and publishes.
+# Serialise verification builds per workflow ref without killing an in-flight
+# build. This workflow has no registry write authority.
 concurrency:
   group: docker-${{ github.ref }}
   cancel-in-progress: false
@@ -29,6 +28,7 @@ jobs:
           # Full history and tags so `git describe` below can compute the
           # release version to stamp into the image.
           fetch-depth: 0
+          ref: ${{ inputs.source_ref }}
 
       # `.git` is dockerignored, so a running image cannot derive its own
       # version and otherwise reports the source package.json placeholder in
@@ -57,9 +57,7 @@ jobs:
           version: 9.15.4
           run_install: false
 
-      # No dependency cache here: this workflow publishes release images, and
-      # restoring a shared Actions cache into the build inputs would let a
-      # poisoned cache entry reach the published artifact.
+      # Do not restore shared dependency state into the verification build.
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
@@ -107,13 +105,6 @@ jobs:
           echo "Disk after cleanup:"
           df -h
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -126,8 +117,8 @@ jobs:
         id: schema
         run: |
           set -euo pipefail
-          last=$(ls packages/db/src/migrations/*.sql | sed 's|.*/||' | LC_ALL=C sort | tail -1)
-          count=$(ls packages/db/src/migrations/*.sql | wc -l | tr -d ' ')
+          last=$(find packages/db/src/migrations -maxdepth 1 -type f -name '*.sql' -exec basename {} \; | LC_ALL=C sort | tail -1)
+          count=$(find packages/db/src/migrations -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')
           echo "last=${last}" >> "$GITHUB_OUTPUT"
           echo "count=${count}" >> "$GITHUB_OUTPUT"
 
@@ -145,7 +136,7 @@ jobs:
             io.github.paperclipai.schema.last-migration=${{ steps.schema.outputs.last }}
             io.github.paperclipai.schema.migration-count=${{ steps.schema.outputs.count }}
 
-      - name: Build and push
+      - name: Build without publication
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -155,24 +146,16 @@ jobs:
           target: production
           build-args: |
             PAPERCLIP_BUILD_VERSION=${{ steps.build-version.outputs.version }}
-            PAPERCLIP_BUILD_COMMIT=${{ github.sha }}
+            PAPERCLIP_BUILD_COMMIT=${{ inputs.source_ref }}
             CLI_TOOLS_CACHE_EPOCH=${{ steps.tools-epoch.outputs.epoch }}
           platforms: linux/amd64,linux/arm64
-          push: true
-          # Registry-backed BuildKit cache instead of type=gha: the Actions
-          # cache is capped at 10GB per repo, and two multi-arch mode=max jobs
-          # evict each other, so most builds ran effectively cold. The cache
-          # ref lives in ghcr next to the image and is written only by this
-          # workflow (docker.yml runs on master/tag pushes, never on PRs).
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
+          push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
   # The cloud variant carries built bundled plugins for managed deployments
-  # (see the `cloud` stage in the Dockerfile). It runs as its own job with no
-  # `needs:` on the stock publish above, so the two builds run in parallel and
-  # a failure or slow build in one never gates, delays, or skips the other.
+  # (see the `cloud` stage in the Dockerfile). It runs as its own verification
+  # job, so the two builds run in parallel.
   # Both jobs share only the single top-level concurrency slot. Each job is a
   # separate runner, so this one carries its own copy of the prep steps
   # (checkout through schema labels) — the accepted cost of that isolation.
@@ -186,6 +169,7 @@ jobs:
           # Full history and tags so `git describe` below can compute the
           # release version to stamp into the image.
           fetch-depth: 0
+          ref: ${{ inputs.source_ref }}
 
       # `.git` is dockerignored, so a running image cannot derive its own
       # version and otherwise reports the source package.json placeholder in
@@ -214,9 +198,7 @@ jobs:
           version: 9.15.4
           run_install: false
 
-      # No dependency cache here: this workflow publishes release images, and
-      # restoring a shared Actions cache into the build inputs would let a
-      # poisoned cache entry reach the published artifact.
+      # Do not restore shared dependency state into the verification build.
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
@@ -264,13 +246,6 @@ jobs:
           echo "Disk after cleanup:"
           df -h
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -283,13 +258,12 @@ jobs:
         id: schema
         run: |
           set -euo pipefail
-          last=$(ls packages/db/src/migrations/*.sql | sed 's|.*/||' | LC_ALL=C sort | tail -1)
-          count=$(ls packages/db/src/migrations/*.sql | wc -l | tr -d ' ')
+          last=$(find packages/db/src/migrations -maxdepth 1 -type f -name '*.sql' -exec basename {} \; | LC_ALL=C sort | tail -1)
+          count=$(find packages/db/src/migrations -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')
           echo "last=${last}" >> "$GITHUB_OUTPUT"
           echo "count=${count}" >> "$GITHUB_OUTPUT"
 
-      # Published under the same tag set with a `-cloud` suffix
-      # (sha-<short>-cloud, latest-cloud, <version>-cloud).
+      # Compute the same tag metadata with a `-cloud` suffix for inspection.
       - name: Docker meta (cloud)
         id: meta-cloud
         uses: docker/metadata-action@v6
@@ -306,7 +280,7 @@ jobs:
             io.github.paperclipai.schema.last-migration=${{ steps.schema.outputs.last }}
             io.github.paperclipai.schema.migration-count=${{ steps.schema.outputs.count }}
 
-      - name: Build and push (cloud)
+      - name: Build without publication (cloud)
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -316,18 +290,13 @@ jobs:
           build-args: |
             CLOUD_BUNDLED_PLUGINS=daytona
             PAPERCLIP_BUILD_VERSION=${{ steps.build-version.outputs.version }}
-            PAPERCLIP_BUILD_COMMIT=${{ github.sha }}
+            PAPERCLIP_BUILD_COMMIT=${{ inputs.source_ref }}
             CLI_TOOLS_CACHE_EPOCH=${{ steps.tools-epoch.outputs.epoch }}
           # amd64 only, unlike the self-hosted image above: the cloud variant
           # is consumed exclusively by managed-deployment hosts, which run
           # amd64. The QEMU-emulated arm64 half dominated this job's wall
           # clock, and dropping it roughly halves time-to-deployable-image.
           platforms: linux/amd64
-          push: true
-          # Registry-backed BuildKit cache, separate ref from the self-hosted
-          # job so the two parallel builds never clobber each other's cache
-          # manifest (see the rationale on the job above).
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-cloud
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-cloud,mode=max
+          push: false
           tags: ${{ steps.meta-cloud.outputs.tags }}
           labels: ${{ steps.meta-cloud.outputs.labels }}
