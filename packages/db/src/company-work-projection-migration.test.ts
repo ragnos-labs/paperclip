@@ -245,7 +245,7 @@ describePostgres("0212 company work projection migration", () => {
       .map((value) => value.trim())
       .filter(Boolean);
     const v2Migration = await readFile(
-      new URL("./migrations/0219_quick_captain_britain.sql", import.meta.url),
+      new URL("./migrations/0213_company_work_projection_v2.sql", import.meta.url),
       "utf8",
     );
     const v2Statements = v2Migration
