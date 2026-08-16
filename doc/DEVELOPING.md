@@ -28,9 +28,13 @@ GitHub Actions owns `pnpm-lock.yaml`.
 Source merges do not publish container images or npm packages. The Docker and
 Release workflows are manual verification-only workflows. They build or preview
 the requested source without registry login, package-write permission, tag
-creation, release creation, or publication. A separate reviewed change must add
-the release authority, protected environment, exact-source fence, immutable
-receipt, and recovery controls before either workflow can publish again.
+creation, release creation, or publication.
+
+The separate RAGnos alpha path publishes only the RAGnos backend OCI image and
+GitHub prerelease. It uses a protected environment, exact-source fence,
+immutable receipt, and recovery controls. It does not publish npm packages and
+does not change the upstream Paperclip release channels. See
+[`RAGNOS-ALPHA-RELEASE.md`](RAGNOS-ALPHA-RELEASE.md).
 
 ## Start Dev
 

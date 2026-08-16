@@ -1,0 +1,438 @@
+name: RAGnos Paperclip Alpha Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character commit on master to publish
+        required: true
+        type: string
+      version:
+        description: RAGnos prerelease version, for example 0.1.0-alpha.1
+        required: true
+        type: string
+      confirmation:
+        description: Type PUBLISH PAPERCLIP RAGNOS ALPHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: paperclip-ragnos-alpha-release
+  cancel-in-progress: false
+
+jobs:
+  verify_source:
+    uses: ./.github/workflows/release-verify.yml
+    with:
+      ref: ${{ inputs.source_sha }}
+
+  publish_alpha:
+    name: Publish immutable RAGnos alpha
+    needs: verify_source
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment:
+      name: paperclip-alpha-release
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.source_sha }}
+
+      - name: Validate release authority and exact source
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_CONFIRMATION: ${{ inputs.confirmation }}
+          INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "$INPUT_SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "source_sha must be an exact lowercase 40-character Git commit." >&2
+            exit 1
+          fi
+          if ! printf '%s' "$INPUT_VERSION" | grep -Eq '^0\.[0-9]+\.[0-9]+-alpha\.[1-9][0-9]*$'; then
+            echo "version must be an alpha semantic version below 1.0.0." >&2
+            exit 1
+          fi
+          if [ "$INPUT_CONFIRMATION" != 'PUBLISH PAPERCLIP RAGNOS ALPHA' ]; then
+            echo "The release confirmation did not match." >&2
+            exit 1
+          fi
+
+          local_sha="$(git rev-parse HEAD)"
+          master_sha="$(git ls-remote origin refs/heads/master | awk '{print $1}')"
+          if [ "$local_sha" != "$INPUT_SOURCE_SHA" ] || [ "$master_sha" != "$INPUT_SOURCE_SHA" ]; then
+            echo "The requested source is not the exact current master revision." >&2
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "The release checkout is not clean." >&2
+            exit 1
+          fi
+
+          release_tag="ragnos/v${INPUT_VERSION}"
+          image_tag="ragnos-${INPUT_VERSION}"
+          source_image_tag="sha-${INPUT_SOURCE_SHA}"
+
+          created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          {
+            echo "source_sha=$INPUT_SOURCE_SHA"
+            echo "version=$INPUT_VERSION"
+            echo "release_tag=$release_tag"
+            echo "image_tag=$image_tag"
+            echo "source_image_tag=$source_image_tag"
+            echo "created_at=$created_at"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse existing or ambiguous image tags
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          SOURCE_IMAGE_TAG: ${{ steps.identity.outputs.source_image_tag }}
+          VERSION_IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          require_registry_reference_absent() {
+            local reference="$1"
+            local output
+            local inspect_status
+            set +e
+            output="$(docker buildx imagetools inspect "$reference" 2>&1)"
+            inspect_status=$?
+            set -e
+            printf '%s' "$output" | node .github/scripts/registry-reference-guard.mjs \
+              --reference "$reference" \
+              --status "$inspect_status"
+          }
+
+          require_registry_reference_absent "$IMAGE:$VERSION_IMAGE_TAG"
+          require_registry_reference_absent "$IMAGE:$SOURCE_IMAGE_TAG"
+
+      - name: Compute migration identity
+        id: migrations
+        run: |
+          set -euo pipefail
+          {
+            find packages/db/src/migrations -maxdepth 1 -type f -name '*.sql' -print
+            printf '%s\n' packages/db/src/migrations/meta/_journal.json
+          } | LC_ALL=C sort > migration-files.txt
+          if [ ! -s migration-files.txt ]; then
+            echo "No database migrations were found." >&2
+            exit 1
+          fi
+          while IFS= read -r migration; do
+            sha256sum "$migration"
+          done < migration-files.txt > migration-manifest.txt
+          last="$(find packages/db/src/migrations -maxdepth 1 -type f -name '*.sql' -print \
+            | LC_ALL=C sort | tail -n 1 | xargs basename)"
+          count="$(find packages/db/src/migrations -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')"
+          manifest_digest="$(sha256sum migration-manifest.txt | awk '{print $1}')"
+          {
+            echo "last=$last"
+            echo "count=$count"
+            echo "manifest_digest=$manifest_digest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create exact source tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.identity.outputs.release_tag }}
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          master_sha="$(git ls-remote origin refs/heads/master | awk '{print $1}')"
+          if [ "$master_sha" != "$SOURCE_SHA" ]; then
+            echo "Master moved after verification and before the first publication effect." >&2
+            exit 1
+          fi
+
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/${RELEASE_TAG}" \
+            -f sha="$SOURCE_SHA" >/dev/null
+          tagged_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha')"
+          if [ "$tagged_sha" != "$SOURCE_SHA" ]; then
+            echo "The new source tag does not resolve to the approved source." >&2
+            exit 1
+          fi
+
+      - name: Build and publish release image
+        id: image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          target: production
+          platforms: linux/amd64,linux/arm64
+          push: true
+          sbom: true
+          provenance: mode=max
+          build-args: |
+            PAPERCLIP_BUILD_VERSION=ragnos/v${{ steps.identity.outputs.version }}
+            PAPERCLIP_BUILD_COMMIT=${{ steps.identity.outputs.source_sha }}
+            CLI_TOOLS_CACHE_EPOCH=${{ steps.identity.outputs.version }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.identity.outputs.image_tag }}
+            ghcr.io/${{ github.repository }}:${{ steps.identity.outputs.source_image_tag }}
+          labels: |
+            org.opencontainers.image.created=${{ steps.identity.outputs.created_at }}
+            org.opencontainers.image.revision=${{ steps.identity.outputs.source_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=Paperclip RAGnos backend
+            org.opencontainers.image.version=${{ steps.identity.outputs.version }}
+            io.github.paperclipai.schema.last-migration=${{ steps.migrations.outputs.last }}
+            io.github.paperclipai.schema.migration-count=${{ steps.migrations.outputs.count }}
+
+      - name: Read back registry identities and attestations
+        id: registry
+        env:
+          EXPECTED_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository }}
+          SOURCE_IMAGE_TAG: ${{ steps.identity.outputs.source_image_tag }}
+          VERSION_IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$EXPECTED_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          docker buildx imagetools inspect "$IMAGE@$EXPECTED_DIGEST" >/dev/null
+
+          for tag in "$VERSION_IMAGE_TAG" "$SOURCE_IMAGE_TAG"; do
+            tag_digest="$(docker buildx imagetools inspect "$IMAGE:$tag" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+            if [ "$tag_digest" != "$EXPECTED_DIGEST" ]; then
+              echo "Registry tag $tag does not resolve to the published digest." >&2
+              exit 1
+            fi
+          done
+
+          manifest="$(docker buildx imagetools inspect "$IMAGE@$EXPECTED_DIGEST" --format '{{json .Manifest}}')"
+          jq -e '
+            ([.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length) == 1
+            and ([.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length) == 1
+            and ([.manifests[] | select(.platform.os != "unknown")] | length) == 2
+          ' <<< "$manifest" >/dev/null
+
+          for platform in linux/amd64 linux/arm64; do
+            sbom="$(docker buildx imagetools inspect "$IMAGE@$EXPECTED_DIGEST" \
+              --format "{{json (index .SBOM \"$platform\").SPDX}}")"
+            jq -e '.SPDXID == "SPDXRef-DOCUMENT" and (.spdxVersion | startswith("SPDX-"))' \
+              <<< "$sbom" >/dev/null
+
+            provenance="$(docker buildx imagetools inspect "$IMAGE@$EXPECTED_DIGEST" \
+              --format "{{json (index .Provenance \"$platform\").SLSA}}")"
+            jq -e 'type == "object" and ((.buildType // .buildDefinition.buildType) | type == "string")' \
+              <<< "$provenance" >/dev/null
+          done
+
+          {
+            echo "sbom_status=verified_registry_attached"
+            echo "provenance_status=verified_registry_attached_buildkit"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create content-free release receipt
+        env:
+          CREATED_AT: ${{ steps.identity.outputs.created_at }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
+          SOURCE_IMAGE_TAG: ${{ steps.identity.outputs.source_image_tag }}
+          LAST_MIGRATION: ${{ steps.migrations.outputs.last }}
+          MIGRATION_COUNT: ${{ steps.migrations.outputs.count }}
+          MIGRATION_MANIFEST_DIGEST: ${{ steps.migrations.outputs.manifest_digest }}
+          RELEASE_TAG: ${{ steps.identity.outputs.release_tag }}
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
+          VERSION: ${{ steps.identity.outputs.version }}
+          SBOM_STATUS: ${{ steps.registry.outputs.sbom_status }}
+          PROVENANCE_STATUS: ${{ steps.registry.outputs.provenance_status }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp \
+            doc/company-work-projection-contract.md \
+            doc/company-work-projection-contract-v2.md \
+            doc/execution-semantics.md \
+            migration-manifest.txt \
+            release-assets/
+
+          jq -n \
+            --arg schema "ragnos_paperclip_release_receipt/v1" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg version "$VERSION" \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg image "ghcr.io/${GITHUB_REPOSITORY}:${IMAGE_TAG}" \
+            --arg source_image "ghcr.io/${GITHUB_REPOSITORY}:${SOURCE_IMAGE_TAG}" \
+            --arg image_digest "$IMAGE_DIGEST" \
+            --arg last_migration "$LAST_MIGRATION" \
+            --arg migration_count "$MIGRATION_COUNT" \
+            --arg migration_manifest_digest "$MIGRATION_MANIFEST_DIGEST" \
+            --arg workflow_run "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg created_at "$CREATED_AT" \
+            --arg sbom_status "$SBOM_STATUS" \
+            --arg provenance_status "$PROVENANCE_STATUS" \
+            '{
+              schema: $schema,
+              repository: $repository,
+              source_sha: $source_sha,
+              version: $version,
+              release_tag: $release_tag,
+              image: $image,
+              source_image: $source_image,
+              image_digest: $image_digest,
+              source_image_digest: $image_digest,
+              migration: {
+                last: $last_migration,
+                count: ($migration_count | tonumber),
+                migration_manifest_digest: $migration_manifest_digest
+              },
+              workflow_run: $workflow_run,
+              created_at: $created_at,
+              platforms: ["linux/amd64", "linux/arm64"],
+              sbom_status: $sbom_status,
+              provenance_status: $provenance_status,
+              npm_publication: false,
+              deployment_status: "not_deployed",
+              activation_status: "not_activated"
+            }' > release-assets/release-receipt.json
+
+          cat > release-assets/RELEASE-NOTES.md <<EOF
+          This is the first bounded RAGnos prerelease of the Paperclip backend.
+
+          Source: ${SOURCE_SHA}
+          Image: ghcr.io/${GITHUB_REPOSITORY}@${IMAGE_DIGEST}
+          Migration identity: ${MIGRATION_MANIFEST_DIGEST}
+
+          This release does not publish npm packages. It is not deployed or activated by this workflow.
+          EOF
+
+          (
+            cd release-assets
+            sha256sum \
+              RELEASE-NOTES.md \
+              company-work-projection-contract.md \
+              company-work-projection-contract-v2.md \
+              execution-semantics.md \
+              migration-manifest.txt \
+              release-receipt.json \
+              | LC_ALL=C sort -k2 > SHA256SUMS
+          )
+
+      - name: Create immutable GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.identity.outputs.release_tag }}
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            release-assets/RELEASE-NOTES.md \
+            release-assets/SHA256SUMS \
+            release-assets/company-work-projection-contract.md \
+            release-assets/company-work-projection-contract-v2.md \
+            release-assets/execution-semantics.md \
+            release-assets/migration-manifest.txt \
+            release-assets/release-receipt.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_SHA" \
+            --title "Paperclip RAGnos ${VERSION}" \
+            --notes-file release-assets/RELEASE-NOTES.md \
+            --prerelease \
+            --verify-tag
+
+      - name: Read back GitHub release identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.identity.outputs.release_tag }}
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          release=""
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            release="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --json assets,isImmutable,isPrerelease,tagName,url)"
+            if jq -e --arg tag "$RELEASE_TAG" '
+              .isImmutable == true
+              and .isPrerelease == true
+              and .tagName == $tag
+              and ((.assets | map(.name) | sort) == ([
+                "RELEASE-NOTES.md",
+                "SHA256SUMS",
+                "company-work-projection-contract-v2.md",
+                "company-work-projection-contract.md",
+                "execution-semantics.md",
+                "migration-manifest.txt",
+                "release-receipt.json"
+              ] | sort))
+            ' <<< "$release" >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 10 ]; then
+              echo "The GitHub prerelease did not become immutable with the exact asset set." >&2
+              exit 1
+            fi
+            sleep 3
+          done
+
+          ref="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+          object_type="$(jq -r '.object.type' <<< "$ref")"
+          object_sha="$(jq -r '.object.sha' <<< "$ref")"
+          if [ "$object_type" = tag ]; then
+            object_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}" --jq '.object.sha')"
+          fi
+          if [ "$object_sha" != "$SOURCE_SHA" ]; then
+            echo "The release tag does not resolve to the exact source commit." >&2
+            exit 1
+          fi
+
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir release-readback
+          (
+            cd release-readback
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Preserve release receipt
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: paperclip-ragnos-${{ steps.identity.outputs.version }}-release-receipt
+          path: |
+            release-assets/SHA256SUMS
+            release-assets/release-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Record release summary
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          RELEASE_TAG: ${{ steps.identity.outputs.release_tag }}
+          SOURCE_SHA: ${{ steps.identity.outputs.source_sha }}
+        run: |
+          {
+            echo "## Paperclip RAGnos alpha published"
+            echo
+            echo "- Source: \`$SOURCE_SHA\`"
+            echo "- Release tag: \`$RELEASE_TAG\`"
+            echo "- Image digest: \`$IMAGE_DIGEST\`"
+            echo "- Deployment: not performed"
+            echo "- Activation: not performed"
+          } >> "$GITHUB_STEP_SUMMARY"

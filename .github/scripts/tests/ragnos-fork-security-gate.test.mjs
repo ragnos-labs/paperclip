@@ -5,7 +5,39 @@ import {
   filterApprovedReleaseSafetyFlags,
   filterBootstrapFlags,
   sanitizeFlags,
+  validateAuditCommandResult,
 } from "../ragnos-fork-security-gate.mjs";
+
+const validAudit = {
+  advisories: {},
+  metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0 } },
+};
+
+test("accepts valid pnpm audit results with clean or advisory exit status", () => {
+  for (const status of [0, 1]) {
+    assert.deepEqual(validateAuditCommandResult({
+      status,
+      signal: null,
+      stdout: JSON.stringify(validAudit),
+      stderr: "",
+    }), validAudit);
+  }
+});
+
+test("rejects failed, malformed, and error-shaped pnpm audit results", () => {
+  const cases = [
+    { status: 2, signal: null, stdout: JSON.stringify(validAudit), stderr: "registry unavailable" },
+    { status: 0, signal: "SIGTERM", stdout: JSON.stringify(validAudit), stderr: "" },
+    { status: 0, signal: null, stdout: "not-json", stderr: "" },
+    { status: 1, signal: null, stdout: JSON.stringify({ error: { summary: "registry error" } }), stderr: "" },
+    { status: 0, signal: null, stdout: JSON.stringify({ advisories: {} }), stderr: "" },
+    { status: 0, signal: null, stdout: JSON.stringify({ metadata: validAudit.metadata }), stderr: "" },
+  ];
+
+  for (const result of cases) {
+    assert.throws(() => validateAuditCommandResult(result));
+  }
+});
 
 test("allows existing advisories and removals", () => {
   const baseline = { advisories: { "1": "high", "2": "moderate" } };

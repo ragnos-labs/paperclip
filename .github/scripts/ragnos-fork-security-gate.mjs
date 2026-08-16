@@ -69,6 +69,38 @@ export function compareAuditToBaseline(audit, baseline) {
   return failures;
 }
 
+export function validateAuditCommandResult(result) {
+  if (result.error) throw new Error("pnpm audit could not start");
+  if (result.signal) throw new Error("pnpm audit was interrupted");
+  if (result.status !== 0 && result.status !== 1) {
+    throw new Error(`pnpm audit failed with unexpected status ${String(result.status)}`);
+  }
+
+  let audit;
+  try {
+    audit = JSON.parse(result.stdout);
+  } catch {
+    throw new Error("pnpm audit did not return valid JSON");
+  }
+
+  if (!audit || typeof audit !== "object" || Array.isArray(audit) || audit.error) {
+    throw new Error("pnpm audit returned an error response");
+  }
+  if (!audit.advisories || typeof audit.advisories !== "object" || Array.isArray(audit.advisories)) {
+    throw new Error("pnpm audit response is missing the advisories map");
+  }
+  const counts = audit.metadata?.vulnerabilities;
+  if (!counts || typeof counts !== "object" || Array.isArray(counts)) {
+    throw new Error("pnpm audit response is missing vulnerability counts");
+  }
+  for (const severity of ["info", "low", "moderate", "high", "critical"]) {
+    if (!Number.isInteger(counts[severity]) || counts[severity] < 0) {
+      throw new Error(`pnpm audit response has an invalid ${severity} count`);
+    }
+  }
+  return audit;
+}
+
 export function sanitizeFlags(flags) {
   return flags.map(({ check, file, pattern, packages, advisoryPath }) => ({
     check,
@@ -129,14 +161,7 @@ async function runAuditGate() {
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024,
   });
-  if (result.error) throw result.error;
-
-  let audit;
-  try {
-    audit = JSON.parse(result.stdout);
-  } catch {
-    throw new Error(`pnpm audit did not return JSON: ${result.stderr || result.stdout}`);
-  }
+  const audit = validateAuditCommandResult(result);
 
   const counts = audit.metadata?.vulnerabilities ?? {};
   console.log(`[fork-security] production audit counts: ${JSON.stringify(counts)}`);
