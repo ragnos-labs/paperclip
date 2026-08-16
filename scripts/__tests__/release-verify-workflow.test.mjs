@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import "../smoke/work-projection-canary.test.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -80,6 +81,8 @@ test("RAGnos alpha publication is manual, exact-source, protected, and npm-free"
   assert.match(alphaWorkflow, /scripts\/smoke\/work-projection-canary\.sh/);
   assert.match(alphaWorkflow, /paperclip\.company-work-projection-canary\/v1/);
   assert.match(alphaWorkflow, /verified_get_only_no_persistent_state/);
+  assert.match(alphaWorkflow, /containersRemaining: 0/);
+  assert.match(alphaWorkflow, /networksRemaining: 0/);
 
   assert.match(alphaWorkflow, /release-receipt\.json/);
   assert.match(alphaWorkflow, /SHA256SUMS/);

@@ -265,6 +265,11 @@ jobs:
             and .persistentFileWrites == 0
             and .providerMutations == 0
             and .schedulerTasks == 0
+            and .cleanup == {
+              status: "verified",
+              containersRemaining: 0,
+              networksRemaining: 0
+            }
           ' work-projection-canary-receipt.json >/dev/null
           echo "status=verified_get_only_no_persistent_state" >> "$GITHUB_OUTPUT"
 

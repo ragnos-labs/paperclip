@@ -73,8 +73,10 @@ contract as the dependency half of a future unified canary.
 
 Use an immutable image digest. The helper creates an internal Docker network.
 It runs as UID/GID `65532:65532`, uses a read-only root filesystem, mounts no
-host path, and sends only GET requests. It runs both fixtures and removes the
-exact containers and network when it exits.
+host path, and sends only GET requests. Each invocation generates a
+non-overridable, collision-resistant run ID, rejects pre-existing target names,
+and labels every Docker resource with that ID. Cleanup uses Docker-returned
+resource IDs and removes a resource only after its run label is revalidated.
 
 ```sh
 bash scripts/smoke/work-projection-canary.sh \
@@ -97,11 +99,18 @@ The command returns one JSON receipt. A pass has these required facts:
   "databaseWrites": 0,
   "persistentFileWrites": 0,
   "providerMutations": 0,
-  "schedulerTasks": 0
+  "schedulerTasks": 0,
+  "cleanup": {
+    "status": "verified",
+    "containersRemaining": 0,
+    "networksRemaining": 0
+  }
 }
 ```
 
 The helper also compares the canary state digest and database/file counters
-before and after the reads. It requires an empty `docker diff`. The release
-workflow runs this helper against the exact published digest before it creates
-the immutable GitHub prerelease.
+before and after the reads. It requires an empty `docker diff`. It emits a pass
+receipt only after explicit cleanup and verification that no resource bearing
+the run label remains. A cleanup failure or signal exits without a pass receipt.
+The release workflow runs this helper against the exact published digest before
+it creates the immutable GitHub prerelease.
