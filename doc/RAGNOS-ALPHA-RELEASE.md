@@ -89,9 +89,16 @@ tag resolves to the recorded digest. Confirm the release page identifies the
 release as immutable.
 
 The workflow also verifies both image tags, `linux/amd64` and `linux/arm64`, and
-the registry-attached SBOM and provenance for each platform. The GitHub release
-assets are authoritative. The extra workflow artifact is non-authoritative and
-its upload is best-effort only.
+the registry-attached SBOM and provenance for each platform. It runs the
+non-production company work projection artifact canary against the immutable
+image digest before it creates the GitHub prerelease. The canary uses only GET
+requests on an internal container network. It runs as non-root with no host
+mounts and no database connection. See
+[`company-work-projection-canary.md`](company-work-projection-canary.md).
+
+The GitHub release assets are authoritative. They include the canary contract
+and canary receipt. The extra workflow artifact is non-authoritative and its
+upload is best-effort only.
 
 Publication evidence does not prove deployment or activation. A later owning
 distribution must pin the image by digest and record deployment, activation,

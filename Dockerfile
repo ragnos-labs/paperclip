@@ -55,6 +55,8 @@ RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
+RUN test -f server/dist/canary/work-projection-server.js \
+  || (echo "ERROR: work projection canary build output missing" && exit 1)
 
 FROM base AS production
 ARG USER_UID=1000

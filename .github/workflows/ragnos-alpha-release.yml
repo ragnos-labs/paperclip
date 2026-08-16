@@ -247,6 +247,27 @@ jobs:
             echo "provenance_status=verified_registry_attached_buildkit"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Run non-mutating work projection canary from published artifact
+        id: work_projection_canary
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          bash scripts/smoke/work-projection-canary.sh "$IMAGE" \
+            | tee work-projection-canary-receipt.json
+          jq -e '
+            .status == "passed"
+            and .contract == "paperclip.company-work-projection-canary/v1"
+            and .requestMethods == ["GET"]
+            and .databaseConnections == 0
+            and .databaseTables == 0
+            and .databaseWrites == 0
+            and .persistentFileWrites == 0
+            and .providerMutations == 0
+            and .schedulerTasks == 0
+          ' work-projection-canary-receipt.json >/dev/null
+          echo "status=verified_get_only_no_persistent_state" >> "$GITHUB_OUTPUT"
+
       - name: Create content-free release receipt
         env:
           CREATED_AT: ${{ steps.identity.outputs.created_at }}
@@ -261,14 +282,17 @@ jobs:
           VERSION: ${{ steps.identity.outputs.version }}
           SBOM_STATUS: ${{ steps.registry.outputs.sbom_status }}
           PROVENANCE_STATUS: ${{ steps.registry.outputs.provenance_status }}
+          WORK_PROJECTION_CANARY_STATUS: ${{ steps.work_projection_canary.outputs.status }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
           cp \
             doc/company-work-projection-contract.md \
             doc/company-work-projection-contract-v2.md \
+            doc/company-work-projection-canary.md \
             doc/execution-semantics.md \
             migration-manifest.txt \
+            work-projection-canary-receipt.json \
             release-assets/
 
           jq -n \
@@ -287,6 +311,7 @@ jobs:
             --arg created_at "$CREATED_AT" \
             --arg sbom_status "$SBOM_STATUS" \
             --arg provenance_status "$PROVENANCE_STATUS" \
+            --arg work_projection_canary_status "$WORK_PROJECTION_CANARY_STATUS" \
             '{
               schema: $schema,
               repository: $repository,
@@ -307,6 +332,12 @@ jobs:
               platforms: ["linux/amd64", "linux/arm64"],
               sbom_status: $sbom_status,
               provenance_status: $provenance_status,
+              work_projection_canary: {
+                contract: "paperclip.company-work-projection-canary/v1",
+                status: $work_projection_canary_status,
+                request_methods: ["GET"],
+                persistent_state: false
+              },
               npm_publication: false,
               deployment_status: "not_deployed",
               activation_status: "not_activated"
@@ -328,9 +359,11 @@ jobs:
               RELEASE-NOTES.md \
               company-work-projection-contract.md \
               company-work-projection-contract-v2.md \
+              company-work-projection-canary.md \
               execution-semantics.md \
               migration-manifest.txt \
               release-receipt.json \
+              work-projection-canary-receipt.json \
               | LC_ALL=C sort -k2 > SHA256SUMS
           )
 
@@ -347,9 +380,11 @@ jobs:
             release-assets/SHA256SUMS \
             release-assets/company-work-projection-contract.md \
             release-assets/company-work-projection-contract-v2.md \
+            release-assets/company-work-projection-canary.md \
             release-assets/execution-semantics.md \
             release-assets/migration-manifest.txt \
             release-assets/release-receipt.json \
+            release-assets/work-projection-canary-receipt.json \
             --repo "$GITHUB_REPOSITORY" \
             --target "$SOURCE_SHA" \
             --title "Paperclip RAGnos ${VERSION}" \
@@ -376,10 +411,12 @@ jobs:
                 "RELEASE-NOTES.md",
                 "SHA256SUMS",
                 "company-work-projection-contract-v2.md",
+                "company-work-projection-canary.md",
                 "company-work-projection-contract.md",
                 "execution-semantics.md",
                 "migration-manifest.txt",
-                "release-receipt.json"
+                "release-receipt.json",
+                "work-projection-canary-receipt.json"
               ] | sort))
             ' <<< "$release" >/dev/null; then
               break

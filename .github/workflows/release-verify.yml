@@ -217,6 +217,9 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Verify work projection canary package surface
+        run: test -f server/dist/canary/work-projection-server.js
+
   e2e:
     name: End-to-end release verification
     runs-on: ubuntu-latest
