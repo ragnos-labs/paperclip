@@ -36,6 +36,11 @@ immutable receipt, and recovery controls. It does not publish npm packages and
 does not change the upstream Paperclip release channels. See
 [`RAGNOS-ALPHA-RELEASE.md`](RAGNOS-ALPHA-RELEASE.md).
 
+The alpha image also contains a separate, non-production company work
+projection canary. The normal server does not import or enable it. See
+[`company-work-projection-canary.md`](company-work-projection-canary.md) for
+the exact GET-only artifact command and proof boundary.
+
 ## Start Dev
 
 From repo root:

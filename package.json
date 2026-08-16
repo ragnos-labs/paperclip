@@ -50,6 +50,7 @@
     "smoke:openclaw-join": "./scripts/smoke/openclaw-join.sh",
     "smoke:openclaw-docker-ui": "./scripts/smoke/openclaw-docker-ui.sh",
     "smoke:openclaw-sse-standalone": "./scripts/smoke/openclaw-sse-standalone.sh",
+    "smoke:work-projection-canary": "./scripts/smoke/work-projection-canary.sh",
     "smoke:mcp-fixtures": "node scripts/smoke/mcp-fixture-harness.mjs",
     "smoke:pipelines-tutorial": "./scripts/smoke/pipelines-tutorial-smoke.sh",
     "smoke:terminal-bench-loop-skill": "node scripts/smoke/terminal-bench-loop-skill-smoke.mjs",

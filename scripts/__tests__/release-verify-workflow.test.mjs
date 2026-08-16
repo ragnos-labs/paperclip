@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import "../smoke/work-projection-canary.test.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -77,6 +78,11 @@ test("RAGnos alpha publication is manual, exact-source, protected, and npm-free"
   assert.match(alphaWorkflow, /push: true/);
   assert.match(alphaWorkflow, /sbom: true/);
   assert.match(alphaWorkflow, /provenance: mode=max/);
+  assert.match(alphaWorkflow, /scripts\/smoke\/work-projection-canary\.sh/);
+  assert.match(alphaWorkflow, /paperclip\.company-work-projection-canary\/v1/);
+  assert.match(alphaWorkflow, /verified_get_only_no_persistent_state/);
+  assert.match(alphaWorkflow, /containersRemaining: 0/);
+  assert.match(alphaWorkflow, /networksRemaining: 0/);
 
   assert.match(alphaWorkflow, /release-receipt\.json/);
   assert.match(alphaWorkflow, /SHA256SUMS/);
@@ -103,6 +109,7 @@ test("RAGnos alpha publication fails closed and proves every published identity"
   assert.match(workflow, /\.Provenance/);
   assert.match(workflow, /isImmutable/);
   assert.match(workflow, /sha256sum -c SHA256SUMS/);
+  assert.match(workflow, /work-projection-canary-receipt\.json/);
 
   const tagCreation = workflow.indexOf("Create exact source tag");
   const imagePush = workflow.indexOf("Build and publish release image");
@@ -119,6 +126,7 @@ test("release verify workflow covers the same split test surface as stable PR ve
   assert.match(verifyWorkflow, /node \.\/scripts\/release-package-map\.mjs check/);
   assert.match(verifyWorkflow, /pnpm -r typecheck/);
   assert.match(verifyWorkflow, /pnpm build/);
+  assert.match(verifyWorkflow, /server\/dist\/canary\/work-projection-server\.js/);
 
   for (const group of ["general-server", "general-workspaces-a", "general-workspaces-b"]) {
     assert.match(verifyWorkflow, new RegExp(`group: ${group}`));

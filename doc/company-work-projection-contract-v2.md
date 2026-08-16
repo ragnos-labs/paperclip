@@ -14,6 +14,11 @@ V2 is additive. It does not change the v1 route, response bytes, cursor signing 
 
 The v2 envelope keeps every v1 envelope and item field and adds a required `packetContext` to each item. Pagination remains snapshot-bound and deterministic. Unknown versions, fields, intent kinds, or contradictory source facts fail with `WORK_PROJECTION_INCOMPATIBLE`; authentication and source failures never appear as an empty projection.
 
+The built-artifact, non-production verification surface is specified in
+[company-work-projection-canary.md](./company-work-projection-canary.md). It
+exercises the dependency-owned read route, guard, cursor, normalization, and
+schema without creating a provider credential or connecting to provider state.
+
 ## Issue source context
 
 An issue may carry an explicit `workProjectionContext` through the existing governed issue create/update boundary:

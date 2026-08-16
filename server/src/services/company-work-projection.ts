@@ -32,7 +32,7 @@ import {
 const SNAPSHOT_TTL_MS = 5 * 60 * 1000;
 const SNAPSHOT_ISSUED_AT_BUCKET_MS = 60 * 1000;
 
-type ProjectionRow = {
+export type CompanyWorkProjectionSourceRow = {
   head_issue_id: string;
   head_first_revision: string | number | bigint;
   issue_id: string;
@@ -152,7 +152,7 @@ function canonicalDigest(value: unknown): string {
   return createHash("sha256").update(canonicalCompanyWorkProjectionJson(value), "utf8").digest("hex");
 }
 
-function toItem(row: ProjectionRow): CompanyWorkProjectionItem {
+function toItem(row: CompanyWorkProjectionSourceRow): CompanyWorkProjectionItem {
   if (
     !row.project_reference_valid
     || !row.assignee_agent_reference_valid
@@ -198,7 +198,10 @@ function toItem(row: ProjectionRow): CompanyWorkProjectionItem {
   return parsed.data;
 }
 
-function toItemV2(row: ProjectionRow, companyId: string): CompanyWorkProjectionV2Item {
+export function normalizeCompanyWorkProjectionV2Item(
+  row: CompanyWorkProjectionSourceRow,
+  companyId: string,
+): CompanyWorkProjectionV2Item {
   const base = toItem(row);
   if (base.owner.type === "unassigned") {
     return companyWorkProjectionV2ItemSchema.parse({
@@ -425,7 +428,7 @@ async function readSnapshotForVersion(
 
     const afterRevision = decoded?.afterRevision ?? "0";
     const afterIssueId = decoded?.afterIssueId ?? "00000000-0000-0000-0000-000000000000";
-    const rows = Array.from(await tx.execute(sql<ProjectionRow>`
+    const rows = Array.from(await tx.execute(sql<CompanyWorkProjectionSourceRow>`
       SELECT
         head.issue_id AS head_issue_id,
         head.first_revision AS head_first_revision,
@@ -469,7 +472,7 @@ async function readSnapshotForVersion(
           > (${afterRevision}::bigint, ${afterIssueId}::uuid)
       ORDER BY head.first_revision, head.issue_id
       LIMIT ${pageSize + 1}
-    `)) as ProjectionRow[];
+    `)) as CompanyWorkProjectionSourceRow[];
 
     const hasMore = rows.length > pageSize;
     const pageRows = hasMore ? rows.slice(0, pageSize) : rows;
@@ -478,7 +481,7 @@ async function readSnapshotForVersion(
     }
     const items = pageRows
       .filter((row) => !row.deleted)
-      .map((row) => version === 1 ? toItem(row) : toItemV2(row, input.companyId));
+      .map((row) => version === 1 ? toItem(row) : normalizeCompanyWorkProjectionV2Item(row, input.companyId));
     const lastRow = pageRows.at(-1);
     const nextCursor = hasMore && lastRow
       ? version === 1
