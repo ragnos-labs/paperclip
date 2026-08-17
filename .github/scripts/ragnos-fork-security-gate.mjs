@@ -60,7 +60,7 @@ const approvedPaperclipWorkProjectionCanaryFlags = Object.freeze([
 const approvedPaperclipAuthorityReleasePullRequest = Object.freeze({
   prNumber: 21,
   headRef: "codex/paperclip-alpha3-authority-release",
-  headSha: "b7daa6d4018f00241bc12df49cd8c0d666734ac9",
+  headSha: "b7daa6d4013d3a5f6c17e4e324844ecc2d74d05c",
 });
 
 const approvedPaperclipAuthorityReleaseFlags = Object.freeze([

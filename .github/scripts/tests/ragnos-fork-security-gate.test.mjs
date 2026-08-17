@@ -233,7 +233,7 @@ test("allows only the exact Paperclip authority release pull request flag", () =
     prNumber: 21,
     headRef: "codex/paperclip-alpha3-authority-release",
     apiHeadRef: "codex/paperclip-alpha3-authority-release",
-    headSha: "b7daa6d4018f00241bc12df49cd8c0d666734ac9",
+    headSha: "b7daa6d4013d3a5f6c17e4e324844ecc2d74d05c",
   };
 
   assert.deepEqual(filterApprovedPaperclipAuthorityReleaseFlags(flags, exact), []);
