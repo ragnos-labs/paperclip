@@ -292,6 +292,7 @@ jobs:
           set -euo pipefail
           mkdir -p release-assets
           cp \
+            doc/company-work-authority-contract.md \
             doc/company-work-projection-contract.md \
             doc/company-work-projection-contract-v2.md \
             doc/company-work-projection-canary.md \
@@ -343,13 +344,18 @@ jobs:
                 request_methods: ["GET"],
                 persistent_state: false
               },
+              work_authority_contract: {
+                contract: "paperclip.company-work-authority/v1",
+                asset: "company-work-authority-contract.md",
+                activation_status: "not_activated"
+              },
               npm_publication: false,
               deployment_status: "not_deployed",
               activation_status: "not_activated"
             }' > release-assets/release-receipt.json
 
           cat > release-assets/RELEASE-NOTES.md <<EOF
-          This is the first bounded RAGnos prerelease of the Paperclip backend.
+          This is a bounded RAGnos prerelease of the Paperclip backend.
 
           Source: ${SOURCE_SHA}
           Image: ghcr.io/${GITHUB_REPOSITORY}@${IMAGE_DIGEST}
@@ -362,6 +368,7 @@ jobs:
             cd release-assets
             sha256sum \
               RELEASE-NOTES.md \
+              company-work-authority-contract.md \
               company-work-projection-contract.md \
               company-work-projection-contract-v2.md \
               company-work-projection-canary.md \
@@ -383,6 +390,7 @@ jobs:
           gh release create "$RELEASE_TAG" \
             release-assets/RELEASE-NOTES.md \
             release-assets/SHA256SUMS \
+            release-assets/company-work-authority-contract.md \
             release-assets/company-work-projection-contract.md \
             release-assets/company-work-projection-contract-v2.md \
             release-assets/company-work-projection-canary.md \
@@ -415,6 +423,7 @@ jobs:
               and ((.assets | map(.name) | sort) == ([
                 "RELEASE-NOTES.md",
                 "SHA256SUMS",
+                "company-work-authority-contract.md",
                 "company-work-projection-contract-v2.md",
                 "company-work-projection-canary.md",
                 "company-work-projection-contract.md",

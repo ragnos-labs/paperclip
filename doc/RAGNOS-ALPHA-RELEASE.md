@@ -11,11 +11,11 @@ approval boundary.
 
 ## Release identities
 
-The first release uses these names:
+An alpha release uses these names:
 
-- version: `0.1.0-alpha.1`;
-- Git tag and GitHub prerelease: `ragnos/v0.1.0-alpha.1`;
-- image tag: `ghcr.io/ragnos-labs/paperclip:ragnos-0.1.0-alpha.1`; and
+- version: `0.1.0-alpha.N`;
+- Git tag and GitHub prerelease: `ragnos/v0.1.0-alpha.N`;
+- image tag: `ghcr.io/ragnos-labs/paperclip:ragnos-0.1.0-alpha.N`; and
 - exact-source image tag:
   `ghcr.io/ragnos-labs/paperclip:sha-<exact-source-commit>`; and
 - immutable image identity: the registry digest recorded by the workflow.
@@ -61,7 +61,7 @@ gh workflow run ragnos-alpha-release.yml \
   --repo ragnos-labs/paperclip \
   --ref master \
   -f source_sha="$SOURCE_SHA" \
-  -f version=0.1.0-alpha.1 \
+  -f version=0.1.0-alpha.N \
   -f confirmation='PUBLISH PAPERCLIP RAGNOS ALPHA'
 ```
 
@@ -75,12 +75,12 @@ that was current at the release decision boundary before the image build starts.
 Do not describe the release as published until all of these are true:
 
 ```sh
-gh release view ragnos/v0.1.0-alpha.1 \
+gh release view ragnos/v0.1.0-alpha.N \
   --repo ragnos-labs/paperclip \
   --json tagName,isPrerelease,targetCommitish,url
 
 docker buildx imagetools inspect \
-  ghcr.io/ragnos-labs/paperclip:ragnos-0.1.0-alpha.1
+  ghcr.io/ragnos-labs/paperclip:ragnos-0.1.0-alpha.N
 ```
 
 Download `release-receipt.json` and `SHA256SUMS` from the GitHub release. Verify
@@ -96,9 +96,11 @@ requests on an internal container network. It runs as non-root with no host
 mounts and no database connection. See
 [`company-work-projection-canary.md`](company-work-projection-canary.md).
 
-The GitHub release assets are authoritative. They include the canary contract
-and canary receipt. The extra workflow artifact is non-authoritative and its
-upload is best-effort only.
+The GitHub release assets are authoritative. They include the company work
+authority contract, the projection contracts, the canary contract, and the
+canary receipt. The authority contract is source capability only. It does not
+activate an authority writer. The extra workflow artifact is non-authoritative
+and its upload is best-effort only.
 
 Publication evidence does not prove deployment or activation. A later owning
 distribution must pin the image by digest and record deployment, activation,
