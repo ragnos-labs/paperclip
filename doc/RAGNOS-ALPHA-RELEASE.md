@@ -11,11 +11,11 @@ approval boundary.
 
 ## Release identities
 
-An alpha release uses these names:
+The first release uses these names:
 
-- version: `0.1.0-alpha.N`;
-- Git tag and GitHub prerelease: `ragnos/v0.1.0-alpha.N`;
-- image tag: `ghcr.io/ragnos-labs/paperclip:ragnos-0.1.0-alpha.N`; and
+- version: `0.1.0-alpha.1`;
+- Git tag and GitHub prerelease: `ragnos/v0.1.0-alpha.1`;
+- image tag: `ghcr.io/ragnos-labs/paperclip:ragnos-0.1.0-alpha.1`; and
 - exact-source image tag:
   `ghcr.io/ragnos-labs/paperclip:sha-<exact-source-commit>`; and
 - immutable image identity: the registry digest recorded by the workflow.
@@ -61,7 +61,7 @@ gh workflow run ragnos-alpha-release.yml \
   --repo ragnos-labs/paperclip \
   --ref master \
   -f source_sha="$SOURCE_SHA" \
-  -f version=0.1.0-alpha.N \
+  -f version=0.1.0-alpha.1 \
   -f confirmation='PUBLISH PAPERCLIP RAGNOS ALPHA'
 ```
 
@@ -75,12 +75,12 @@ that was current at the release decision boundary before the image build starts.
 Do not describe the release as published until all of these are true:
 
 ```sh
-gh release view ragnos/v0.1.0-alpha.N \
+gh release view ragnos/v0.1.0-alpha.1 \
   --repo ragnos-labs/paperclip \
   --json tagName,isPrerelease,targetCommitish,url
 
 docker buildx imagetools inspect \
-  ghcr.io/ragnos-labs/paperclip:ragnos-0.1.0-alpha.N
+  ghcr.io/ragnos-labs/paperclip:ragnos-0.1.0-alpha.1
 ```
 
 Download `release-receipt.json` and `SHA256SUMS` from the GitHub release. Verify
