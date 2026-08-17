@@ -231,6 +231,13 @@ import {
   companyWorkProjectionV2ResponseSchema,
   companyWorkProjectionV2CredentialSchema,
   createdCompanyWorkProjectionV2CredentialSchema,
+  companyWorkAuthorityPreviewRequestSchema,
+  companyWorkAuthorityDispatchRequestSchema,
+  companyWorkAuthorityPreviewResponseSchema,
+  companyWorkAuthorityReceiptSchema,
+  companyWorkAuthoritySnapshotSchema,
+  companyWorkAuthorityCredentialSchema,
+  createdCompanyWorkAuthorityCredentialSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -547,6 +554,31 @@ const CreatedCompanyWorkProjectionV2CredentialSchema = registry.register(
   createdCompanyWorkProjectionV2CredentialSchema,
   { closeStrictObjects: true },
 );
+const CompanyWorkAuthorityPreviewSchema = registry.register(
+  "CompanyWorkAuthorityPreviewV1",
+  companyWorkAuthorityPreviewResponseSchema,
+  { closeStrictObjects: true },
+);
+const CompanyWorkAuthorityReceiptSchema = registry.register(
+  "CompanyWorkAuthorityReceiptV1",
+  companyWorkAuthorityReceiptSchema,
+  { closeStrictObjects: true },
+);
+const CompanyWorkAuthoritySnapshotSchema = registry.register(
+  "CompanyWorkAuthoritySnapshotV1",
+  companyWorkAuthoritySnapshotSchema,
+  { closeStrictObjects: true },
+);
+const CompanyWorkAuthorityCredentialSchema = registry.register(
+  "CompanyWorkAuthorityCredentialV1",
+  companyWorkAuthorityCredentialSchema,
+  { closeStrictObjects: true },
+);
+const CreatedCompanyWorkAuthorityCredentialSchema = registry.register(
+  "CreatedCompanyWorkAuthorityCredentialV1",
+  createdCompanyWorkAuthorityCredentialSchema,
+  { closeStrictObjects: true },
+);
 
 const responses = {
   ok: (schema: z.ZodTypeAny = z.record(z.unknown())) => ({
@@ -765,6 +797,7 @@ type OpenApiAuthLevel =
   | "public"
   | "authenticated"
   | "company_work_projection"
+  | "company_work_authority"
   | "board"
   | "instance_admin";
 
@@ -772,6 +805,7 @@ const BOARD_SESSION_AUTH_SCHEME = "BoardSessionAuth";
 const BOARD_API_KEY_AUTH_SCHEME = "BoardApiKeyAuth";
 const AGENT_BEARER_AUTH_SCHEME = "AgentBearerAuth";
 const COMPANY_WORK_PROJECTION_AUTH_SCHEME = "CompanyWorkProjectionBearerAuth";
+const COMPANY_WORK_AUTHORITY_AUTH_SCHEME = "CompanyWorkAuthorityBearerAuth";
 
 function securityRequirement(name: string): Record<string, string[]> {
   return { [name]: [] };
@@ -790,6 +824,13 @@ const AUTHENTICATED_SECURITY: Array<Record<string, string[]>> = [
 const COMPANY_WORK_PROJECTION_OPERATIONS = new Set([
   "GET /api/v1/companies/{companyId}/work-projection",
   "GET /api/v2/companies/{companyId}/work-projection",
+]);
+
+const COMPANY_WORK_AUTHORITY_OPERATIONS = new Set([
+  "GET /api/v1/companies/{companyId}/work-authority",
+  "POST /api/v1/companies/{companyId}/work-authority/preview",
+  "POST /api/v1/companies/{companyId}/work-authority/dispatch",
+  "GET /api/v1/companies/{companyId}/work-authority/receipts/{idempotencyKey}",
 ]);
 
 const PUBLIC_OPERATIONS = new Set([
@@ -822,6 +863,9 @@ const BOARD_ONLY_PREFIXES = [
 ];
 
 const BOARD_ONLY_OPERATIONS = new Set([
+  "GET /api/v1/companies/{companyId}/work-authority-credentials",
+  "POST /api/v1/companies/{companyId}/work-authority-credentials",
+  "DELETE /api/v1/companies/{companyId}/work-authority-credentials/{credentialId}",
   "GET /api/v1/companies/{companyId}/work-projection-credentials",
   "POST /api/v1/companies/{companyId}/work-projection-credentials",
   "DELETE /api/v1/companies/{companyId}/work-projection-credentials/{credentialId}",
@@ -973,6 +1017,7 @@ const INSTANCE_ADMIN_OPERATIONS = new Set([
 ]);
 
 const CREATED_OPERATIONS = new Set([
+  "POST /api/v1/companies/{companyId}/work-authority-credentials",
   "POST /api/v1/companies/{companyId}/work-projection-credentials",
   "POST /api/adapters/install",
   "POST /api/companies/{companyId}/agent-hires",
@@ -1058,6 +1103,7 @@ function resolveOperationAuthLevel(method: string, path: string): OpenApiAuthLev
   const key = operationKey(method, path);
   if (PUBLIC_OPERATIONS.has(key)) return "public";
   if (COMPANY_WORK_PROJECTION_OPERATIONS.has(key)) return "company_work_projection";
+  if (COMPANY_WORK_AUTHORITY_OPERATIONS.has(key)) return "company_work_authority";
   if (INSTANCE_ADMIN_OPERATIONS.has(key)) return "instance_admin";
   if (isBoardOnlyOperation(method, path)) return "board";
   return "authenticated";
@@ -1104,6 +1150,13 @@ function applyDocumentFixups(document: any): any {
       description:
         "Dedicated company-bound work projection credential. It is not an agent API key.",
     },
+    [COMPANY_WORK_AUTHORITY_AUTH_SCHEME]: {
+      type: "http",
+      scheme: "bearer",
+      bearerFormat: "pcwp_v3_ credential",
+      description:
+        "Dedicated company-bound work authority credential. It cannot access board, agent, or projection resources.",
+    },
   };
   document.security = AUTHENTICATED_SECURITY;
 
@@ -1116,6 +1169,8 @@ function applyDocumentFixups(document: any): any {
         operation.security = AUTHENTICATED_SECURITY;
       } else if (authLevel === "company_work_projection") {
         operation.security = [securityRequirement(COMPANY_WORK_PROJECTION_AUTH_SCHEME)];
+      } else if (authLevel === "company_work_authority") {
+        operation.security = [securityRequirement(COMPANY_WORK_AUTHORITY_AUTH_SCHEME)];
       } else {
         operation.security = BOARD_SECURITY;
       }
@@ -1129,6 +1184,12 @@ function applyDocumentFixups(document: any): any {
               ? {
                   actor: "company_work_projection_key",
                   tokenVersion: path.startsWith("/api/v2/") ? 2 : 1,
+                  companyBound: true,
+                }
+            : authLevel === "company_work_authority"
+              ? {
+                  actor: "company_work_authority_key",
+                  tokenVersion: 3,
                   companyBound: true,
                 }
             : authLevel === "authenticated"
@@ -1525,6 +1586,137 @@ registry.registerPath({
       },
     },
     404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/v1/companies/{companyId}/work-authority-credentials",
+  tags: ["companies"],
+  summary: "List work authority credentials",
+  request: { params: z.object({ companyId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Credential metadata",
+      content: { "application/json": { schema: { type: "array", items: CompanyWorkAuthorityCredentialSchema } } },
+    },
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/v1/companies/{companyId}/work-authority-credentials",
+  tags: ["companies"],
+  summary: "Create a work authority credential",
+  request: {
+    params: z.object({ companyId: z.string().uuid() }),
+    body: jsonBody(createCompanyWorkProjectionCredentialSchema),
+  },
+  responses: {
+    201: {
+      description: "Credential created",
+      content: { "application/json": { schema: CreatedCompanyWorkAuthorityCredentialSchema } },
+    },
+    400: r.badRequest,
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/v1/companies/{companyId}/work-authority-credentials/{credentialId}",
+  tags: ["companies"],
+  summary: "Revoke a work authority credential",
+  request: {
+    params: z.object({ companyId: z.string().uuid(), credentialId: z.string().uuid() }),
+  },
+  responses: {
+    200: {
+      description: "Credential revoked",
+      content: { "application/json": { schema: CompanyWorkAuthorityCredentialSchema } },
+    },
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/v1/companies/{companyId}/work-authority",
+  tags: ["companies"],
+  summary: "Read the complete company work authority snapshot",
+  description: "Requires a dedicated company-bound pcwp_v3_ credential.",
+  request: { params: z.object({ companyId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Complete work authority snapshot",
+      content: { "application/json": { schema: CompanyWorkAuthoritySnapshotSchema } },
+    },
+    401: r.unauthorized,
+    403: r.forbidden,
+    409: r.conflict,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/v1/companies/{companyId}/work-authority/preview",
+  tags: ["companies"],
+  summary: "Preview a governed work authority action",
+  request: {
+    params: z.object({ companyId: z.string().uuid() }),
+    body: jsonBody(companyWorkAuthorityPreviewRequestSchema),
+  },
+  responses: {
+    200: {
+      description: "Bound preview or held decision",
+      content: { "application/json": { schema: CompanyWorkAuthorityPreviewSchema } },
+    },
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    409: r.conflict,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/v1/companies/{companyId}/work-authority/dispatch",
+  tags: ["companies"],
+  summary: "Dispatch an exactly previewed work authority action",
+  request: {
+    params: z.object({ companyId: z.string().uuid() }),
+    body: jsonBody(companyWorkAuthorityDispatchRequestSchema),
+  },
+  responses: {
+    200: {
+      description: "Applied and read-back authority receipt",
+      content: { "application/json": { schema: CompanyWorkAuthorityReceiptSchema } },
+    },
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    409: r.conflict,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/v1/companies/{companyId}/work-authority/receipts/{idempotencyKey}",
+  tags: ["companies"],
+  summary: "Look up a work authority receipt without replaying the action",
+  request: {
+    params: z.object({ companyId: z.string().uuid(), idempotencyKey: z.string().min(1) }),
+  },
+  responses: {
+    200: {
+      description: "Stored or reconciled authority receipt",
+      content: { "application/json": { schema: CompanyWorkAuthorityReceiptSchema } },
+    },
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
   },
 });
 

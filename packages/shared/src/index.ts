@@ -382,6 +382,7 @@ export {
   JOIN_REQUEST_TYPES,
   JOIN_REQUEST_STATUSES,
   WORK_PROJECTION_ADMIN_PERMISSION,
+  WORK_AUTHORITY_ADMIN_PERMISSION,
   PERMISSION_KEYS,
   TOOL_ACTION_REQUEST_STATUSES,
   TOOL_APPLICATION_STATUSES,
@@ -2364,6 +2365,7 @@ export {
 export * from "./validators/skill-policy.js";
 export * from "./validators/company-work-projection.js";
 export * from "./validators/company-work-projection-v2.js";
+export * from "./validators/company-work-authority.js";
 export {
   FEATURE_TIERS,
   INSTANCE_FEATURE_CATALOG,

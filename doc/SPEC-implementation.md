@@ -1440,3 +1440,27 @@ Export/import behavior in V1:
 - import supports preview (dry-run) before apply
 - import preview reports skill-policy and legacy-grant mappings before apply and rejects unknown policy schema versions
 - GitHub imports warn on unpinned refs instead of blocking
+
+## 22. Governed Company Work Authority (RAGnos Addendum)
+
+The RAGnos distribution may use Paperclip as its project-management authority
+through the versioned company work authority contract. This additive boundary
+must preserve the ordinary issue and agent-control behavior in this spec.
+
+- A dedicated company-bound credential can read a complete authority snapshot
+  and access only the preview, dispatch, and receipt routes.
+- The writer is disabled and emergency-stopped by default.
+- Every write requires an exact current revision, exact preview hash, approved
+  human decision, allowed operation, allowed policy digest, and unused or exact
+  replay idempotency key.
+- Paperclip persists intent before effect, reads the result back, and stores a
+  terminal receipt with service, owner, accountable-human, and approver
+  attribution.
+- New work receives a stable Paperclip issue before another provider can
+  project it. Historical provider IDs remain unique aliases.
+- A delivery event cannot set Done. Terminal Done requires an `accept_done`
+  proposal and its bound human approval.
+- Raw evidence and credentials remain outside work-authority state.
+
+The complete wire and recovery rules are in
+[`company-work-authority-contract.md`](company-work-authority-contract.md).

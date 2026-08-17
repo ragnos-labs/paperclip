@@ -16,6 +16,7 @@ import { healthRoutes } from "./routes/health.js";
 import { cloudRoutes } from "./routes/cloud.js";
 import { companyRoutes } from "./routes/companies.js";
 import { companyWorkProjectionRoutes } from "./routes/company-work-projection.js";
+import { companyWorkAuthorityRoutes } from "./routes/company-work-authority.js";
 import { companySkillRoutes } from "./routes/company-skills.js";
 import { companySkillPolicyRoutes } from "./routes/company-skill-policy.js";
 import { inboxAgentPolicyRoutes } from "./routes/inbox-agent-policy.js";
@@ -371,6 +372,7 @@ export async function createApp(
   );
   api.use(openApiRoutes());
   api.use(companyWorkProjectionRoutes(db));
+  api.use(companyWorkAuthorityRoutes(db));
   api.use("/cloud", cloudRoutes());
   api.use("/companies", companyRoutes(db, opts.storageService));
   api.use(llmRoutes(db));

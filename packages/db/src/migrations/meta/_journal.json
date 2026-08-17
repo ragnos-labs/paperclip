@@ -1485,6 +1485,13 @@
       "when": 1786846439160,
       "tag": "0213_company_work_projection_v2",
       "breakpoints": true
+    },
+    {
+      "idx": 214,
+      "version": "7",
+      "when": 1786846500000,
+      "tag": "0214_company_work_authority",
+      "breakpoints": true
     }
   ]
 }

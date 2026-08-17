@@ -46,6 +46,10 @@ export {
   companyWorkProjectionVerifications,
   issueWorkProjectionVersions,
 } from "./company_work_projection.js";
+export {
+  companyWorkAuthorityActions,
+  companyWorkAuthorityAliases,
+} from "./company_work_authority.js";
 export { issueWatchdogs } from "./issue_watchdogs.js";
 export { issuePlanDecompositions } from "./issue_plan_decompositions.js";
 export { issueRecoveryActions } from "./issue_recovery_actions.js";
