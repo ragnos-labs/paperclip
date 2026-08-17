@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   compareAuditToBaseline,
+  filterApprovedPaperclipAuthorityReleaseFlags,
   filterApprovedReleaseSafetyFlags,
   filterBootstrapFlags,
   sanitizeFlags,
@@ -219,6 +220,43 @@ test("allows only the exact Paperclip work projection canary pull request flags"
   for (const candidate of negativeCases) {
     assert.deepEqual(
       filterApprovedPaperclipWorkProjectionCanaryFlags(candidate.flags, candidate.context),
+      candidate.flags,
+    );
+  }
+});
+
+test("allows only the exact Paperclip authority release pull request flag", () => {
+  const flags = [
+    { check: "ci-tampering", file: ".github/workflows/ragnos-alpha-release.yml" },
+  ];
+  const exact = {
+    prNumber: 21,
+    headRef: "codex/paperclip-alpha3-authority-release",
+    apiHeadRef: "codex/paperclip-alpha3-authority-release",
+    headSha: "b7daa6d4013d3a5f6c17e4e324844ecc2d74d05c",
+  };
+
+  assert.deepEqual(filterApprovedPaperclipAuthorityReleaseFlags(flags, exact), []);
+
+  const negativeCases = [
+    { flags, context: { ...exact, prNumber: 22 } },
+    { flags, context: { ...exact, headRef: "codex/other" } },
+    { flags, context: { ...exact, apiHeadRef: "codex/other" } },
+    { flags, context: { ...exact, headSha: "0".repeat(40) } },
+    { flags: [], context: exact },
+    {
+      flags: [...flags, { check: "ci-tampering", file: ".github/workflows/other.yml" }],
+      context: exact,
+    },
+    {
+      flags: flags.map((flag) => ({ ...flag, check: "secret-scan" })),
+      context: exact,
+    },
+  ];
+
+  for (const candidate of negativeCases) {
+    assert.deepEqual(
+      filterApprovedPaperclipAuthorityReleaseFlags(candidate.flags, candidate.context),
       candidate.flags,
     );
   }

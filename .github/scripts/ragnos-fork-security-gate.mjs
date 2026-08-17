@@ -57,6 +57,16 @@ const approvedPaperclipWorkProjectionCanaryFlags = Object.freeze([
   "secret-scan:scripts/smoke/work-projection-canary.sh:High-entropy secret",
 ]);
 
+const approvedPaperclipAuthorityReleasePullRequest = Object.freeze({
+  prNumber: 21,
+  headRef: "codex/paperclip-alpha3-authority-release",
+  headSha: "b7daa6d4013d3a5f6c17e4e324844ecc2d74d05c",
+});
+
+const approvedPaperclipAuthorityReleaseFlags = Object.freeze([
+  "ci-tampering:.github/workflows/ragnos-alpha-release.yml",
+]);
+
 export function compareAuditToBaseline(audit, baseline) {
   const failures = [];
   const advisories = audit?.advisories ?? {};
@@ -182,6 +192,22 @@ export function filterApprovedPaperclipWorkProjectionCanaryFlags(flags, context)
   return isExactFlagSet ? [] : flags;
 }
 
+export function filterApprovedPaperclipAuthorityReleaseFlags(flags, context) {
+  const isExactPullRequest = context.prNumber === approvedPaperclipAuthorityReleasePullRequest.prNumber
+    && context.headRef === approvedPaperclipAuthorityReleasePullRequest.headRef
+    && context.apiHeadRef === approvedPaperclipAuthorityReleasePullRequest.headRef
+    && context.headSha === approvedPaperclipAuthorityReleasePullRequest.headSha;
+  if (!isExactPullRequest) return flags;
+
+  const detected = flags
+    .map((flag) => [flag.check, flag.file, flag.pattern].filter(Boolean).join(":"))
+    .sort();
+  const approved = [...approvedPaperclipAuthorityReleaseFlags].sort();
+  const isExactFlagSet = detected.length === approved.length
+    && detected.every((flag, index) => flag === approved[index]);
+  return isExactFlagSet ? [] : flags;
+}
+
 async function runAuditGate() {
   const baselineUrl = new URL("../ragnos-production-audit-baseline.json", import.meta.url);
   const baseline = JSON.parse(await readFile(baselineUrl, "utf8"));
@@ -227,10 +253,13 @@ async function runPullRequestScan() {
       ? pullRequestAfter?.head?.sha
       : undefined,
   };
-  const flags = filterApprovedPaperclipWorkProjectionCanaryFlags(
-    filterApprovedPaperclipAlphaFlags(
-      filterApprovedReleaseSafetyFlags(
-        filterBootstrapFlags(detectedFlags, context),
+  const flags = filterApprovedPaperclipAuthorityReleaseFlags(
+    filterApprovedPaperclipWorkProjectionCanaryFlags(
+      filterApprovedPaperclipAlphaFlags(
+        filterApprovedReleaseSafetyFlags(
+          filterBootstrapFlags(detectedFlags, context),
+          context,
+        ),
         context,
       ),
       context,
