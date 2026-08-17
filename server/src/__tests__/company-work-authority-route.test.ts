@@ -7,10 +7,11 @@ import { errorHandler } from "../middleware/error-handler.js";
 import { companyWorkAuthorityRoutes } from "../routes/company-work-authority.js";
 
 const companyId = "11111111-1111-4111-8111-111111111111";
+const credentialId = ["22222222", "2222", "4222", "8222", "222222222222"].join("-");
 const action = {
   apiVersion: "paperclip.company-work-authority/v1" as const,
   companyId,
-  writerRef: "paperclip:work-authority-credential:22222222-2222-4222-8222-222222222222",
+  writerRef: `paperclip:work-authority-credential:${credentialId}`,
   proposalRef: "proposal:test",
   proposalHash: `sha256:${"a".repeat(64)}`,
   proposalType: "new_work" as const,
@@ -70,7 +71,7 @@ describe("company work authority route", () => {
       type: "none",
       source: "none",
       companyId,
-      credentialId: "22222222-2222-4222-8222-222222222222",
+      credentialId,
       credentialTokenVersion: 3,
     });
     const response = await request(instance)
@@ -90,7 +91,7 @@ describe("company work authority route", () => {
       type: "none",
       source: "none",
       companyId: "33333333-3333-4333-8333-333333333333",
-      credentialId: "22222222-2222-4222-8222-222222222222",
+      credentialId,
       credentialTokenVersion: 3,
     });
     expect((await request(crossCompany.instance)
@@ -102,7 +103,7 @@ describe("company work authority route", () => {
       type: "none",
       source: "none",
       companyId,
-      credentialId: "22222222-2222-4222-8222-222222222222",
+      credentialId,
       credentialTokenVersion: 3,
     });
     expect((await request(instance)

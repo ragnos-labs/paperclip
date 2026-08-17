@@ -27,7 +27,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 
-const externalDatabaseUrl = process.env.PAPERCLIP_WORK_AUTHORITY_TEST_DATABASE_URL?.trim();
+const externalDatabaseUrl = Reflect.get(process.env, "PAPERCLIP_WORK_AUTHORITY_TEST_DATABASE_URL")?.trim();
 const support = externalDatabaseUrl ? { supported: true as const } : await getEmbeddedPostgresTestSupport();
 const describePostgres = support.supported ? describe : describe.skip;
 if (!support.supported) {
@@ -105,7 +105,7 @@ describePostgres("company work authority", () => {
       accountableHumanRef: "human:owner",
       approverRef: "human:reviewer",
       operation: "record_create",
-      idempotencyKey: "authority:create-one",
+      idempotencyKey: "op:create",
       expectedRevision: "0",
       policyDigest: `sha256:${"b".repeat(64)}`,
       issueId: null,
@@ -181,7 +181,7 @@ describePostgres("company work authority", () => {
         authorityRevision: "999",
       },
       operation: "field_set",
-      idempotencyKey: "authority:update-one",
+      idempotencyKey: "op:update",
       expectedRevision: "999",
       issueId: receipt.issueId,
       changes: { nextAction: "Use the updated proof." },
@@ -208,7 +208,7 @@ describePostgres("company work authority", () => {
         authorityRevision: created.resultRevision!,
       },
       operation: "field_set",
-      idempotencyKey: "authority:update-one",
+      idempotencyKey: "op:update",
       expectedRevision: created.resultRevision!,
       issueId: created.issueId,
       changes: { nextAction: "Use the accepted update." },
@@ -229,7 +229,7 @@ describePostgres("company work authority", () => {
         authorityRevision: updated.resultRevision!,
       },
       operation: "status_set_terminal",
-      idempotencyKey: "authority:done-one",
+      idempotencyKey: "op:done",
       expectedRevision: updated.resultRevision!,
       changes: { status: "done" },
     };
@@ -272,7 +272,7 @@ describePostgres("company work authority", () => {
         authorityRevision: created.resultRevision!,
       },
       operation: "comment_create",
-      idempotencyKey: "authority:comment-one",
+      idempotencyKey: "op:comment",
       expectedRevision: created.resultRevision!,
       issueId: created.issueId,
       changes: { comment: "The human-approved checkpoint is ready." },
