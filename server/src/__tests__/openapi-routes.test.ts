@@ -27,6 +27,7 @@ const apiPrefixes: Record<string, string> = {
   "company-skill-policy.ts": "/api",
   "company-work-projection-read.ts": "/api",
   "company-work-projection.ts": "/api",
+  "company-work-authority.ts": "/api",
   "costs.ts": "/api",
   "dashboard.ts": "/api",
   "decision-queues.ts": "/api",
@@ -193,7 +194,18 @@ describe("openapi routes", () => {
       BoardApiKeyAuth: { type: "http", scheme: "bearer" },
       AgentBearerAuth: { type: "http", scheme: "bearer" },
       CompanyWorkProjectionBearerAuth: { type: "http", scheme: "bearer" },
+      CompanyWorkAuthorityBearerAuth: { type: "http", scheme: "bearer" },
     });
+    expect(res.body.paths["/api/v1/companies/{companyId}/work-authority"].get).toMatchObject({
+      summary: "Read the complete company work authority snapshot",
+      security: [{ CompanyWorkAuthorityBearerAuth: [] }],
+      "x-paperclip-authorization": {
+        actor: "company_work_authority_key",
+        tokenVersion: 3,
+        companyBound: true,
+      },
+    });
+    expect(res.body.components.schemas.CompanyWorkAuthoritySnapshotV1.additionalProperties).toBe(false);
     expect(res.body.paths["/api/health"].get.security).toEqual([]);
     expect(res.body.paths["/mcp/gateways/{gatewayPublicId}"].post.security).toEqual([]);
     expect(res.body.paths["/api/mcp/gateways/{gatewayPublicId}"]).toBeUndefined();

@@ -20,6 +20,7 @@ import { executionWorkspaces } from "./execution_workspaces.js";
 import type {
   IssueReviewPolicy,
   IssueUnblockDescriptor,
+  IssueWorkAuthorityContext,
   IssueWorkProjectionContext,
   SourceTrustMetadata,
 } from "@paperclipai/shared";
@@ -60,6 +61,7 @@ export const issues = pgTable(
     assigneeAdapterOverrides: jsonb("assignee_adapter_overrides").$type<Record<string, unknown>>(),
     executionPolicy: jsonb("execution_policy").$type<Record<string, unknown>>(),
     workProjectionContext: jsonb("work_projection_context").$type<IssueWorkProjectionContext | null>(),
+    workAuthorityContext: jsonb("work_authority_context").$type<IssueWorkAuthorityContext | null>(),
     executionState: jsonb("execution_state").$type<Record<string, unknown>>(),
     monitorNextCheckAt: timestamp("monitor_next_check_at", { withTimezone: true }),
     monitorWakeRequestedAt: timestamp("monitor_wake_requested_at", { withTimezone: true }),
@@ -104,6 +106,9 @@ export const issues = pgTable(
     dueMonitorIdx: index("issues_company_monitor_due_idx").on(table.companyId, table.monitorNextCheckAt),
     companyUpdatedIdx: index("issues_company_updated_idx").on(table.companyId, table.updatedAt),
     companyCreatedIdx: index("issues_company_created_idx").on(table.companyId, table.createdAt),
+    companyWorkAuthorityStableRefUq: uniqueIndex("issues_company_work_authority_stable_ref_uq")
+      .on(table.companyId, sql`(${table.workAuthorityContext} ->> 'stableWorkRef')`)
+      .where(sql`${table.workAuthorityContext} is not null`),
     openNormalizedTitleCreatedIdx: index("issues_open_normalized_title_created_idx")
       .on(
         table.companyId,

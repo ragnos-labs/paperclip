@@ -880,6 +880,23 @@ Default behavior:
 - `local_trusted`: enabled
 - `authenticated`: disabled
 
+## Governed work authority writer
+
+The dependency-owned work authority API is disabled and emergency-stopped by
+default. Local integration tests inject their policy directly. A configured
+runtime uses these variables:
+
+```sh
+PAPERCLIP_WORK_AUTHORITY_WRITER_ENABLED=true
+PAPERCLIP_WORK_AUTHORITY_EMERGENCY_STOP=false
+PAPERCLIP_WORK_AUTHORITY_ALLOWED_OPERATIONS=record_create,field_set
+PAPERCLIP_WORK_AUTHORITY_ALLOWED_POLICY_DIGESTS=sha256:<approved-policy-digest>
+```
+
+Do not use a board or agent credential for this path. Create a dedicated v3
+work-authority credential through the board-only credential-management route.
+See [company-work-authority-contract.md](./company-work-authority-contract.md).
+
 ## CLI Client Operations
 
 Paperclip CLI now includes client-side control-plane commands in addition to setup commands.

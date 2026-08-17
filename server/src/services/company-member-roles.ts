@@ -1,4 +1,8 @@
-import { PERMISSION_KEYS, WORK_PROJECTION_ADMIN_PERMISSION } from "@paperclipai/shared";
+import {
+  PERMISSION_KEYS,
+  WORK_AUTHORITY_ADMIN_PERMISSION,
+  WORK_PROJECTION_ADMIN_PERMISSION,
+} from "@paperclipai/shared";
 import type { HumanCompanyMembershipRole } from "@paperclipai/shared";
 
 const HUMAN_COMPANY_MEMBERSHIP_ROLES: HumanCompanyMembershipRole[] = [
@@ -34,6 +38,7 @@ export function grantsForHumanRole(
         { permissionKey: "users:invite", scope: null },
         { permissionKey: "users:manage_permissions", scope: null },
         { permissionKey: WORK_PROJECTION_ADMIN_PERMISSION, scope: null },
+        { permissionKey: WORK_AUTHORITY_ADMIN_PERMISSION, scope: null },
         { permissionKey: "tasks:assign", scope: null },
         { permissionKey: "joins:approve", scope: null },
       ];
@@ -45,6 +50,7 @@ export function grantsForHumanRole(
         { permissionKey: "environments:manage", scope: null },
         { permissionKey: "users:invite", scope: null },
         { permissionKey: WORK_PROJECTION_ADMIN_PERMISSION, scope: null },
+        { permissionKey: WORK_AUTHORITY_ADMIN_PERMISSION, scope: null },
         { permissionKey: "tasks:assign", scope: null },
         { permissionKey: "joins:approve", scope: null },
       ];

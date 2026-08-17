@@ -315,3 +315,21 @@ resume.
 
 The full authority, pagination, failure, upgrade, and rollback contract is in
 [company-work-projection-contract.md](./company-work-projection-contract.md).
+
+## Company work authority
+
+`issues.work_authority_context` stores the closed planned-work fields that do
+not already have first-class issue columns. It contains the stable work
+reference, dates, next action, done criteria, evidence references, milestone,
+privacy class, historical aliases, accountable human, and approver.
+
+`company_work_authority_actions` is the intent and terminal-receipt ledger for
+the governed writer. Its company and idempotency key are unique. Reuse with a
+different request digest is a conflict. `company_work_authority_aliases` keeps
+each stable or historical external reference bound to exactly one issue in a
+company.
+
+Migration `0214` adds these sidecars and the dedicated v3 credential token
+class. The complete API, concurrency, replay, readback, and emergency-stop
+rules are in
+[company-work-authority-contract.md](./company-work-authority-contract.md).
