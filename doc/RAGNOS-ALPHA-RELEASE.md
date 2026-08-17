@@ -96,9 +96,11 @@ requests on an internal container network. It runs as non-root with no host
 mounts and no database connection. See
 [`company-work-projection-canary.md`](company-work-projection-canary.md).
 
-The GitHub release assets are authoritative. They include the canary contract
-and canary receipt. The extra workflow artifact is non-authoritative and its
-upload is best-effort only.
+The GitHub release assets are authoritative. They include the company work
+authority contract, the projection contracts, the canary contract, and the
+canary receipt. The authority contract is source capability only. It does not
+activate an authority writer. The extra workflow artifact is non-authoritative
+and its upload is best-effort only.
 
 Publication evidence does not prove deployment or activation. A later owning
 distribution must pin the image by digest and record deployment, activation,
