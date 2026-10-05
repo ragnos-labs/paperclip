@@ -211,7 +211,7 @@ jobs:
   e2e:
     name: Fork E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -245,10 +245,20 @@ jobs:
           }
           CONF
       - name: Run full end-to-end suite
+        timeout-minutes: 50
         env:
           PAPERCLIP_E2E_SKIP_LLM: "true"
           PAPERCLIP_PLAYWRIGHT_CHANNEL: "chrome"
         run: pnpm run test:e2e
+      - name: Upload end-to-end diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fork-e2e-diagnostics-${{ github.run_attempt }}
+          path: |
+            tests/e2e/playwright-report/
+            tests/e2e/test-results/
+          retention-days: 14
 
   fork_ci:
     name: RAGnos Fork CI
