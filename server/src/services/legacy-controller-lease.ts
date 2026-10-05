@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, gt, lte, sql } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
+import type { AdapterRemoteRunBinding } from "@paperclipai/adapter-utils";
+import { claimedAdapterType } from "./conversation-continuation.js";
 
 // A boot UUID has meaning across containers; a numeric PID does not.
 export const legacyControllerBootId = randomUUID();
@@ -8,6 +10,75 @@ export const LEGACY_CONTROLLER_LEASE_MS = 60_000;
 export const LEGACY_CONTROLLER_RENEW_MS = 10_000;
 
 type Run = typeof heartbeatRuns.$inferSelect;
+
+export function readLegacyRemoteRunBinding(run: Run): AdapterRemoteRunBinding | null {
+  if (run.runtimeMode !== "legacy" || claimedAdapterType(run) !== "hermes_gateway") return null;
+  const binding = run.resultJson?.remoteRunBinding;
+  if (!binding || typeof binding !== "object" || Array.isArray(binding)) return null;
+  const value = binding as Record<string, unknown>;
+  if (value.adapterType !== "hermes_gateway" || typeof value.providerRunId !== "string" ||
+      !value.providerRunId.trim() || value.providerRunId !== run.externalRunId ||
+      typeof value.transportFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(value.transportFingerprint) ||
+      (value.deadlineAt !== null && (typeof value.deadlineAt !== "string" || !Number.isFinite(Date.parse(value.deadlineAt))))) return null;
+  return {
+    adapterType: value.adapterType, providerRunId: value.providerRunId,
+    transportFingerprint: value.transportFingerprint, deadlineAt: value.deadlineAt as string | null,
+  };
+}
+
+/** Use this predicate in the same write as any observer-owned effect. */
+export function legacyObserverOwnerCondition(bootId: string) {
+  return and(eq(heartbeatRuns.runtimeMode, "legacy"),
+    eq(heartbeatRuns.controllerBootId, bootId),
+    gt(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`));
+}
+
+export async function persistLegacyRemoteRunBinding(db: Db, run: Run, binding: AdapterRemoteRunBinding) {
+  if (claimedAdapterType(run) !== "hermes_gateway" || binding.adapterType !== "hermes_gateway") {
+    throw new Error("Remote run binding requires the claimed Hermes gateway adapter.");
+  }
+  // The accepted identity is immutable. A retry of this exact callback may
+  // acknowledge the same binding, but may never overwrite another accepted job.
+  const [updated] = await db.update(heartbeatRuns).set({
+    externalRunId: binding.providerRunId,
+    resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ remoteRunBinding: binding })}::jsonb`,
+    updatedAt: new Date(),
+  }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+    eq(heartbeatRuns.status, "running"), legacyObserverOwnerCondition(legacyControllerBootId),
+    sql`(${heartbeatRuns.resultJson}->'remoteRunBinding' is null or ${heartbeatRuns.resultJson}->'remoteRunBinding' = ${JSON.stringify(binding)}::jsonb)`,
+    sql`(${heartbeatRuns.externalRunId} is null or ${heartbeatRuns.externalRunId} = ${binding.providerRunId})`,
+  )).returning();
+  if (!updated || !readLegacyRemoteRunBinding(updated)) throw new Error("Remote run binding lost current controller ownership.");
+  return updated;
+}
+
+/** Expiry transfers observation only. This is never permission to create work. */
+export async function claimLegacyRemoteRunObservation(db: Db, run: Run): Promise<Run | null> {
+  const binding = readLegacyRemoteRunBinding(run);
+  if (!binding || !run.controllerBootId || run.status !== "running") return null;
+  const [claimed] = await db.update(heartbeatRuns).set({
+    controllerBootId: legacyControllerBootId,
+    controllerLeaseExpiresAt: sql`clock_timestamp() + interval '60 seconds'`,
+    executionStage: "observing_remote",
+    updatedAt: new Date(),
+  }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+    eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
+    eq(heartbeatRuns.controllerBootId, run.controllerBootId),
+    lte(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`),
+    eq(heartbeatRuns.externalRunId, binding.providerRunId),
+    sql`${heartbeatRuns.resultJson}->'remoteRunBinding' = ${JSON.stringify(binding)}::jsonb`,
+  )).returning();
+  return claimed ?? null;
+}
+
+/** Call only after this observer settled, leaving the remote job untouched. */
+export async function releaseLegacyRemoteRunObservation(db: Db, run: Run) {
+  await db.update(heartbeatRuns).set({
+    controllerLeaseExpiresAt: sql`clock_timestamp()`, updatedAt: new Date(),
+  }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+    eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+    eq(heartbeatRuns.runtimeMode, "legacy")));
+}
 
 /** Commit these fields in the same UPDATE that claims a queued run. */
 export function legacyControllerClaim(runtimeMode: string) {
