@@ -120,3 +120,20 @@ it("bounds Stop when an adapter does not settle", async () => {
   await assertion;
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it.each(["before registration", "while waiting"])("never republishes a finished control %s", async phase => {
+  const runId = `finished-${phase}`;
+  const stop = captureAdapterStopOwnership(runId);
+  const control = createAdapterExecutionControl();
+  try {
+    if (phase === "before registration") control.finish();
+    const registration = registerAdapterExecutionControl(runId, control);
+    control.finish();
+    await registration;
+    expect(control.finished).toBe(true);
+    expect(adapterExecutionControls.has(runId)).toBe(false);
+    stop.release();
+    await registerAdapterExecutionControl(runId, control);
+    expect(adapterExecutionControls.has(runId)).toBe(false);
+  } finally { stop.release(); adapterExecutionControls.delete(runId); }
+});

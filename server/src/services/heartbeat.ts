@@ -9592,7 +9592,7 @@ export function heartbeatService(
     return { notice: buildImmediateExecutionPathRecoveryNoticeSeed({ status: input.issueStatus }), recoveryCause: undefined };
   }
 
-  const wakeQueue = createWakeQueue(db, {
+  const wakeQueueDependencies: Parameters<typeof createWakeQueue>[1] = {
     resolveResponsibleUserId: async (input) => {
       // `input.issue` is the wake-queue module's own transaction-scoped
       // snapshot; using it here, instead of re-reading the issue through
@@ -9669,7 +9669,8 @@ export function heartbeatService(
         });
       },
     },
-  });
+  };
+  const wakeQueue = createWakeQueue(db, wakeQueueDependencies);
 
   // Applies the post-commit effects a wake-queue release returns, exactly as
   // the original release function did before its writes moved into that
@@ -10999,8 +11000,8 @@ export function heartbeatService(
     });
   }
 
-  async function getRuntimeState(agentId: string) {
-    return db
+  async function getRuntimeState(agentId: string, writeDb: Db = db) {
+    return writeDb
       .select()
       .from(agentRuntimeState)
       .where(eq(agentRuntimeState.agentId, agentId))
@@ -12549,8 +12550,8 @@ export function heartbeatService(
     sessionDisplayId: string | null;
     lastRunId: string | null;
     lastError: string | null;
-  }) {
-    return db.transaction(async (tx) => {
+  }, writeDb: Db = db) {
+    return writeDb.transaction(async (tx) => {
       const [issue] = await tx.select().from(issues).where(and(sql`${issues.id}::text = ${input.taskKey}`, eq(issues.companyId, input.companyId))).for("update");
       if (isConversation(issue)) {
         const [run] = input.lastRunId ? await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.lastRunId)) : [];
@@ -12645,11 +12646,11 @@ export function heartbeatService(
     });
   }
 
-  async function ensureRuntimeState(agent: typeof agents.$inferSelect) {
-    const existing = await getRuntimeState(agent.id);
+  async function ensureRuntimeState(agent: typeof agents.$inferSelect, writeDb: Db = db) {
+    const existing = await getRuntimeState(agent.id, writeDb);
     if (existing) return existing;
 
-    const inserted = await db
+    const inserted = await writeDb
       .insert(agentRuntimeState)
       .values({
         agentId: agent.id,
@@ -12664,7 +12665,7 @@ export function heartbeatService(
       .then((rows) => rows[0] ?? null);
     if (inserted) return inserted;
 
-    const ensured = await getRuntimeState(agent.id);
+    const ensured = await getRuntimeState(agent.id, writeDb);
     if (!ensured) {
       throw new Error(`Failed to ensure runtime state for agent ${agent.id}`);
     }
@@ -19688,8 +19689,10 @@ export function heartbeatService(
     result: AdapterExecutionResult,
     session: { legacySessionId: string | null },
     normalizedUsage?: UsageTotals | null,
+    writeDb: Db = db,
+    hooks: typeof budgetHooks = budgetHooks,
   ) {
-    await ensureRuntimeState(agent);
+    await ensureRuntimeState(agent, writeDb);
     const usage = normalizedUsage ?? normalizeUsageTotals(result.usage);
     const inputTokens = usage?.inputTokens ?? 0;
     const outputTokens = usage?.outputTokens ?? 0;
@@ -19711,12 +19714,12 @@ export function heartbeatService(
     const provider = result.provider ?? "unknown";
     const biller = resolveLedgerBiller(result);
     const ledgerScope = await resolveLedgerScopeForRun(
-      db,
+      writeDb,
       agent.companyId,
       run,
     );
 
-    await db
+    await writeDb
       .update(agentRuntimeState)
       .set({
         adapterType: agent.adapterType,
@@ -19733,7 +19736,7 @@ export function heartbeatService(
       .where(eq(agentRuntimeState.agentId, agent.id));
 
     if (additionalCostCents > 0 || hasTokenUsage) {
-      const costs = costService(db, budgetHooks);
+      const costs = costService(writeDb, hooks);
       await costs.createEvent(agent.companyId, {
         heartbeatRunId: run.id,
         agentId: agent.id,
@@ -19984,6 +19987,69 @@ export function heartbeatService(
     return promise;
   }
 
+  async function persistRemoteRunResult(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    agent: typeof agents.$inferSelect;
+    status: "succeeded" | "failed" | "cancelled" | "timed_out";
+    patch: Partial<typeof heartbeatRuns.$inferInsert>;
+    result: AdapterExecutionResult;
+    handle: RunLogHandle | null;
+    session: { params: Record<string, unknown> | null; displayId: string | null; legacySessionId: string | null };
+    taskKey: string | null;
+    usage?: UsageTotals | null;
+  }) {
+    const { run, agent, result } = input;
+    const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+    const budgetStops: Parameters<typeof cancelBudgetScopeWork>[0][] = [];
+    let postCommitEffects: WakeQueuePostCommitEffect[] = [];
+    const updated = await db.transaction(async tx => {
+      if (issueId) await tx.select({ id: issues.id }).from(issues)
+        .where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId))).for("update");
+      return withLegacyObserverOwnership(tx as unknown as Db, run, async owned => {
+        const summary = input.handle ? await runLogStore.finalize(input.handle) : null;
+        const [current] = await owned.select({ resultJson: heartbeatRuns.resultJson }).from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId)));
+        const patch = { ...input.patch,
+          resultJson: { ...parseObject(current?.resultJson), ...parseObject(input.patch.resultJson) },
+          ...(summary ? { logBytes: summary.bytes,
+          logSha256: summary.sha256, logCompressed: summary.compressed } : {}) };
+        const reconciles = legacyExecutionNeedsReconciliation({ ...run, status: input.status, ...patch });
+        const terminal = reconciles ? await terminalizeLegacyExecution({
+          db: owned, run, status: input.status, patch, fromStatuses: ["running"],
+          expectedControllerBootId: legacyControllerBootId,
+        }) : await owned.update(heartbeatRuns).set({ ...patch, status: input.status,
+          updatedAt: new Date(), executionStatusDeliveryId: randomUUID() })
+          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+            eq(heartbeatRuns.status, "running"), legacyObserverOwnerCondition(legacyControllerBootId)))
+          .returning().then(rows => rows[0] ?? null);
+        if (!terminal) throw new Error("Remote terminal transition lost ownership");
+        await updateRuntimeState(agent, terminal, result,
+          { legacySessionId: input.session.legacySessionId }, input.usage, owned,
+          { cancelWorkForScope: async scope => { budgetStops.push(scope); } });
+        if (input.taskKey && (input.session.params || input.session.displayId)) await upsertTaskSession({
+          companyId: run.companyId, agentId: run.agentId, adapterType: claimedAdapterType(run)!,
+          taskKey: input.taskKey, sessionParamsJson: input.session.params, sessionDisplayId: input.session.displayId,
+          lastRunId: run.id, lastError: terminal.error }, owned);
+        if (run.wakeupRequestId) await owned.update(agentWakeupRequests).set({
+          status: input.status === "succeeded" ? "completed" : input.status,
+          finishedAt: terminal.finishedAt, error: terminal.error,
+        }).where(and(eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.id, run.wakeupRequestId)));
+        const release = await createWakeQueue(owned, wakeQueueDependencies).releaseIssueExecution({
+          companyId: run.companyId, runId: run.id, now: new Date(), suppressImmediateRecovery: true,
+        });
+        postCommitEffects = release.postCommitEffects;
+        return terminal;
+      });
+    });
+    publishLiveEvent({ companyId: run.companyId, type: "heartbeat.run.status",
+      payload: buildHeartbeatRunStatusLiveEventPayload(updated) });
+    publishRunLifecyclePluginEvent(updated);
+    emitTerminalAgentTaskRun(updated, "running");
+    await applyWakeQueuePostCommitEffects(postCommitEffects);
+    for (const scope of budgetStops) await cancelBudgetScopeWork(scope);
+    return updated;
+  }
+
   // Accepted work is observed before fresh admission, provisioning or task
   // suppression. No create request or new subscriber belongs on this path.
   async function observeAcceptedRemoteRun(run: typeof heartbeatRuns.$inferSelect) {
@@ -20009,8 +20075,16 @@ export function heartbeatService(
       }
       const resumed = await withLegacyObserverOwnership(db, run, async () => runLogStore.resume!({
         companyId: run.companyId, agentId: run.agentId, runId: run.id, logRef: run.logRef!,
-        minimumBytes: run.logBytes ?? 0, sha256: run.logSha256,
+        minimumBytes: Math.max(run.logBytes ?? 0, run.lastOutputBytes ?? 0), sha256: run.logSha256,
       }));
+      await withLegacyObserverOwnership(db, run, async tx => {
+        await tx.update(heartbeatRuns).set({ logBytes: resumed.bytes,
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+            remoteRunLogResume: { prefixBytes: resumed.bytes, prefixSha256: resumed.sha256, sequence: resumed.sequence },
+          })}::jsonb` })
+          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+            legacyObserverOwnerCondition(legacyControllerBootId)));
+      });
       let sequence = resumed.sequence;
       let stdout = run.stdoutExcerpt ?? "", stderr = run.stderrExcerpt ?? "";
       const redaction = await getCurrentUserRedactionOptions();
@@ -20023,7 +20097,9 @@ export function heartbeatService(
           const bytes = await runLogStore.append(resumed.handle, { stream, chunk: clean,
             ts: new Date().toISOString(), seq: ++sequence });
           await tx.update(heartbeatRuns).set({ logBytes: sql`coalesce(${heartbeatRuns.logBytes}, ${resumed.bytes}) + ${bytes}`,
-            stdoutExcerpt: stdout, stderrExcerpt: stderr, updatedAt: new Date() })
+            stdoutExcerpt: stdout, stderrExcerpt: stderr,
+            lastOutputAt: new Date(), lastOutputSeq: sequence, lastOutputStream: stream,
+            lastOutputBytes: sql`${heartbeatRuns.logBytes} + ${bytes}`, updatedAt: new Date() })
             .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
               legacyObserverOwnerCondition(legacyControllerBootId)));
         }));
@@ -20053,49 +20129,18 @@ export function heartbeatService(
       }
       const status = result.timedOut ? "timed_out" : result.signal === "SIGTERM" ? "cancelled" :
         result.exitCode === 0 ? "succeeded" : "failed";
-      const settled = await db.transaction(async tx => {
-        // Keep the existing issue-before-run lock order used by board Stop.
-        if (issueId) await tx.select({ id: issues.id }).from(issues)
-          .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId))).for("update");
-        return withLegacyObserverOwnership(tx as unknown as Db, run, async owned => {
-          control.observerDetachController.signal.throwIfAborted();
-          const summary = await runLogStore.finalize(resumed.handle);
-          const [updated] = await owned.update(heartbeatRuns).set({
-            status, finishedAt: new Date(), updatedAt: new Date(), executionStatusDeliveryId: randomUUID(),
-            error: result.errorMessage ?? null, errorCode: result.errorCode ?? null,
-            exitCode: result.exitCode, signal: result.signal,
-            sessionIdAfter: result.sessionDisplayId ?? result.sessionId ?? run.sessionIdBefore,
-            usageJson: result.usage ? { ...result.usage } : null,
-            resultJson: { ...parseObject(run.resultJson), ...parseObject(result.resultJson), remoteRunBinding: binding,
-              ...(result.executionRecovery ? { executionRecovery: result.executionRecovery } : {}) },
-            stdoutExcerpt: stdout, stderrExcerpt: stderr,
-            logBytes: summary.bytes, logSha256: summary.sha256, logCompressed: summary.compressed,
-          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
-            eq(heartbeatRuns.status, "running"), legacyObserverOwnerCondition(legacyControllerBootId))).returning();
-          if (!updated) throw new Error("Accepted terminal transition lost ownership");
-          if (run.wakeupRequestId) await owned.update(agentWakeupRequests).set({
-            status: status === "succeeded" ? "completed" : status, finishedAt: new Date(), error: updated.error,
-          }).where(and(eq(agentWakeupRequests.id, run.wakeupRequestId), eq(agentWakeupRequests.companyId, run.companyId)));
-          if (issueId) {
-            await owned.update(issues).set({ executionRunId: null, executionAgentNameKey: null, executionLockedAt: null })
-              .where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId), eq(issues.executionRunId, run.id)));
-            await owned.update(issues).set({ checkoutRunId: null })
-              .where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId), eq(issues.checkoutRunId, run.id)));
-            await owned.update(agentTaskSessions).set({ sessionParamsJson: result.sessionParams ?? null,
-              sessionDisplayId: updated.sessionIdAfter, lastError: updated.error, updatedAt: new Date() })
-              .where(and(eq(agentTaskSessions.companyId, run.companyId), eq(agentTaskSessions.agentId, run.agentId),
-                eq(agentTaskSessions.lastRunId, run.id)));
-          }
-          await owned.update(agentRuntimeState).set({ lastRunId: run.id, lastRunStatus: status,
-            lastError: updated.error, updatedAt: new Date() })
-            .where(and(eq(agentRuntimeState.companyId, run.companyId), eq(agentRuntimeState.agentId, run.agentId)));
-          return updated;
-        });
+      const settled = await persistRemoteRunResult({ run, agent, status, result, handle: resumed.handle,
+        taskKey: issueId, session: { params: result.sessionParams ?? null,
+          displayId: result.sessionDisplayId ?? result.sessionId ?? run.sessionIdBefore,
+          legacySessionId: result.sessionId ?? run.sessionIdBefore },
+        patch: { finishedAt: new Date(), error: result.errorMessage ?? null, errorCode: result.errorCode ?? null,
+          exitCode: result.exitCode, signal: result.signal,
+          sessionIdAfter: result.sessionDisplayId ?? result.sessionId ?? run.sessionIdBefore,
+          usageJson: result.usage ? { ...result.usage } : null,
+          resultJson: { ...parseObject(run.resultJson), ...parseObject(result.resultJson), remoteRunBinding: binding,
+            ...(result.executionRecovery ? { executionRecovery: result.executionRecovery } : {}) },
+          stdoutExcerpt: stdout, stderrExcerpt: stderr },
       });
-      publishLiveEvent({ companyId: run.companyId, type: "heartbeat.run.status",
-        payload: buildHeartbeatRunStatusLiveEventPayload(settled) });
-      publishRunLifecyclePluginEvent(settled);
-      emitTerminalAgentTaskRun(settled, "running");
       await finalizeAgentStatus(run.agentId, status, settled.error);
     } catch (error) {
       // Configuration, credentials and unavailable evidence are observation
@@ -20260,6 +20305,7 @@ export function heartbeatService(
     const controllerLease = watchLegacyControllerLease(db, run,
       isRemoteObserver ? executionControl.observerDetachController : executionControl.controller);
     let remoteObserverDetached = false;
+    let remoteTerminalCommitted = false;
     const observerOwnershipLost = () => isRemoteObserver && executionControl.observerDetachController.signal.aborted;
     const setOwnedRunStatus: typeof setRunStatus = (id, status, patch) =>
       setRunStatus(id, status, patch, expectedControllerBootId);
@@ -20340,7 +20386,9 @@ export function heartbeatService(
         await finalizeAgentStatus(agent.id, "succeeded");
         return;
       }
-      const runtime = await ensureRuntimeState(agent);
+      const runtime = isRemoteObserver
+        ? await withLegacyObserverOwnership(db, run, tx => ensureRuntimeState(agent, tx))
+        : await ensureRuntimeState(agent);
       const context = parseObject(run.contextSnapshot);
       const authorizeFailedChatRetryExecution = () =>
         db.transaction((tx) =>
@@ -21430,7 +21478,8 @@ export function heartbeatService(
         Object.assign(resolvedConfig, managedAiRuntime.config);
         for (const key of AI_AUTH_ENV_KEYS) secretKeys.add(key);
         context.aiConnection = { ...managedAiRuntime.attribution, identity: managedAiRuntime.identity };
-        await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ aiConnection: context.aiConnection })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+        await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ aiConnection: context.aiConnection })}::jsonb` }).where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])));
       }
       if (secretManifest.length > 0) {
         context.paperclipSecrets = {
@@ -22230,7 +22279,8 @@ export function heartbeatService(
             contextSnapshot: context,
             updatedAt: new Date(),
           })
-          .where(eq(heartbeatRuns.id, run.id));
+          .where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])));
       }
       const environmentAcquireStartedAtMs = Date.now();
       let acquiredEnvironment: Awaited<
@@ -22559,7 +22609,8 @@ export function heartbeatService(
           contextSnapshot: context,
           updatedAt: new Date(),
         })
-        .where(eq(heartbeatRuns.id, run.id));
+        .where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])));
       const runtimeSessionResolution = resolveRuntimeSessionParamsForWorkspace({
         agentId: agent.id,
         previousSessionParams,
@@ -22798,6 +22849,7 @@ export function heartbeatService(
       };
 
       let handle: RunLogHandle | null = null;
+      let logWrites = Promise.resolve();
       const goalCheckpointSession: {
         current: {
           params: Record<string, unknown>;
@@ -22818,7 +22870,7 @@ export function heartbeatService(
         } | null;
       } = { pending: null };
       let persistedLogBytes = Number(run.logBytes ?? 0);
-      const flushOutputProgress = async (opts?: { force?: boolean }) => {
+      const flushOutputProgress = async (opts?: { force?: boolean; writeDb?: Db }) => {
         const pendingOutputProgress = outputProgressState.pending;
         if (!pendingOutputProgress) return;
         const shouldFlush =
@@ -22827,7 +22879,7 @@ export function heartbeatService(
           pendingOutputProgress.at.getTime() - lastOutputFlushAt.getTime() >=
             ACTIVE_RUN_OUTPUT_PROGRESS_FLUSH_INTERVAL_MS;
         if (!shouldFlush) return;
-        await db
+        await (opts?.writeDb ?? db)
           .update(heartbeatRuns)
           .set({
             lastOutputAt: pendingOutputProgress.at,
@@ -22836,7 +22888,8 @@ export function heartbeatService(
             lastOutputBytes: pendingOutputProgress.bytes,
             updatedAt: new Date(),
           })
-          .where(eq(heartbeatRuns.id, run.id));
+          .where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])));
         lastOutputFlushAt = pendingOutputProgress.at;
         outputProgressState.pending = null;
       };
@@ -22851,7 +22904,8 @@ export function heartbeatService(
             contextSnapshot: context,
             updatedAt: new Date(),
           })
-          .where(eq(heartbeatRuns.id, run.id))
+          .where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])))
           .returning()
           .then((rows) => rows[0] ?? null);
         if (runningWithSession) run = runningWithSession;
@@ -22917,11 +22971,8 @@ export function heartbeatService(
           message: "run started",
         });
 
-        handle = await runLogStore.begin({
-          companyId: run.companyId,
-          agentId: run.agentId,
-          runId,
-        });
+        const beginLog = () => runLogStore.begin({ companyId: run.companyId, agentId: run.agentId, runId });
+        handle = isRemoteObserver ? await withLegacyObserverOwnership(db, run, beginLog) : await beginLog();
 
         await db
           .update(heartbeatRuns)
@@ -22930,11 +22981,12 @@ export function heartbeatService(
             logRef: handle.logRef,
             updatedAt: new Date(),
           })
-          .where(eq(heartbeatRuns.id, runId));
+          .where(and(eq(heartbeatRuns.id, runId),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])));
 
         const currentUserRedactionOptions =
           await getCurrentUserRedactionOptions();
-        const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
+        const writeLog = async (stream: "stdout" | "stderr", chunk: string, writeDb?: Db) => {
           const sanitizedChunk = compactRunLogChunk(
             redactCurrentUserText(chunk, currentUserRedactionOptions),
           );
@@ -22962,7 +23014,7 @@ export function heartbeatService(
             stream,
             bytes: persistedLogBytes,
           };
-          await flushOutputProgress();
+          await flushOutputProgress({ writeDb });
 
           // Streamed CLI output is real run activity: keep the in-memory
           // runtime status ("Working... / X ago") fresh between structured
@@ -23008,6 +23060,16 @@ export function heartbeatService(
               truncated: payloadChunk.length !== sanitizedChunk.length,
             },
           });
+        };
+        const onLog = (stream: "stdout" | "stderr", chunk: string) => {
+          if (remoteTerminalCommitted) return Promise.resolve();
+          const write = logWrites.then(() => isRemoteObserver
+            ? withLegacyObserverOwnership(db, run, tx => writeLog(stream, chunk, tx))
+            : writeLog(stream, chunk));
+          logWrites = write.catch(() => {
+            if (isRemoteObserver) executionControl.observerDetachController.abort(new Error("Remote log ownership lost"));
+          });
+          return write;
         };
         if (runScopedMentionedSkillKeys.length > 0) {
           await onLog(
@@ -23073,7 +23135,8 @@ export function heartbeatService(
               contextSnapshot: context,
               updatedAt: new Date(),
             })
-            .where(eq(heartbeatRuns.id, run.id));
+            .where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])));
         }
         if (
           issueId &&
@@ -23727,7 +23790,8 @@ export function heartbeatService(
             const lockedRun = await tx
               .select()
               .from(heartbeatRuns)
-              .where(eq(heartbeatRuns.id, run.id))
+              .where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])))
               .for("update")
               .limit(1)
               .then((rows) => rows[0] ?? null);
@@ -23837,7 +23901,8 @@ export function heartbeatService(
                   lockedRun.nativePhaseUpdatedAt ?? new Date(),
                 updatedAt: new Date(),
               })
-              .where(eq(heartbeatRuns.id, run.id));
+              .where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])));
             await tx
               .insert(nativeRunFinalizations)
               .values({
@@ -23894,7 +23959,8 @@ export function heartbeatService(
                 else '{}'::jsonb end) || ${JSON.stringify(providerTraceRequested ? { providerTrace: { mode: "raw", traceId: providerTraceCapture?.metadata.id ?? null, maxBytes: PROVIDER_TRACE_MAX_BYTES } } : {})}::jsonb`,
               updatedAt: new Date(),
             })
-            .where(eq(heartbeatRuns.id, run.id));
+            .where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])));
         }
         const localAgentJwtScope =
           issueRef?.workMode === "skill_test"
@@ -24576,6 +24642,18 @@ export function heartbeatService(
             if (!guardedDispatch.dispatched) return;
             adapterResult = await guardedDispatch.resultPromise;
           }
+          if (isRemoteObserver && !readLegacyRemoteRunBinding(run) &&
+              !(adapterResult.executionRecovery?.kind === "bootstrap" &&
+                adapterResult.executionRecovery.providerWorkStarted === false)) {
+            await withLegacyObserverOwnership(db, run, async tx => {
+              await tx.update(heartbeatRuns).set({ errorCode: "hermes_gateway_observation_held",
+                error: "Remote create or accepted binding requires reconciliation", updatedAt: new Date() })
+                .where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []), eq(heartbeatRuns.companyId, run.companyId),
+                  legacyObserverOwnerCondition(legacyControllerBootId)));
+            });
+            remoteObserverDetached = true;
+            return;
+          }
           if (adapterResult.remoteRunDetached || observerOwnershipLost()) {
             remoteObserverDetached = true;
             return;
@@ -24596,6 +24674,7 @@ export function heartbeatService(
             .where(
               and(
                 eq(heartbeatRuns.id, run.id),
+                ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
                 eq(heartbeatRuns.status, "running"),
               ),
             );
@@ -24644,6 +24723,7 @@ export function heartbeatService(
             .where(
               and(
                 eq(heartbeatRuns.id, run.id),
+                ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
                 eq(heartbeatRuns.status, "running"),
               ),
             );
@@ -24774,7 +24854,7 @@ export function heartbeatService(
           throw adapterErr;
         } finally {
           try {
-            await revokeHeartbeatRunGatewayTokens({
+            if (!remoteObserverDetached && !observerOwnershipLost()) await revokeHeartbeatRunGatewayTokens({
               db,
               companyId: agent.companyId,
               runId: run.id,
@@ -24853,7 +24933,8 @@ export function heartbeatService(
               contextSnapshot: context,
               updatedAt: new Date(),
             })
-            .where(eq(heartbeatRuns.id, run.id));
+            .where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])));
           if (issueId) {
             try {
               await postWorkspaceReadyComment({
@@ -24951,9 +25032,8 @@ export function heartbeatService(
           sha256?: string;
           compressed: boolean;
         } | null = null;
-        if (handle) {
-          logSummary = await runLogStore.finalize(handle);
-        }
+        await logWrites;
+        if (handle && !isRemoteObserver) logSummary = await runLogStore.finalize(handle);
         const finalLogBytes = logSummary?.bytes;
         if (outputProgressState.pending && typeof finalLogBytes === "number") {
           outputProgressState.pending.bytes = finalLogBytes;
@@ -25081,12 +25161,15 @@ export function heartbeatService(
           logSha256: logSummary?.sha256,
           logCompressed: logSummary?.compressed ?? false,
         };
-        const persistedRunWrite = await setOwnedRunStatusIfRunning(
-          run.id,
-          status,
-          finalRunPatch,
-          expectedControllerBootId,
-        );
+        const persistedRunWrite = isRemoteObserver ? {
+          updated: true,
+          run: await persistRemoteRunResult({ run, agent, status, patch: finalRunPatch, result: adapterResult,
+            handle, taskKey, usage: normalizedUsage, session: {
+              params: attachPaperclipSessionMetadataToSessionParams(nextSessionState.params, configuredModel, sessionConfigMetadata),
+              displayId: nextSessionState.displayId, legacySessionId: nextSessionState.legacySessionId,
+            } }),
+        } : await setOwnedRunStatusIfRunning(run.id, status, finalRunPatch, expectedControllerBootId);
+        remoteTerminalCommitted = isRemoteObserver && persistedRunWrite.updated;
         let persistedRun: typeof heartbeatRuns.$inferSelect | null =
           persistedRunWrite.run;
         if (isRemoteObserver && !persistedRunWrite.updated) {
@@ -25119,6 +25202,7 @@ export function heartbeatService(
               .where(
                 and(
                   eq(heartbeatRuns.id, run.id),
+                  ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
                   eq(heartbeatRuns.status, status),
                 ),
               )
@@ -25449,7 +25533,7 @@ export function heartbeatService(
           }
         }
 
-        if (finalizedRun) {
+        if (finalizedRun && !isRemoteObserver) {
           await updateRuntimeState(
             agent,
             finalizedRun,
@@ -25500,6 +25584,16 @@ export function heartbeatService(
       } catch (err) {
         if (observerOwnershipLost()) {
           remoteObserverDetached = true;
+          return;
+        }
+        if (isRemoteObserver && legacyAdapterEntered && !remoteTerminalCommitted) {
+          remoteObserverDetached = true;
+          await withLegacyObserverOwnership(db, run, async tx => {
+            await tx.update(heartbeatRuns).set({ errorCode: "hermes_gateway_observation_held",
+              error: "Hermes dispatch outcome requires observation reconciliation", updatedAt: new Date() })
+              .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+                legacyObserverOwnerCondition(legacyControllerBootId)));
+          }).catch(() => undefined);
           return;
         }
         if (err instanceof NativeControllerDetachedForRestartError) {
@@ -25666,7 +25760,11 @@ export function heartbeatService(
         } | null = null;
         if (handle) {
           try {
-            logSummary = await runLogStore.finalize(handle);
+            await logWrites;
+            const finalHandle = handle;
+            logSummary = isRemoteObserver
+              ? await withLegacyObserverOwnership(db, run, () => runLogStore.finalize(finalHandle))
+              : await runLogStore.finalize(finalHandle);
           } catch (finalizeErr) {
             logger.warn(
               { err: finalizeErr, runId },
@@ -25838,6 +25936,16 @@ export function heartbeatService(
     } catch (outerErr) {
       if (observerOwnershipLost()) {
         remoteObserverDetached = true;
+        return;
+      }
+      if (isRemoteObserver && legacyAdapterEntered && !remoteTerminalCommitted) {
+        remoteObserverDetached = true;
+        await withLegacyObserverOwnership(db, run, async tx => {
+          await tx.update(heartbeatRuns).set({ errorCode: "hermes_gateway_observation_held",
+            error: "Hermes dispatch outcome requires observation reconciliation", updatedAt: new Date() })
+            .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+              legacyObserverOwnerCondition(legacyControllerBootId)));
+        }).catch(() => undefined);
         return;
       }
       if (
@@ -26087,7 +26195,7 @@ export function heartbeatService(
       }
     } finally {
       remoteObserverDetached = remoteObserverDetached || observerOwnershipLost();
-      if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
+      if (managedAiRuntime && !remoteObserverDetached) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
       let latestRun = await getRun(run.id).catch(() => null);
       if (isRemoteObserver && latestRun?.controllerBootId === legacyControllerBootId &&
           isHeartbeatRunTerminalStatus(latestRun.status)) remoteObserverDetached = false;
@@ -26096,7 +26204,8 @@ export function heartbeatService(
           await db
             .update(heartbeatRuns)
             .set({ executionControlDeadlineAt: null })
-            .where(eq(heartbeatRuns.id, run.id));
+            .where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])));
         }
         nativeOwnershipHeld =
           nativeOwnershipHeld ||
@@ -26187,6 +26296,8 @@ export function heartbeatService(
         }
         if (
           runScratch &&
+          !remoteObserverDetached &&
+          (!isRemoteObserver || latestRun?.controllerBootId === legacyControllerBootId) &&
           latestRun &&
           isHeartbeatRunTerminalStatus(latestRun.status)
         ) {
@@ -26253,7 +26364,7 @@ export function heartbeatService(
           await db.update(heartbeatRuns).set({
             resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
               ${JSON.stringify({ startupPreparationSettledAt: new Date().toISOString() })}::jsonb`,
-          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
+          }).where(and(eq(heartbeatRuns.id, run.id),...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []), eq(heartbeatRuns.status, "cancelled")));
         }
       } finally {
         controllerLease.stop();

@@ -2,11 +2,15 @@
 export function createAdapterExecutionControl() {
   const controller = new AbortController();
   const observerDetachController = new AbortController();
-  let finish!: () => void;
+  let resolveSettled!: () => void;
+  let finished = false;
   const settled = new Promise<void>((resolve) => {
-    finish = resolve;
+    resolveSettled = resolve;
   });
-  return { controller, observerDetachController, settled, finish };
+  return { controller, observerDetachController, settled,
+    get finished() { return finished; },
+    finish() { finished = true; resolveSettled(); },
+  };
 }
 
 export const adapterExecutionControls = new Map<
@@ -59,10 +63,11 @@ export async function registerAdapterExecutionControl(
   for (;;) {
     const pending = pendingUnregisteredAdapterStops.get(runId);
     if (!pending?.size) break;
-    await Promise.all([...pending]);
+    await Promise.race([Promise.all([...pending]), control.settled]);
+    if (control.finished) return;
   }
   // No await between observing no earlier Stop owners and publishing readiness.
-  adapterExecutionControls.set(runId, control);
+  if (!control.finished) adapterExecutionControls.set(runId, control);
 }
 
 export async function waitForAdapterStop(
