@@ -95,7 +95,20 @@ export function requireIndependentInfrastructureReview(flags, statuses, headSha,
     try { receipts[scope] = validateIndependentReview(statuses.find(status =>
       status.context === `ragnos/fork-${scope}-review`), headSha, scope, evidence); }
     catch (error) {
-      console.error(`[fork-security] ${scope} review rejected: ${error instanceof SyntaxError ? "invalid_receipt_json" : "invalid_review_identity_or_receipt"}; source=${headSha}; status_count=${statuses.length}; matching_status=${statuses.some(status => status.context === `ragnos/fork-${scope}-review`)}; review_present=${Boolean(evidence)}`);
+      const status = statuses.find(status => status.context === `ragnos/fork-${scope}-review`);
+      console.error("[fork-security] review rejected:", JSON.stringify({
+        scope, source: headSha,
+        reason: error instanceof SyntaxError ? "invalid_receipt_json" :
+          error.message.startsWith("Missing exact-commit") ? "invalid_review_identity" : "invalid_review_receipt",
+        statusCount: statuses.length, matchingStatus: Boolean(status), reviewPresent: Boolean(evidence),
+        statusState: status?.state === "success",
+        statusUrl: status?.url === `https://api.github.com/repos/ragnos-labs/paperclip/statuses/${headSha}`,
+        reviewUrl: evidence?.html_url === status?.target_url,
+        reviewCommit: evidence?.commit_id === headSha,
+        reviewState: ["COMMENTED", "APPROVED"].includes(evidence?.state),
+        reviewSubmitted: Boolean(evidence?.submitted_at),
+        reviewAuthor: ["OWNER", "MEMBER", "COLLABORATOR"].includes(evidence?.author_association),
+      }));
     }
   }
   return flags.filter(flag => {
