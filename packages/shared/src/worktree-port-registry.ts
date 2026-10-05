@@ -94,10 +94,10 @@ server.listen(0, "127.0.0.1", () => {
     Atomics.notify(control, 0);
     return;
   }
+  touchOwnedLock();
   Atomics.store(control, 2, address.port);
   Atomics.store(control, 0, 1);
   Atomics.notify(control, 0);
-  touchOwnedLock();
   timer = setInterval(() => {
     if (Atomics.load(control, 1) !== 0 || touchOwnedLock() === "lost") finish();
   }, workerData.heartbeatMs);
