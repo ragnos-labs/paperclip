@@ -64,8 +64,8 @@ test requires an explicit exact-file disposition in the current independent
 review receipt for its owning scope. Secret and supply-chain findings always
 block. Historical commit exemptions are removed. The production dependency
 audit is bound to the unchanged installed-upstream lockfile, SHA-256 recorded
-in the baseline. Its inherited findings are 11 low, 31 moderate and 22 high
-advisories; regression validation does not certify those dependencies secure.
+in the baseline. Its inherited vulnerability counts are 11 low, 31 moderate and 22 high
+(62 distinct advisory IDs); regression validation does not certify those dependencies secure.
 
 The existing protected `paperclip-alpha-release` environment retains its required
 human reviewer. Its maintenance-branch admission must be configured without
