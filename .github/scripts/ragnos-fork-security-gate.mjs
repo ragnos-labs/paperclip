@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   scanBuildScripts,
@@ -13,6 +13,7 @@ import {
 } from "./check-pr-security.mjs";
 import { fetchAllPullRequestFiles } from "./fetch-pr-files.mjs";
 import { ghFetch } from "./get-bot-token.mjs";
+import { validateIndependentReview, reviewApiRoute } from "./ragnos-fork-release-source.mjs";
 
 const severityRank = new Map([
   ["info", 0],
@@ -88,19 +89,31 @@ export function sanitizeFlags(flags) {
   }));
 }
 
-export function requireIndependentInfrastructureReview(flags, statuses, headSha) {
-  const infrastructure = flags.filter(flag => flag.check === "ci-tampering");
-  const remaining = flags.filter(flag => flag.check !== "ci-tampering");
-  if (!infrastructure.length) return remaining;
-  const receipt = statuses.find(status => status.context === "ragnos/fork-infrastructure-review");
-  if (!receipt || receipt.state !== "success" || !receipt.url?.endsWith(`/statuses/${headSha}`) ||
-      !receipt.target_url?.startsWith("https://github.com/ragnos-labs/paperclip/pull/")) return flags;
-  return remaining;
+export function requireIndependentInfrastructureReview(flags, statuses, headSha, review, sourceReview) {
+  const receipts = {};
+  for (const [scope, evidence] of [["infrastructure", review], ["source", sourceReview]]) {
+    try { receipts[scope] = validateIndependentReview(statuses.find(status =>
+      status.context === `ragnos/fork-${scope}-review`), headSha, scope, evidence); }
+    catch { /* Missing or stale evidence leaves the finding blocking. */ }
+  }
+  return flags.filter(flag => {
+    if (flag.check === "ci-tampering") return !receipts.infrastructure;
+    if (flag.check !== "suspicious-test") return true;
+    const scope = flag.file.startsWith(".github/") ? "infrastructure" : "source";
+    return !(receipts[scope]?.accepted_findings ?? []).some(finding =>
+      finding.check === flag.check && finding.file === flag.file &&
+      typeof finding.reason === "string" && finding.reason.length > 0);
+  });
 }
 
 async function runAuditGate() {
   const baselineUrl = new URL("../ragnos-production-audit-baseline.json", import.meta.url);
   const baseline = JSON.parse(await readFile(baselineUrl, "utf8"));
+  const { createHash } = await import("node:crypto");
+  const lock = await readFile(new URL("../../pnpm-lock.yaml", import.meta.url));
+  if (baseline.sourceCommit !== "8f8a0ab7effbd6a0584107d8038736c134ee5047" ||
+      baseline.lockfileSha256 !== createHash("sha256").update(lock).digest("hex"))
+    throw new Error("Audit baseline does not match the installed upstream lockfile");
   const result = spawnSync("pnpm", ["audit", "--prod", "--json"], {
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024,
@@ -138,16 +151,43 @@ async function runPullRequestScan() {
   const headSha = pullRequestAfter.head.sha;
   const statuses = detectedFlags.some(flag => flag.check === "ci-tampering")
     ? await ghFetch(`/repos/${repo}/commits/${headSha}/statuses?per_page=100`, token) : [];
-  const flags = requireIndependentInfrastructureReview(detectedFlags, statuses, headSha);
+  const status = statuses.find(status => status.context === "ragnos/fork-infrastructure-review");
+  const review = status ? await ghFetch(`/repos/${repo}/${reviewApiRoute(status)}`, token) : null;
+  const sourceStatus = statuses.find(status => status.context === "ragnos/fork-source-review");
+  const sourceReview = sourceStatus ? await ghFetch(`/repos/${repo}/${reviewApiRoute(sourceStatus)}`, token) : null;
+  const flags = requireIndependentInfrastructureReview(detectedFlags, statuses, headSha, review, sourceReview);
   if (flags.length > 0) {
     throw new Error(`read-only source scan failed:\n${JSON.stringify(sanitizeFlags(flags), null, 2)}`);
   }
   console.log(`[fork-security] read-only source scan passed for ${files.length} changed file(s)`);
 }
 
+async function runCommitScan() {
+  const source = process.env.GITHUB_SHA;
+  const repo = process.env.GITHUB_REPOSITORY;
+  const token = process.env.GITHUB_TOKEN;
+  if (!/^[0-9a-f]{40}$/.test(source ?? "") || repo !== "ragnos-labs/paperclip" || !token)
+    throw new Error("Exact fork push source and token required");
+  const baseline = "8f8a0ab7effbd6a0584107d8038736c134ee5047";
+  const git = args => execFileSync("git", args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+  const files = git(["diff", "--name-only", baseline, source]).trim().split("\n").filter(Boolean)
+    .map(filename => ({ filename, patch: git(["diff", "--no-ext-diff", baseline, source, "--", filename]) }));
+  const detectedFlags = [scanSecrets, scanCITampering, scanSensitivePaths, scanBuildScripts,
+    scanTestPatterns, scanSupplyChain].flatMap(scan => scan(files));
+  const statuses = await ghFetch(`/repos/${repo}/commits/${source}/statuses?per_page=100`, token);
+  const status = statuses.find(status => status.context === "ragnos/fork-infrastructure-review");
+  const review = status ? await ghFetch(`/repos/${repo}/${reviewApiRoute(status)}`, token) : null;
+  const sourceStatus = statuses.find(status => status.context === "ragnos/fork-source-review");
+  const sourceReview = sourceStatus ? await ghFetch(`/repos/${repo}/${reviewApiRoute(sourceStatus)}`, token) : null;
+  const flags = requireIndependentInfrastructureReview(detectedFlags, statuses, source, review, sourceReview);
+  if (flags.length) throw new Error(`read-only source scan failed: ${JSON.stringify(sanitizeFlags(flags))}`);
+  console.log(`[fork-security] exact push source scan passed for ${files.length} changed files`);
+}
+
 async function main() {
   await runAuditGate();
-  if (!process.argv.includes("--audit-only")) await runPullRequestScan();
+  if (process.env.GITHUB_EVENT_NAME === "push") await runCommitScan();
+  else await runPullRequestScan();
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

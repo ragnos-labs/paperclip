@@ -5,10 +5,19 @@ import { requireIndependentInfrastructureReview } from "../ragnos-fork-security-
 const source = "a".repeat(40);
 const statuses = ["ragnos/fork-source-review", "ragnos/fork-infrastructure-review"].map(context => ({
   context, state: "success", url: `https://api.github.com/repos/ragnos-labs/paperclip/statuses/${source}`,
-  target_url: "https://github.com/ragnos-labs/paperclip/pull/1",
+  target_url: "https://github.com/ragnos-labs/paperclip/pull/1#pullrequestreview-2",
 }));
-const checks = [{ name: "RAGnos Fork CI", head_sha: source, status: "completed", conclusion: "success" }];
-const valid = { source, branch: source, statuses, checks };
+const reviews = Object.fromEntries(["source", "infrastructure"].map(scope => [scope, {
+  html_url: "https://github.com/ragnos-labs/paperclip/pull/1#pullrequestreview-2", commit_id: source,
+  state: "COMMENTED", submitted_at: "2026-10-05T00:00:00Z", author_association: "OWNER",
+  body: "```ragnos-review\n" + JSON.stringify({ schema: "ragnos_fork_independent_review/v1", source_sha: source,
+    scope, decision: "pass", independent: true, reviewer: `/root/${scope === "source" ? "recovery_review" : "release_review"}`, blockers: [] }) + "\n```",
+}]));
+const checks = [{ name: "RAGnos Fork CI", head_sha: source, status: "completed", conclusion: "success",
+  app: { slug: "github-actions" }, details_url: "https://github.com/ragnos-labs/paperclip/actions/runs/1/job/1" }];
+const workflowRun = { head_sha: source, conclusion: "success", path: ".github/workflows/ragnos-fork-ci.yml",
+  repository: { full_name: "ragnos-labs/paperclip" } };
+const valid = { source, branch: source, statuses, checks, reviews, workflowRun };
 test("requires current maintenance head, both exact independent reviews, and green fork CI", () => {
   assert.doesNotThrow(() => validateReviewedReleaseSource(valid));
   for (const changed of [{ branch: "b".repeat(40) }, { source: "master" }, { statuses: [] },
@@ -20,7 +29,25 @@ test("requires current maintenance head, both exact independent reviews, and gre
 });
 test("infrastructure review cannot waive other scanner findings or use a historical commit", () => {
   const flags = [{ check: "ci-tampering", file: ".github/workflows/ragnos-fork-ci.yml" }, { check: "secret-scan", file: "server/test.ts" }];
-  assert.deepEqual(requireIndependentInfrastructureReview(flags, statuses, source), [flags[1]]);
+  assert.deepEqual(requireIndependentInfrastructureReview(flags, statuses, source, reviews.infrastructure), [flags[1]]);
   assert.deepEqual(requireIndependentInfrastructureReview(flags, statuses, "b".repeat(40)), flags);
   assert.deepEqual(requireIndependentInfrastructureReview(flags, [], source), flags);
+});
+
+test("rejects stale, held, unrelated, forged-app and wrong-workflow receipts", () => {
+  for (const changed of [ { reviews: {} }, { reviews: { ...reviews, source: { ...reviews.source, commit_id: "b".repeat(40) } } },
+    { reviews: { ...reviews, source: { ...reviews.source, state: "PENDING" } } },
+    { reviews: { ...reviews, source: { ...reviews.source, body: reviews.source.body.replace('"pass"', '"hold"') } } },
+    { checks: [{ ...checks[0], app: { slug: "other-app" } }] },
+    { workflowRun: { ...workflowRun, path: ".github/workflows/other.yml" } },
+    { workflowRun: { ...workflowRun, head_sha: "b".repeat(40) } } ])
+    assert.throws(() => validateReviewedReleaseSource({ ...valid, ...changed }));
+});
+
+test("only a current explicit test finding disposition can admit a process-spawning test", () => {
+  const flags = [{ check: "suspicious-test", file: "scripts/fixture.test.js" }, { check: "secret-scan", file: "scripts/fixture.test.js" }];
+  assert.deepEqual(requireIndependentInfrastructureReview(flags, statuses, source, reviews.infrastructure, reviews.source), flags);
+  const reviewed = { ...reviews.source, body: reviews.source.body.replace('"blockers":[]', '"blockers":[],"accepted_findings":[{"check":"suspicious-test","file":"scripts/fixture.test.js","reason":"Reviewed repository CLI with synthetic local inputs only"}]') };
+  assert.deepEqual(requireIndependentInfrastructureReview(flags, statuses, source, reviews.infrastructure, reviewed), [flags[1]]);
+  assert.deepEqual(requireIndependentInfrastructureReview(flags, statuses, "b".repeat(40), reviews.infrastructure, reviewed), flags);
 });

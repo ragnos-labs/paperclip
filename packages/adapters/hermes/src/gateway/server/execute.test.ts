@@ -287,7 +287,7 @@ describe("accepted remote run recovery", () => {
   it("observes the bound job without creating work or subscribing to its event stream", async () => {
     const { binding, fetchMock } = await acceptAndDetach();
     fetchMock.mockClear().mockResolvedValue(new Response(JSON.stringify({ status: "completed", output: "retained output" })));
-    const ctx = makeCtx({ ...config, apiKey: "rotated-synthetic-key" });
+    const ctx = makeCtx({ ...config, apiKey: "rotated-test-key" });
     ctx.remoteRunRecovery = binding;
     const result = await execute(ctx);
     expect(result.exitCode).toBe(0);

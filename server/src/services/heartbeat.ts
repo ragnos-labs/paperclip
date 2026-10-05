@@ -19987,6 +19987,13 @@ export function heartbeatService(
     return promise;
   }
 
+  function hasConfirmedRemoteTerminal(result: AdapterExecutionResult) {
+    const status = readNonEmptyString(result.resultJson?.status);
+    if (!status || !["completed", "succeeded", "done", "failed", "error", "cancelled", "canceled"].includes(status)) return false;
+    return !["cancelled", "canceled"].includes(status) ||
+      parseObject(result.resultJson?.executionCancellation).state === "acknowledged";
+  }
+
   async function persistRemoteRunResult(input: {
     run: typeof heartbeatRuns.$inferSelect;
     agent: typeof agents.$inferSelect;
@@ -20119,14 +20126,7 @@ export function heartbeatService(
       });
       await logWrites;
       if (result.remoteRunDetached || control.observerDetachController.signal.aborted) return;
-      const remoteStatus = readNonEmptyString(result.resultJson?.status);
-      if (!remoteStatus || !["completed", "succeeded", "done", "failed", "error", "cancelled", "canceled"].includes(remoteStatus)) {
-        throw new Error("Accepted remote status remains unverified");
-      }
-      if ((remoteStatus === "cancelled" || remoteStatus === "canceled") &&
-          parseObject(result.resultJson?.executionCancellation).state !== "acknowledged") {
-        throw new Error("Native worker stop remains unverified");
-      }
+      if (!hasConfirmedRemoteTerminal(result)) throw new Error("Accepted remote status remains unverified");
       const status = result.timedOut ? "timed_out" : result.signal === "SIGTERM" ? "cancelled" :
         result.exitCode === 0 ? "succeeded" : "failed";
       const settled = await persistRemoteRunResult({ run, agent, status, result, handle: resumed.handle,
@@ -24642,9 +24642,12 @@ export function heartbeatService(
             if (!guardedDispatch.dispatched) return;
             adapterResult = await guardedDispatch.resultPromise;
           }
-          if (isRemoteObserver && !readLegacyRemoteRunBinding(run) &&
-              !(adapterResult.executionRecovery?.kind === "bootstrap" &&
-                adapterResult.executionRecovery.providerWorkStarted === false)) {
+          const noRemoteWork = (adapterResult.executionRecovery?.kind === "bootstrap" &&
+            adapterResult.executionRecovery.providerWorkStarted === false) ||
+            (parseObject(adapterResult.resultJson?.executionCancellation).state === "acknowledged" &&
+              parseObject(adapterResult.resultJson?.executionCancellation).proof === "hermes_gateway_not_dispatched");
+          if (isRemoteObserver && (readLegacyRemoteRunBinding(run)
+              ? !hasConfirmedRemoteTerminal(adapterResult) : !noRemoteWork)) {
             await withLegacyObserverOwnership(db, run, async tx => {
               await tx.update(heartbeatRuns).set({ errorCode: "hermes_gateway_observation_held",
                 error: "Remote create or accepted binding requires reconciliation", updatedAt: new Date() })
@@ -24854,7 +24857,7 @@ export function heartbeatService(
           throw adapterErr;
         } finally {
           try {
-            if (!remoteObserverDetached && !observerOwnershipLost()) await revokeHeartbeatRunGatewayTokens({
+            if (!isRemoteObserver && !remoteObserverDetached && !observerOwnershipLost()) await revokeHeartbeatRunGatewayTokens({
               db,
               companyId: agent.companyId,
               runId: run.id,
@@ -24961,7 +24964,8 @@ export function heartbeatService(
         const latestRun = await getRun(run.id);
         if (isHeartbeatRunTerminalStatus(latestRun?.status)) {
           outcome = latestRun.status;
-        } else if (executionControl.controller.signal.aborted) {
+        } else if (executionControl.controller.signal.aborted &&
+          (!isRemoteObserver || adapterResult.signal === "SIGTERM")) {
           outcome = "cancelled";
         } else if (adapterResult.nativeFinalization) {
           const nativeTerminal =
@@ -25170,6 +25174,9 @@ export function heartbeatService(
             } }),
         } : await setOwnedRunStatusIfRunning(run.id, status, finalRunPatch, expectedControllerBootId);
         remoteTerminalCommitted = isRemoteObserver && persistedRunWrite.updated;
+        if (remoteTerminalCommitted) await revokeHeartbeatRunGatewayTokens({ db,
+          companyId: run.companyId, runId: run.id }).catch(err =>
+            logger.warn({ err, runId: run.id }, "failed to revoke terminal run gateway tokens"));
         let persistedRun: typeof heartbeatRuns.$inferSelect | null =
           persistedRunWrite.run;
         if (isRemoteObserver && !persistedRunWrite.updated) {
@@ -29075,6 +29082,8 @@ export function heartbeatService(
         ? captureAdapterStopOwnership(run.id)
         : undefined;
     const control = stopOwnership?.control;
+    if (claimedAdapterType(run) === "hermes_gateway" && run.status === "running" && !control)
+      throw conflict("Hermes termination is unverified; accepted work remains held for observation reconciliation.");
     // Capture the existing adapter owner before waiting on the run lock. Then
     // atomically fence preparation and refresh the selected runtime, so Stop
     // cannot miss a native handoff that won after its first read.
@@ -29141,26 +29150,23 @@ export function heartbeatService(
               .set({
                 error: reason,
                 errorCode,
-                resultJson: {
-                  ...parseObject(run.resultJson),
-                  ...resultJson,
-                  ...(!running
-                    ? {
-                        executionCancellation: {
-                          state: "requested",
-                          requestedAt: new Date().toISOString(),
-                        },
-                      }
-                    : {}),
-                },
+                resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
+                  (${JSON.stringify({ ...resultJson, ...(!running ? { executionCancellation: {
+                    state: "requested", requestedAt: new Date().toISOString(),
+                  } } : {}) })}::jsonb - 'remoteRunBinding' - 'remoteRunLogResume')`,
                 updatedAt: new Date(),
               })
               .where(
                 and(
-                  eq(heartbeatRuns.id, run.id),
+                  eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
                   eq(heartbeatRuns.status, "running"),
+                  ...(claimedAdapterType(run) === "hermes_gateway"
+                    ? [legacyObserverOwnerCondition(legacyControllerBootId)] : []),
                 ),
-              );
+              ).returning({ id: heartbeatRuns.id }).then(rows => {
+                if (claimedAdapterType(run) === "hermes_gateway" && rows.length === 0)
+                  throw conflict("Hermes observation ownership changed; cancellation requires its current owner.");
+              });
             control.controller.abort(new Error(reason));
           }
           let terminationSettled = false;
@@ -29212,6 +29218,9 @@ export function heartbeatService(
             }
           }
 
+          if (claimedAdapterType(run) === "hermes_gateway" && run.status === "running") {
+            throw conflict("Hermes termination is unverified; accepted work remains held for observation reconciliation.");
+          }
           const finishedAt = new Date();
           const persistedCancellationResult =
             run.runtimeMode === "native"

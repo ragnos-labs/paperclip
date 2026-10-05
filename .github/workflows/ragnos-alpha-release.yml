@@ -399,7 +399,7 @@ jobs:
                 "linux-amd64.provenance.json",
                 "linux-arm64.provenance.json",
                 "migration-manifest.txt",
-                "release-receipt.json",
+                "release-receipt.json"
               ] | sort))
             ' <<< "$release" >/dev/null; then
               break

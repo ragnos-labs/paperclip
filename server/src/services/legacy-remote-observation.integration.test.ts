@@ -249,4 +249,32 @@ describe("accepted Hermes observation ownership", () => {
     expect((await fixture.store.read(fixture.handle)).content).toBe(fixture.prefix);
   });
 
+  it("operator Stop holds an accepted job without a registered observer or native proof", async () => {
+    const fixture = await acceptedWithLog("paused");
+    const before = await saved(fixture.run.id);
+    await expect(heartbeatService(db).cancelRun(fixture.run.id)).rejects.toThrow("termination is unverified");
+    expect(await saved(fixture.run.id)).toEqual(before);
+    const [task] = await db.select().from(issues).where(eq(issues.id, fixture.issueId));
+    expect(task.executionRunId).toBe(fixture.run.id);
+    expect((await fixture.store.read(fixture.handle)).content).toBe(fixture.prefix);
+  });
+  it("operator Stop holds an observed job whose provider stop remains unconfirmed", async () => {
+    const fixture = await acceptedWithLog();
+    let ready!: () => void;
+    const registered = new Promise<void>(resolve => { ready = resolve; });
+    adapterExecute.mockImplementation(async context => {
+      await context.onCancellationReady(); ready();
+      await new Promise<void>(resolve => context.signal.addEventListener("abort", () => resolve(), { once: true }));
+      return { exitCode: 1, signal: "SIGTERM", timedOut: false, resultJson: { status: "running" } };
+    });
+    const service = heartbeatService(db);
+    await service.reapOrphanedRuns({ staleThresholdMs: 0 }); await registered;
+    await expect(service.cancelRun(fixture.run.id)).rejects.toThrow("termination is unverified");
+    await service.drainActiveRunExecutions();
+    expect(await saved(fixture.run.id)).toMatchObject({ status: "running", externalRunId: binding.providerRunId });
+    expect(readLegacyRemoteRunBinding(await saved(fixture.run.id))).toEqual(binding);
+    const [task] = await db.select().from(issues).where(eq(issues.id, fixture.issueId));
+    expect(task.executionRunId).toBe(fixture.run.id);
+  });
+
 });

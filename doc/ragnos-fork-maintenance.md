@@ -59,8 +59,13 @@ fork release/security script checks. The release gate requires the exact current
 statuses: `ragnos/fork-source-review` and `ragnos/fork-infrastructure-review`.
 Each status links a fork PR containing the actual independent review receipt.
 The status publisher records review evidence; it cannot replace independent review.
-Infrastructure review may admit infrastructure scanner findings only. Other
-security findings remain blocking. Historical commit exemptions are removed.
+Infrastructure review admits only infrastructure findings. A process-spawning
+test requires an explicit exact-file disposition in the current independent
+review receipt for its owning scope. Secret and supply-chain findings always
+block. Historical commit exemptions are removed. The production dependency
+audit is bound to the unchanged installed-upstream lockfile, SHA-256 recorded
+in the baseline. Its inherited findings are 11 low, 31 moderate and 22 high
+advisories; regression validation does not certify those dependencies secure.
 
 The existing protected `paperclip-alpha-release` environment retains its required
 human reviewer. Its maintenance-branch admission must be configured without
@@ -77,3 +82,9 @@ then run frozen install and the mandatory recovery checks. Do not push rehearsal
 results to production or introduce an automated update service. When upstream
 provides equivalent accepted-job recovery, remove the matching downstream patch
 only after these invariants pass against that exact upstream source.
+
+The standalone bundled-plugin SDK bootstrap fix is the bounded plugin subset of
+upstream [PR 13363](https://github.com/paperclipai/paperclip/pull/13363), head
+`1e96e1a469181c9691a1d6f42997ab78f2dfb99f`. It repairs the two reproduced HTTP
+400 responses with explicit SDK linking when install lifecycle scripts are off.
+Document/conversation changes from that proposal are not included.
