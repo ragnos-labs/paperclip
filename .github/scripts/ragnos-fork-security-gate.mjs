@@ -94,7 +94,9 @@ export function requireIndependentInfrastructureReview(flags, statuses, headSha,
   for (const [scope, evidence] of [["infrastructure", review], ["source", sourceReview]]) {
     try { receipts[scope] = validateIndependentReview(statuses.find(status =>
       status.context === `ragnos/fork-${scope}-review`), headSha, scope, evidence); }
-    catch { /* Missing or stale evidence leaves the finding blocking. */ }
+    catch (error) {
+      console.error(`[fork-security] ${scope} review rejected: ${error instanceof SyntaxError ? "invalid_receipt_json" : "invalid_review_identity_or_receipt"}; source=${headSha}; status_count=${statuses.length}; matching_status=${statuses.some(status => status.context === `ragnos/fork-${scope}-review`)}; review_present=${Boolean(evidence)}`);
+    }
   }
   return flags.filter(flag => {
     if (flag.check === "ci-tampering") return !receipts.infrastructure;
