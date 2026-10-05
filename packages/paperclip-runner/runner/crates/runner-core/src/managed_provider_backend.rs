@@ -2504,11 +2504,7 @@ mod tests {
     fn managed_crash_does_not_manufacture_an_accepted_result() {
         assert_eq!(
             managed_failure_event_types(false),
-            vec![
-                "session.failed",
-                "turn.failed",
-                "run.terminal",
-            ]
+            vec!["session.failed", "turn.failed", "run.terminal",]
         );
     }
 

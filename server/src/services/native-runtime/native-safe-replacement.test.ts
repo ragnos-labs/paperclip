@@ -227,6 +227,7 @@ const support = externalDatabaseUrl
         const result = await dispatch.cancelStaleQueuedRun({ companyId: source.companyId, runId: successors[0]!.id, expectedStatus: "queued", now: new Date() });
         expect(result.outcome).toBe("not_stale");
       } else {
+        if (mode === "finish_mcp_spoof" || mode === "finish_namespace_spoof") expect(retire).not.toHaveBeenCalled();
         expect(hold!.evidence.automaticRecovery).toEqual({ replay: "blocked" });
       }
     });

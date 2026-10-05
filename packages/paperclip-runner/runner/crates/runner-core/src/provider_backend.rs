@@ -5122,7 +5122,13 @@ mod tests {
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].event_type, "run.terminal");
         assert_eq!(failed[0].payload["runTerminalState"], "failed");
-        admit_terminal_tool_authority(&mut state, "paperclip_finish", &valid_opencode_result(), false).unwrap();
+        admit_terminal_tool_authority(
+            &mut state,
+            "paperclip_finish",
+            &valid_opencode_result(),
+            false,
+        )
+        .unwrap();
         let events = terminal_events(&state, "turn.failed", None);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "run.terminal");
