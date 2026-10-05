@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
+  AdapterRemoteRunBinding,
   UsageSummary,
 } from "@paperclipai/adapter-utils";
 import {
@@ -550,9 +552,12 @@ async function pollStatus(input: {
     try {
       const status = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.state.runId)}`), {
         method: "GET",
+        redirect: "error",
         headers: input.headers,
         signal: input.signal,
       });
+      const reportedRunId = extractRunId(status);
+      if (reportedRunId && reportedRunId !== input.state.runId) throw new Error("Hermes status belongs to a different run.");
       const normalized = extractStatus(status);
       if (normalized && TERMINAL_STATUSES.has(normalized)) {
         markTerminal(input.state, {
@@ -763,6 +768,7 @@ async function stopRun(input: {
   try {
     const stopped = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.runId)}/stop`), {
       method: "POST",
+      redirect: "error",
       headers: input.headers,
       signal: AbortSignal.timeout(STOP_GRACE_MS),
     });
@@ -785,9 +791,12 @@ async function fetchFinalStatus(input: {
     try {
       const status = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.runId)}`), {
         method: "GET",
+        redirect: "error",
         headers: input.headers,
         signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
       });
+      const reportedRunId = extractRunId(status);
+      if (reportedRunId && reportedRunId !== input.runId) return null;
       const record = asRecord(status);
       const normalized = extractStatus(status);
       if (normalized && TERMINAL_STATUSES.has(normalized)) return record;
@@ -908,8 +917,38 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   ]);
   const body = buildRunBody(ctx, sessionKey);
   const createRunUrl = apiUrl(baseUrl, "/v1/runs");
+  // Credential rotation is allowed. Endpoint, profile headers and conversation
+  // identity must still match before observing any previously accepted work.
+  const transportFingerprint = createHash("sha256").update(JSON.stringify({
+    baseUrl: baseUrl.href,
+    headers: Object.entries(extraHeaders).map(([key, value]) => [key.toLowerCase(), value])
+      .sort(([left], [right]) => left.localeCompare(right)),
+    sessionKey,
+    strategy,
+  })).digest("hex");
+  const recovery = ctx.remoteRunRecovery;
+  if (recovery && (recovery.adapterType !== ADAPTER_TYPE ||
+      !nonEmpty(recovery.providerRunId) ||
+      recovery.transportFingerprint !== transportFingerprint ||
+      (recovery.deadlineAt !== null && !Number.isFinite(Date.parse(recovery.deadlineAt))))) {
+    return {
+      exitCode: 1, signal: null, timedOut: false,
+      errorCode: "hermes_gateway_recovery_binding_invalid",
+      errorMessage: "Hermes recovery binding does not match this run's transport.",
+    };
+  }
+  const deadlineAt = recovery?.deadlineAt ?? (timeoutMs > 0 ? new Date(Date.now() + timeoutMs).toISOString() : null);
+  // Null on a recovery binding is authoritative, even if config changed later.
+  const executionDeadlineAt = recovery ? recovery.deadlineAt : deadlineAt;
+  let acceptedBinding: AdapterRemoteRunBinding | null = recovery ?? null;
+  const detachedResult = (): AdapterExecutionResult => ({
+    exitCode: null, signal: null, timedOut: false, remoteRunDetached: true,
+    provider: "hermes_gateway",
+    ...(acceptedBinding ? { resultJson: { run_id: acceptedBinding.providerRunId, remoteRunBinding: acceptedBinding } } : {}),
+  });
+  if (ctx.observerDetachSignal?.aborted && !ctx.signal?.aborted) return detachedResult();
 
-  await ctx.onCancellationReady?.();
+  if (!recovery) await ctx.onCancellationReady?.();
 
   const cancelledBeforeStart = (): AdapterExecutionResult => ({
     exitCode: 1,
@@ -925,51 +964,64 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       },
     },
   });
-  if (ctx.signal?.aborted) return cancelledBeforeStart();
+  if (ctx.signal?.aborted && !recovery) return cancelledBeforeStart();
 
-  await ctx.onMeta?.({
-    adapterType: ADAPTER_TYPE,
-    command: "POST /v1/runs",
-    commandArgs: [createRunUrl],
-    context: {
-      runId: ctx.runId,
-      timeoutSec,
-      eventReconnectMs: reconnectMs,
-      sessionKeyStrategy: strategy,
-      hasSessionKey: Boolean(sessionKey),
-    },
-  });
-  await ctx.onLog("stdout", `[hermes-gateway] creating run at ${createRunUrl} (timeout=${timeoutSec}s, session=${strategy})\n`);
-  await ctx.onLog("stdout", `[hermes-gateway] request headers (redacted): ${stringifyForLog(redactForLog(runHeaders, [], 0, redactText), 3_000)}\n`);
+  const reportInvocation = async () => {
+    await ctx.onMeta?.({
+      adapterType: ADAPTER_TYPE,
+      command: recovery ? "GET /v1/runs/:runId" : "POST /v1/runs",
+      commandArgs: [recovery ? apiUrl(baseUrl, `/v1/runs/${encodeURIComponent(recovery.providerRunId)}`) : createRunUrl],
+      context: {
+        runId: ctx.runId,
+        timeoutSec,
+        eventReconnectMs: reconnectMs,
+        sessionKeyStrategy: strategy,
+        hasSessionKey: Boolean(sessionKey),
+      },
+    });
+    await ctx.onLog("stdout", recovery
+      ? `[hermes-gateway] observing accepted run ${recovery.providerRunId} (timeout=${timeoutSec}s, session=${strategy})\n`
+      : `[hermes-gateway] creating run at ${createRunUrl} (timeout=${timeoutSec}s, session=${strategy})\n`);
+    await ctx.onLog("stdout", `[hermes-gateway] request headers (redacted): ${stringifyForLog(redactForLog(runHeaders, [], 0, redactText), 3_000)}\n`);
+  };
+  if (!recovery) await reportInvocation();
 
-  let runId: string | null = null;
+  let runId: string | null = recovery?.providerRunId ?? null;
   try {
     // Meta/log callbacks are asynchronous; cancellation may arrive during them.
-    if (ctx.signal?.aborted) return cancelledBeforeStart();
+    if (ctx.signal?.aborted && !recovery) return cancelledBeforeStart();
+    if (ctx.observerDetachSignal?.aborted && !ctx.signal?.aborted) return detachedResult();
     // This adapter has no local child process, so crossing into the first
     // remote create request is its dispatch boundary. Report it before the
     // request can block so continuation gates may release their issue lock.
-    ctx.onDispatch?.();
-    const created = await fetchJson(createRunUrl, {
-      method: "POST",
-      redirect: "error",
-      headers: runHeaders,
-      body: JSON.stringify(body),
-    });
-    runId = extractRunId(created);
-    if (!runId) {
-      return {
-        exitCode: 1,
-        signal: null,
-        timedOut: false,
-        errorCode: "hermes_gateway_protocol_error",
-        errorMessage: "Hermes /v1/runs response did not include run_id.",
-        errorMeta: { response: redactForLog(created, [], 0, redactText) as Record<string, unknown> },
+    if (!recovery) {
+      ctx.onDispatch?.();
+      const created = await fetchJson(createRunUrl, {
+        method: "POST",
+        redirect: "error",
+        headers: runHeaders,
+        body: JSON.stringify(body),
+      });
+      runId = extractRunId(created);
+      if (!runId) {
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorCode: "hermes_gateway_protocol_error",
+          errorMessage: "Hermes /v1/runs response did not include run_id.",
+          errorMeta: { response: redactForLog(created, [], 0, redactText) as Record<string, unknown> },
+        };
+      }
+      acceptedBinding = {
+        adapterType: ADAPTER_TYPE, providerRunId: runId,
+        transportFingerprint, deadlineAt: executionDeadlineAt,
       };
     }
   } catch (err) {
     return errorResult(err, redactText);
   }
+  if (!runId) return errorResult(new Error("Missing accepted Hermes run binding."), redactText);
 
   let stopPromise: Promise<Record<string, unknown> | null> | null = null;
   const requestStop = () => {
@@ -991,29 +1043,39 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const state = createExecutionState(runId);
   const controller = new AbortController();
-  void consumeEvents({
-    ctx,
-    baseUrl,
-    headers: eventHeaders,
-    state,
-    signal: controller.signal,
-    reconnectMs,
-    redactText,
-  }).catch(() => undefined);
-  void pollStatus({
-    ctx,
-    baseUrl,
-    headers: eventHeaders,
-    state,
-    signal: controller.signal,
-    intervalMs: pollIntervalMs,
-    redactText,
-  }).catch(() => undefined);
+  // Hermes event streams are single-consumer. Recovery uses status polling,
+  // so a stale observer cannot consume the replacement observer's result.
+  const startObservation = () => {
+    if (!recovery) void consumeEvents({
+      ctx,
+      baseUrl,
+      headers: eventHeaders,
+      state,
+      signal: controller.signal,
+      reconnectMs,
+      redactText,
+    }).catch(() => undefined);
+    void pollStatus({
+      ctx,
+      baseUrl,
+      headers: eventHeaders,
+      state,
+      signal: controller.signal,
+      intervalMs: pollIntervalMs,
+      redactText,
+    }).catch(() => undefined);
+  };
 
   let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   const timeoutPromise = new Promise<"timeout">((resolve) => {
-    if (timeoutMs <= 0) return;
-    timeoutTimer = setTimeout(() => resolve("timeout"), timeoutMs);
+    if (executionDeadlineAt === null) return;
+    timeoutTimer = setTimeout(() => resolve("timeout"), Math.max(0, Date.parse(executionDeadlineAt) - Date.now()));
+  });
+  let onDetach: (() => void) | null = null;
+  const detachPromise = new Promise<"detached">((resolve) => {
+    onDetach = () => { controller.abort(); resolve("detached"); };
+    if (ctx.observerDetachSignal?.aborted) onDetach();
+    else ctx.observerDetachSignal?.addEventListener("abort", onDetach, { once: true });
   });
 
   let stopTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1075,11 +1137,42 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   try {
+    // Arm cancellation, detachment and the absolute deadline before any callback
+    // can stall persistence of an already accepted job. Never observe before
+    // that persistence completes, and never replay when its outcome is unknown.
+    const observe = async () => {
+      if (recovery) {
+        void reportInvocation().catch(() => undefined);
+        await ctx.onCancellationReady?.();
+      } else if (acceptedBinding) {
+        await ctx.onRemoteRunStarted?.(acceptedBinding);
+      }
+      if (!controller.signal.aborted) startObservation();
+      return state.terminalPromise;
+    };
+    const observation = observe().catch((error: unknown) => ({ bindingError: error }));
     diagnosticLog(ctx, "stdout", `[hermes-gateway] run created: ${runId}\n`);
-    const outcome = await Promise.race([state.terminalPromise, timeoutPromise, stopGracePromise]);
+    const outcome = await Promise.race([observation, timeoutPromise, stopGracePromise, detachPromise]);
     if (timeoutTimer) clearTimeout(timeoutTimer);
     if (stopTimer) clearTimeout(stopTimer);
     controller.abort();
+    if (typeof outcome === "object" && "bindingError" in outcome) {
+      if (ctx.signal?.aborted) {
+        await requestStop();
+        return cancelledResult(await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS }));
+      }
+      return {
+        ...errorResult(outcome.bindingError, redactText),
+        executionRecovery: undefined,
+        errorCode: "hermes_gateway_recovery_binding_failed",
+        resultJson: { run_id: runId, remoteRunBinding: acceptedBinding },
+      };
+    }
+    if (outcome === "detached" || ctx.observerDetachSignal?.aborted) {
+      if (!ctx.signal?.aborted) return detachedResult();
+      await requestStop();
+      return cancelledResult(await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS }));
+    }
 
     if (outcome === "timeout") {
       await requestStop();
@@ -1126,6 +1219,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (timeoutTimer) clearTimeout(timeoutTimer);
     if (stopTimer) clearTimeout(stopTimer);
     controller.abort();
+    if (onDetach) ctx.observerDetachSignal?.removeEventListener("abort", onDetach);
     if (ctx.signal) {
       ctx.signal.removeEventListener("abort", abortListener);
       if (onAbortForGrace) {

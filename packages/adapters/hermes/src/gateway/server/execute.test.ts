@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { describe, expect, it, vi, afterEach } from "vitest";
-import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
+import type { AdapterExecutionContext, AdapterRemoteRunBinding } from "@paperclipai/adapter-utils";
 import { execute, mapFinalResultForTest, parseSseFramesForTest, resolveSessionKey } from "./execute.js";
 import { testEnvironment } from "./test.js";
 
@@ -67,6 +67,308 @@ function hungRequest(init: RequestInit | undefined, body: boolean): Promise<Resp
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("accepted remote run recovery", () => {
+  const config = { apiBaseUrl: "http://localhost:8642", apiKey: "synthetic-key", timeoutSec: 0 };
+
+  async function acceptAndDetach() {
+    const detach = new AbortController();
+    let binding!: AdapterRemoteRunBinding;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ run_id: "accepted-run" })),
+    );
+    const ctx = makeCtx(config);
+    ctx.observerDetachSignal = detach.signal;
+    ctx.onRemoteRunStarted = async (value) => { binding = value; detach.abort(); };
+    const result = await execute(ctx);
+    expect(result.remoteRunDetached).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("POST");
+    return { binding, fetchMock };
+  }
+
+  it("awaits durable binding before observing accepted work", async () => {
+    const detach = new AbortController();
+    let release!: () => void;
+    let bound!: () => void;
+    const bindingReached = new Promise<void>((resolve) => { bound = resolve; });
+    const bindingCommit = new Promise<void>((resolve) => { release = resolve; });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ run_id: "accepted-run" })),
+    );
+    const ctx = makeCtx(config);
+    ctx.observerDetachSignal = detach.signal;
+    ctx.onRemoteRunStarted = async () => { bound(); await bindingCommit; };
+    const execution = execute(ctx);
+    await bindingReached;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    detach.abort();
+    release();
+    expect((await execution).remoteRunDetached).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["cancel", "detach", "timeout"])("services %s while durable storage never settles", async (action) => {
+    const cancel = new AbortController();
+    const detach = new AbortController();
+    let reached!: () => void;
+    const bindingReached = new Promise<void>((resolve) => { reached = resolve; });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+      new Response(JSON.stringify(String(input).endsWith("/v1/runs")
+        ? { run_id: "accepted-run" }
+        : { run_id: "accepted-run", status: "cancelled", completed: false, interrupted: true, partial: false })),
+    );
+    const ctx = makeCtx({ ...config, timeoutSec: action === "timeout" ? 0.02 : 0 });
+    ctx.signal = cancel.signal;
+    ctx.observerDetachSignal = detach.signal;
+    ctx.onRemoteRunStarted = () => { reached(); return new Promise<void>(() => {}); };
+    const execution = execute(ctx);
+    await bindingReached;
+    if (action === "cancel") cancel.abort();
+    if (action === "detach") detach.abort();
+    const result = await execution;
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/v1/runs"))).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/events"))).toBe(false);
+    if (action === "detach") {
+      expect(result.remoteRunDetached).toBe(true);
+      expect(result.resultJson?.run_id).toBe("accepted-run");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } else {
+      expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/stop"))).toHaveLength(1);
+      expect(result.timedOut).toBe(action === "timeout");
+    }
+  });
+
+  it("retains accepted identity without replay evidence when durable storage rejects", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ run_id: "accepted-run" })));
+    const ctx = makeCtx(config);
+    ctx.onRemoteRunStarted = async () => { throw new Error("Synthetic persistence failure"); };
+    const result = await execute(ctx);
+    expect(result.errorCode).toBe("hermes_gateway_recovery_binding_failed");
+    expect(result.resultJson).toMatchObject({ run_id: "accepted-run", remoteRunBinding: { providerRunId: "accepted-run" } });
+    expect(result.executionRecovery).toBeUndefined();
+    expect(result.resultJson?.executionCancellation).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("awaits an in-flight stop when persistence rejects after operator cancellation", async () => {
+    const cancel = new AbortController();
+    let reached!: () => void;
+    let rejectBinding!: (error: Error) => void;
+    let stopReached!: () => void;
+    let releaseStop!: (response: Response) => void;
+    const bindingReached = new Promise<void>((resolve) => { reached = resolve; });
+    const stopStarted = new Promise<void>((resolve) => { stopReached = resolve; });
+    const persistence = new Promise<void>((_resolve, reject) => { rejectBinding = reject; });
+    const terminal = { run_id: "accepted-run", status: "cancelled", completed: false, interrupted: true, partial: false };
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "accepted-run" }));
+      if (String(input).endsWith("/stop")) {
+        stopReached();
+        return new Promise<Response>((resolve) => { releaseStop = resolve; });
+      }
+      return new Response(JSON.stringify(terminal));
+    });
+    const ctx = makeCtx(config);
+    ctx.signal = cancel.signal;
+    ctx.onRemoteRunStarted = () => { reached(); return persistence; };
+    let settled = false;
+    const execution = execute(ctx).then((result) => { settled = true; return result; });
+    await bindingReached;
+    cancel.abort();
+    await stopStarted;
+    rejectBinding(new Error("Synthetic persistence failure after cancellation"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+    releaseStop(new Response(JSON.stringify(terminal)));
+    const result = await execution;
+    expect(result.resultJson?.run_id).toBe("accepted-run");
+    expect(result.resultJson?.executionCancellation).toMatchObject({ proof: "hermes_gateway_terminal_cancelled" });
+    expect(result.executionRecovery).toBeUndefined();
+  });
+
+  it.each(["meta", "log"])("services recovered-job cancellation when %s diagnostics never settle", async (callback) => {
+    const { binding, fetchMock } = await acceptAndDetach();
+    fetchMock.mockClear().mockImplementation(async () => new Response(JSON.stringify({
+      run_id: "accepted-run", status: "cancelled", completed: false, interrupted: true, partial: false,
+    })));
+    const cancel = new AbortController();
+    cancel.abort();
+    const ctx = makeCtx(config);
+    ctx.remoteRunRecovery = binding;
+    ctx.signal = cancel.signal;
+    if (callback === "meta") ctx.onMeta = () => new Promise<void>(() => {});
+    else ctx.onLog = () => new Promise<void>(() => {});
+    expect((await execute(ctx)).resultJson?.executionCancellation).toMatchObject({ proof: "hermes_gateway_terminal_cancelled" });
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/stop"))).toHaveLength(1);
+  });
+
+  it("does not finalize from a status payload naming a different job", async () => {
+    const { binding, fetchMock } = await acceptAndDetach();
+    const detach = new AbortController();
+    let polled!: () => void;
+    const polling = new Promise<void>((resolve) => { polled = resolve; });
+    fetchMock.mockClear().mockImplementation(async () => {
+      polled();
+      return new Response(JSON.stringify({ run_id: "other-run", status: "completed", output: "wrong output" }));
+    });
+    const ctx = makeCtx(config);
+    ctx.remoteRunRecovery = binding;
+    ctx.observerDetachSignal = detach.signal;
+    const execution = execute(ctx);
+    await polling;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    detach.abort();
+    const result = await execution;
+    expect(result.remoteRunDetached).toBe(true);
+    expect(result.summary).toBeUndefined();
+    expect(fetchMock.mock.calls[0][1]?.redirect).toBe("error");
+  });
+
+  it("refuses a real status redirect without visiting another job", async () => {
+    let redirectedVisits = 0;
+    const server = createServer((request, response) => {
+      if (request.url === "/v1/runs" && request.method === "POST") {
+        response.end(JSON.stringify({ run_id: "accepted-run" }));
+      } else if (request.url === "/v1/runs/accepted-run") {
+        response.writeHead(302, { Location: "/v1/runs/other-run" });
+        response.end();
+      } else {
+        redirectedVisits += 1;
+        response.end(JSON.stringify({ run_id: "accepted-run", status: "completed", output: "wrong output" }));
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      vi.spyOn(globalThis, "fetch").mockImplementation(nativeFetch);
+      const address = server.address() as { port: number };
+      const nativeConfig = { ...config, apiBaseUrl: `http://127.0.0.1:${address.port}` };
+      const firstDetach = new AbortController();
+      let binding!: AdapterRemoteRunBinding;
+      const first = makeCtx(nativeConfig);
+      first.observerDetachSignal = firstDetach.signal;
+      first.onRemoteRunStarted = async (value) => { binding = value; firstDetach.abort(); };
+      expect((await execute(first)).remoteRunDetached).toBe(true);
+      let refused!: () => void;
+      const redirectRefused = new Promise<void>((resolve) => { refused = resolve; });
+      const detach = new AbortController();
+      const recovered = makeCtx(nativeConfig);
+      recovered.remoteRunRecovery = binding;
+      recovered.observerDetachSignal = detach.signal;
+      recovered.onLog = async (_stream, text) => { if (text.includes("status poll failed")) refused(); };
+      const execution = execute(recovered);
+      await redirectRefused;
+      detach.abort();
+      expect((await execution).remoteRunDetached).toBe(true);
+      expect(redirectedVisits).toBe(0);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("withholds cancellation acknowledgement when final status names another job", async () => {
+    const { binding, fetchMock } = await acceptAndDetach();
+    fetchMock.mockClear().mockImplementation(async (_input, init) => new Response(JSON.stringify(
+      init?.method === "POST" ? { status: "cancelled" }
+        : { run_id: "other-run", status: "cancelled", completed: false, interrupted: true, partial: false },
+    )));
+    const cancel = new AbortController();
+    cancel.abort();
+    const ctx = makeCtx(config);
+    ctx.remoteRunRecovery = binding;
+    ctx.signal = cancel.signal;
+    const result = await execute(ctx);
+    expect(result.resultJson?.executionCancellation).toBeUndefined();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "GET").every(([, init]) => init?.redirect === "error")).toBe(true);
+  });
+
+  it("observes the bound job without creating work or subscribing to its event stream", async () => {
+    const { binding, fetchMock } = await acceptAndDetach();
+    fetchMock.mockClear().mockResolvedValue(new Response(JSON.stringify({ status: "completed", output: "retained output" })));
+    const ctx = makeCtx({ ...config, apiKey: "rotated-synthetic-key" });
+    ctx.remoteRunRecovery = binding;
+    const result = await execute(ctx);
+    expect(result.exitCode).toBe(0);
+    expect(result.summary).toContain("retained output");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toBe("http://localhost:8642/v1/runs/accepted-run");
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("GET");
+  });
+
+  it.each(["endpoint", "profile", "session", "adapter", "deadline"])("holds a changed %s binding without remote effects", async (change) => {
+    const { binding, fetchMock } = await acceptAndDetach();
+    fetchMock.mockClear();
+    const ctx = makeCtx(config);
+    ctx.remoteRunRecovery = { ...binding };
+    if (change === "endpoint") ctx.config = { ...config, apiBaseUrl: "http://localhost:8643" };
+    if (change === "profile") ctx.config = { ...config, headers: { "X-Hermes-Profile": "other-profile" } };
+    if (change === "session") ctx.context.issueId = "other-issue";
+    if (change === "adapter") ctx.remoteRunRecovery.adapterType = "other-adapter";
+    if (change === "deadline") ctx.remoteRunRecovery.deadlineAt = "not-a-date";
+    const result = await execute(ctx);
+    expect(result.errorCode).toBe("hermes_gateway_recovery_binding_invalid");
+    expect(result.executionRecovery).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("detaches a hanging observer without requesting a remote stop", async () => {
+    const { binding, fetchMock } = await acceptAndDetach();
+    const detach = new AbortController();
+    fetchMock.mockClear().mockImplementation(async (_input, init) => {
+      detach.abort();
+      return hungRequest(init, false);
+    });
+    const ctx = makeCtx(config);
+    ctx.remoteRunRecovery = binding;
+    ctx.observerDetachSignal = detach.signal;
+    expect((await execute(ctx)).remoteRunDetached).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("GET");
+  });
+
+  it("preserves a no-timeout binding when later configuration adds a timeout", async () => {
+    const { binding, fetchMock } = await acceptAndDetach();
+    fetchMock.mockClear().mockResolvedValue(new Response(JSON.stringify({ status: "completed", output: "done" })));
+    const ctx = makeCtx({ ...config, timeoutSec: 0.01 });
+    ctx.remoteRunRecovery = binding;
+    expect((await execute(ctx)).exitCode).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the original absolute deadline instead of granting a new execution window", async () => {
+    const { binding, fetchMock } = await acceptAndDetach();
+    fetchMock.mockClear().mockImplementation(async () => new Response(JSON.stringify({
+      status: "cancelled", completed: false, interrupted: true, partial: false,
+    })));
+    const ctx = makeCtx({ ...config, timeoutSec: 900 });
+    ctx.remoteRunRecovery = { ...binding, deadlineAt: new Date(Date.now() - 1).toISOString() };
+    expect((await execute(ctx)).timedOut).toBe(true);
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/stop") && init?.method === "POST")).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/v1/runs"))).toBe(false);
+  });
+
+  it.each([false, true])("cancels accepted work even when observer detach is %s", async (detachRequested) => {
+    const { binding, fetchMock } = await acceptAndDetach();
+    fetchMock.mockClear().mockImplementation(async () => new Response(JSON.stringify({
+      status: "cancelled", completed: false, interrupted: true, partial: false,
+    })));
+    const cancel = new AbortController();
+    cancel.abort();
+    const ctx = makeCtx(config);
+    ctx.remoteRunRecovery = binding;
+    ctx.signal = cancel.signal;
+    if (detachRequested) {
+      const detach = new AbortController();
+      detach.abort();
+      ctx.observerDetachSignal = detach.signal;
+    }
+    const result = await execute(ctx);
+    expect(result.errorCode).toBe("hermes_gateway_cancelled");
+    expect(result.resultJson?.executionCancellation).toMatchObject({ proof: "hermes_gateway_terminal_cancelled" });
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/stop"))).toHaveLength(1);
+  });
 });
 
 describe("resolveSessionKey", () => {

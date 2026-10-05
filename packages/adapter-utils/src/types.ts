@@ -75,6 +75,8 @@ export type AdapterExecutionErrorFamily =
   | "refresh_token_invalidated";
 
 export interface AdapterExecutionResult {
+  /** Observer ownership ended; provider work and the heartbeat run remain live. */
+  remoteRunDetached?: true;
   /** Positive evidence for retrying bootstrap; absent evidence never authorizes replay. */
   executionRecovery?: { kind: "bootstrap"; providerWorkStarted: false } | {
     kind: "interrupted";
@@ -194,7 +196,22 @@ export interface AdapterRuntimeEvent {
   payload?: Record<string, unknown>;
 }
 
+/** Server-owned binding to accepted remote work, never a conversation session. */
+export interface AdapterRemoteRunBinding {
+  adapterType: string;
+  providerRunId: string;
+  transportFingerprint: string;
+  /** Original absolute execution deadline. Null means no configured timeout. */
+  deadlineAt: string | null;
+}
+
 export interface AdapterExecutionContext {
+  /** Detach the observer on shutdown or ownership loss without cancelling work. */
+  observerDetachSignal?: AbortSignal;
+  /** Supplied only from the current heartbeat run's durable, trusted binding. */
+  remoteRunRecovery?: AdapterRemoteRunBinding;
+  /** Await durable binding before consuming the accepted remote run. */
+  onRemoteRunStarted?: (binding: AdapterRemoteRunBinding) => Promise<void>;
   /** Run-scoped operator cancellation; adapters must settle before returning. */
   signal?: AbortSignal;
   /** Opt in to signal-based cancellation before starting provider work. */
