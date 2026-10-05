@@ -13,6 +13,8 @@ import {
   deliverReconciledExecutions,
 } from "../execution-recovery-resolution.js";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { tmpdir } from "node:os";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -484,6 +486,38 @@ const support = externalDatabaseUrl
       expect(await createRunDispatch(db).cancelStaleQueuedRun({ companyId: source.companyId,
         runId: successor.id, expectedStatus: "queued" })).toMatchObject({ outcome: "cancelled",
         errorCode: transition === "review" ? "issue_review_participant_changed" : "issue_terminal_status" });
+    });
+    it.each(["exited", "alive", "rebound"] as const)("rechecks retained terminal process identity before replacement (%s)", async (mode) => {
+      const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+      await once(child, "spawn");
+      const pid = child.pid!;
+      try {
+        const source = await seed();
+        await db.update(heartbeatRuns).set({ processPid: pid, processGroupId: pid }).where(eq(heartbeatRuns.id, source.runId));
+        if (mode !== "alive") {
+          const exited = once(child, "exit");
+          child.kill();
+          await exited;
+        }
+        const transaction = db.transaction.bind(db);
+        const rebound = mode === "rebound" ? vi.spyOn(db, "transaction").mockImplementationOnce(async (...args) => {
+          await db.update(heartbeatRuns).set({ processPid: process.pid }).where(eq(heartbeatRuns.id, source.runId));
+          return transaction(...args);
+        }) : null;
+        try {
+          await reconcileSafeNativeReplacements(db);
+        } finally {
+          rebound?.mockRestore();
+        }
+        expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, source.runId)))
+          .toHaveLength(mode === "exited" ? 1 : 0);
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) {
+          const exited = once(child, "exit");
+          child.kill();
+          await exited;
+        }
+      }
     });
     it("persists exactly one linked successor under competing sweepers and restarts", async () => {
       const source = await seed(2);

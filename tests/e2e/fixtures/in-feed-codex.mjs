@@ -7,14 +7,22 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 if (process.argv.includes('--version')) { console.log('codex-cli 0.115.0 (in-feed fixture)'); process.exit(0); }
 let threadId = `fixture-${randomUUID()}`;
-let turnId, toolSequence = 0, declined = false;
+let turnId, toolSequence = 0, declined = false, activeTurn = false;
 const recoveryFixture = process.env.PAPERCLIP_RECOVERY_FIXTURE === "1";
 let currentObjective = "";
 let emitCeoLineage = false;
 let completionContract = { revision: "1", criterionIds: ["objective"] };
 const pending = new Map();
-const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
+const send = (value) => {
+  if (value.method && value.params?.threadId === threadId && value.params?.turnId === turnId && !activeTurn) return;
+  if (value.method === 'turn/completed' && value.params?.threadId === threadId && value.params?.turn?.id === turnId) {
+    if (!activeTurn) return;
+    activeTurn = false;
+  }
+  process.stdout.write(`${JSON.stringify(value)}\n`);
+};
 const call = (tool, args) => new Promise((resolve, reject) => {
+  if (!activeTurn) { reject(new Error('Fixture turn is no longer active')); return; }
   const id = `connection-tool-${++toolSequence}`;
   pending.set(id, { resolve, reject });
   send({ id, method: 'item/tool/call', params: { threadId, turnId, callId: id, tool, arguments: args } });
@@ -149,7 +157,14 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     if (message.params?.completionContract) completionContract = message.params.completionContract;
     send({ id, result: { model: 'in-feed-fixture', modelProvider: 'fixture', thread: { id: threadId, sessionId: threadId } } });
   }
-  else if (method === 'thread/read') send({ id, result: { thread: { id: threadId, turns: [] } } });
+  else if (method === 'thread/read') send({ id, result: { thread: { id: threadId, status: { type: activeTurn ? 'active' : 'idle' }, turns: [] } } });
+  else if (method === 'thread/turns/list') send({ id, result: { data: activeTurn ? [{ id: turnId, status: 'inProgress', items: [], itemsView: 'notLoaded' }] : [], nextCursor: null } });
+  else if (method === 'turn/interrupt') {
+    send({ id, result: {} });
+    if (activeTurn && message.params?.threadId === threadId && message.params?.turnId === turnId) {
+      send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'interrupted' } } });
+    }
+  }
   else if (method === 'turn/start') {
     emitCeoLineage = JSON.stringify(message.params).includes('CEO descendant fixture');
     declined = /connection_intent/.test(JSON.stringify(message.params)) && /rejected/.test(JSON.stringify(message.params));
@@ -165,6 +180,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       } catch { /* Non-envelope text is ordinary task context. */ }
     }
     turnId = randomUUID();
+    activeTurn = true;
     send({ id, result: { turn: { id: turnId, status: 'inProgress' } } });
     send({ method: 'turn/started', params: { threadId, turn: { id: turnId, status: 'inProgress' } } });
     // Deliver model output on a later tick, after the runner accepts turn/start.

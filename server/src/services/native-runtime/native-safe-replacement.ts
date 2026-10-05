@@ -360,7 +360,10 @@ export async function reconcileSafeNativeReplacements(
         }
         {
           if (!currentRun || currentRun.status !== "failed" || currentRun.runnerInstanceId !== run.runnerInstanceId ||
-              currentRun.nativeSessionId !== run.nativeSessionId || currentRun.processPid || currentRun.processGroupId) return false;
+              currentRun.nativeSessionId !== run.nativeSessionId || currentRun.processPid !== run.processPid ||
+              currentRun.processGroupId !== run.processGroupId || processAlive(currentRun.processPid) ||
+              processAlive(currentRun.processGroupId ? -currentRun.processGroupId : null) ||
+              (stoppedSession && (currentRun.processPid || currentRun.processGroupId))) return false;
           const currentInvocations = await tx.select().from(toolInvocations).where(and(
             eq(toolInvocations.companyId, run.companyId), eq(toolInvocations.runId, run.id),
           )).orderBy(toolInvocations.id).for("update");
