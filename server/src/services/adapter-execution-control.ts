@@ -1,11 +1,12 @@
 /** Live adapter ownership shared by routes and scheduler service instances. */
 export function createAdapterExecutionControl() {
   const controller = new AbortController();
+  const observerDetachController = new AbortController();
   let finish!: () => void;
   const settled = new Promise<void>((resolve) => {
     finish = resolve;
   });
-  return { controller, settled, finish };
+  return { controller, observerDetachController, settled, finish };
 }
 
 export const adapterExecutionControls = new Map<

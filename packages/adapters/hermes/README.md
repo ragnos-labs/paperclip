@@ -188,6 +188,32 @@ secret values, so do not copy printed tokens into comments or config. Use
 multiline comments or status updates, preserve newlines with a heredoc plus
 `jq --arg`.
 
+### Accepted gateway job recovery contract
+
+The gateway adapter can observe an already accepted job through the server-owned
+`remoteRunRecovery` binding. It performs status GET requests against the original
+Hermes run ID, without creating another job or opening a competing event stream.
+The binding must match the endpoint, profile headers and conversation identity.
+API key rotation is allowed. Recovery retains the original absolute timeout,
+including an explicitly unlimited timeout.
+
+Fresh execution awaits `onRemoteRunStarted` after Hermes returns its run ID and
+before observing the job. The callback must durably bind that ID to the current
+Paperclip heartbeat run. Failure to save the binding does not establish that
+provider work never started and does not authorize automatic replay.
+
+`observerDetachSignal` ends observation without requesting a remote stop. The
+returned `remoteRunDetached` result must preserve the running heartbeat and its
+resources. The ordinary cancellation signal still requests an awaited remote
+stop. An already accepted recovery job cannot acknowledge cancellation as
+never-dispatched work.
+
+These adapter hooks alone do not provide automatic server restart recovery.
+The server must persist and validate the binding, claim observer ownership
+atomically, detach on ownership loss and shutdown, and fence all terminal writes
+against the current owner before enabling unattended reattachment. Unknown
+create outcomes remain held for reconciliation.
+
 ### Hermes-originated Paperclip tasks
 
 The package includes a Hermes skill/helper for the reverse direction: a user
