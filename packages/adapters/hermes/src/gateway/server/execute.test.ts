@@ -1,12 +1,16 @@
+import { createServer } from "node:http";
 import { describe, expect, it, vi, afterEach } from "vitest";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { execute, mapFinalResultForTest, parseSseFramesForTest, resolveSessionKey } from "./execute.js";
 import { testEnvironment } from "./test.js";
 
+const nativeFetch = globalThis.fetch;
+
 // Shorten the post-stop grace period so the unconfirmed-stop path runs quickly.
 vi.mock("../shared/constants.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../shared/constants.js")>()),
   STOP_GRACE_MS: 200,
+  REQUEST_TIMEOUT_MS: 200,
 }));
 
 function makeCtx(config: Record<string, unknown>): AdapterExecutionContext {
@@ -44,6 +48,20 @@ function sseStream(text: string): ReadableStream<Uint8Array> {
       controller.enqueue(new TextEncoder().encode(text));
       controller.close();
     },
+  });
+}
+
+function hungRequest(init: RequestInit | undefined, body: boolean): Promise<Response> {
+  const signal = init?.signal;
+  if (body) {
+    return Promise.resolve(new Response(new ReadableStream({
+      start(controller) {
+        signal?.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+      },
+    })));
+  }
+  return new Promise((_, reject) => {
+    signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
   });
 }
 
@@ -86,6 +104,148 @@ describe("parseSseFramesForTest", () => {
 });
 
 describe("execute", () => {
+  it.each(["reject", "hang"])("stops an admitted run despite %s diagnostics", async (failure) => {
+    const controller = new AbortController();
+    const terminal = { status: "cancelled", completed: false, interrupted: true, partial: false };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-log-failure" }));
+      if (url.endsWith("/events")) {
+        controller.abort();
+        return new Response(sseStream(`event: run.cancelled\ndata: ${JSON.stringify(terminal)}\n\n`));
+      }
+      if (url.endsWith("/stop")) {
+        expect(init?.method).toBe("POST");
+        return new Response(JSON.stringify({ status: "stopping" }));
+      }
+      return new Response(JSON.stringify(terminal));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" });
+    ctx.signal = controller.signal;
+    ctx.onLog = async (_, message) => {
+      if (message.includes("run created:") || message.includes("stop requested")) {
+        if (failure === "reject") throw new Error("diagnostic store unavailable");
+        return new Promise<void>(() => {});
+      }
+    };
+    const result = await execute(ctx);
+    expect(result.resultJson?.executionCancellation).toMatchObject({
+      state: "acknowledged", proof: "hermes_gateway_terminal_cancelled",
+    });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/stop"))).toHaveLength(1);
+  });
+
+  it.each(["metadata", "log"])("does not dispatch when cancellation arrives inside an awaited %s callback", async (callback) => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" });
+    ctx.signal = controller.signal;
+    if (callback === "metadata") ctx.onMeta = async () => { controller.abort(); };
+    else ctx.onLog = async () => { controller.abort(); };
+    const result = await execute(ctx);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.resultJson?.executionCancellation).toMatchObject({
+      state: "acknowledged", proof: "hermes_gateway_not_dispatched",
+    });
+  });
+
+  it.each(["malformed", "missing_id", "lost_response"])("holds an unknown create outcome (%s) without a second POST", async (outcome) => {
+    const fetchMock = vi.fn(async () => {
+      if (outcome === "lost_response") throw new Error("connection closed after request");
+      return new Response(outcome === "malformed" ? "not-json" : "{}");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.exitCode).toBe(1);
+    expect(result.resultJson?.executionCancellation).toBeUndefined();
+    expect(result.executionRecovery).toBeUndefined();
+  });
+
+  it.each([false, true])("bounds a lost create response including its body (body=%s), without replay", async (body) => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn((_: RequestInfo | URL, init?: RequestInit) => {
+      controller.abort();
+      return hungRequest(init, body);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key", timeoutSec: 0 });
+    ctx.signal = controller.signal;
+    const result = await execute(ctx);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.exitCode).toBe(1);
+    expect(result.resultJson?.executionCancellation).toBeUndefined();
+    expect(result.executionRecovery).toBeUndefined();
+  });
+
+  it.each(["cancelled", "canceled", "stopped", "interrupted"])("does not acknowledge a status-only %s event", (status) => {
+    const result = mapFinalResultForTest({
+      terminal: { runId: "run-test", status, payload: { status } },
+      outputChunks: [], sessionKey: null, strategy: "none", cancellationRequested: true,
+    });
+    expect(result.resultJson?.executionCancellation).toBeUndefined();
+  });
+
+  it("retains genuine completion when it races cancellation", async () => {
+    const controller = new AbortController();
+    let stopFinished = false;
+    const terminal = { status: "completed", completed: true, interrupted: false, partial: false, output: "retained work" };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-race" }));
+      if (url.endsWith("/events")) {
+        controller.abort();
+        return new Response(sseStream(`event: run.completed\ndata: ${JSON.stringify(terminal)}\n\n`));
+      }
+      if (url.endsWith("/stop")) {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        stopFinished = true;
+        return new Response(JSON.stringify({ status: "stopping" }));
+      }
+      return new Response(JSON.stringify(terminal));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" });
+    ctx.signal = controller.signal;
+    const result = await execute(ctx);
+    expect(result.exitCode).toBe(0);
+    expect(result.signal).toBeNull();
+    expect(result.resultJson?.output).toBe("retained work");
+    expect(result.resultJson?.executionCancellation).toMatchObject({
+      state: "acknowledged", proof: "hermes_gateway_terminal_completed",
+    });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/stop"))).toHaveLength(1);
+    expect(stopFinished).toBe(true);
+  });
+
+  it.each([["stop", false], ["stop", true], ["status", false], ["status", true]] as const)(
+    "bounds cancellation with hung %s response (body=%s), without acknowledgment",
+    async (phase, body) => {
+      const controller = new AbortController();
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-hung" }));
+        if (url.endsWith("/events")) {
+          controller.abort();
+          return hungRequest(init, false);
+        }
+        if (url.endsWith("/stop")) {
+          return phase === "stop" ? hungRequest(init, body) : new Response(JSON.stringify({ status: "stopping" }));
+        }
+        return phase === "status" ? hungRequest(init, body) : new Response(JSON.stringify({ status: "running" }));
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key", timeoutSec: 0 });
+      ctx.signal = controller.signal;
+      const result = await execute(ctx);
+      expect(result.resultJson?.executionCancellation).toBeUndefined();
+      expect(result.resultJson?.status).toBe("unconfirmed");
+      expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/stop"))).toHaveLength(1);
+    },
+  );
+
   it("rejects remote plain HTTP unless the unsafe dev escape hatch is enabled", async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ run_id: "unexpected" }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -522,6 +682,127 @@ describe("execute", () => {
     expect(result.errorMessage).toContain("host.docker.internal");
   });
 
+  it("proves bootstrap recovery on an actual refused loopback connection", async () => {
+    const server = createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing loopback port");
+    await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    vi.stubGlobal("fetch", nativeFetch);
+    const result = await execute(makeCtx({
+      apiBaseUrl: `http://127.0.0.1:${address.port}`, apiKey: "test-key",
+    }));
+    expect(result.errorCode).toBe("hermes_gateway_connect_failed");
+    expect(result.executionRecovery).toEqual({ kind: "bootstrap", providerWorkStarted: false });
+  });
+
+  it("rejects an accepted create redirect without following it or granting retry evidence", async () => {
+    let creates = 0;
+    let redirectsFollowed = 0;
+    const server = createServer((req, res) => {
+      if (req.url === "/v1/runs") {
+        creates++;
+        res.writeHead(307, { Location: "/redirect-destination" });
+      } else {
+        redirectsFollowed++;
+        res.writeHead(200);
+      }
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Missing loopback port");
+      vi.stubGlobal("fetch", nativeFetch);
+      const result = await execute(makeCtx({
+        apiBaseUrl: `http://127.0.0.1:${address.port}`, apiKey: "test-key",
+      }));
+      expect(creates).toBe(1);
+      expect(redirectsFollowed).toBe(0);
+      expect(result.exitCode).toBe(1);
+      expect(result.executionRecovery).toBeUndefined();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+
+  it("keeps an accepted create with a failed response body unconfirmed", async () => {
+    const cause = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED", syscall: "connect" });
+    const fetchMock = vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { controller.error(Object.assign(new Error("body lost"), { cause })); },
+    })));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" }));
+    expect(result.exitCode).toBe(1);
+    expect(result.executionRecovery).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never turns a post-create refused connection into bootstrap evidence", async () => {
+    const cause = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED", syscall: "connect" });
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      if (String(input).endsWith("/v1/runs") && init?.method === "POST") {
+        return new Response(JSON.stringify({ run_id: "run-created" }));
+      }
+      throw Object.assign(new Error("fetch failed"), { cause });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await execute(makeCtx({
+      apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key", timeoutSec: 0.05,
+    }));
+    expect(result.exitCode).toBe(1);
+    expect(result.executionRecovery).toBeUndefined();
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/v1/runs") && init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("preserves transient classification for a create failure without a structured cause", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("fetch failed"); }));
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" }));
+    expect(result.errorCode).toBe("hermes_gateway_connect_failed");
+    expect(result.errorFamily).toBe("transient_upstream");
+    expect(result.executionRecovery).toBeUndefined();
+  });
+
+  it("provides bootstrap recovery only for a structured refused create connection", async () => {
+    const cause = Object.assign(new Error("connection refused"), {
+      code: "ECONNREFUSED", syscall: "connect",
+    });
+    const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      expect(init?.redirect).toBe("error");
+      throw Object.assign(new Error("fetch failed"), { cause });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" }));
+    expect(result.errorFamily).toBe("transient_upstream");
+    expect(result.executionRecovery).toEqual({ kind: "bootstrap", providerWorkStarted: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { code: "ECONNREFUSED" },
+    { code: "ENOTFOUND", syscall: "getaddrinfo" },
+    { code: "ECONNRESET", syscall: "read" },
+    { code: "ETIMEDOUT", syscall: "connect" },
+    { message: "ECONNREFUSED connect" },
+    Object.assign(new AggregateError([], "connect failures"), { code: "ECONNREFUSED", syscall: "connect" }),
+  ])("keeps uncertain create transport failures held: %j", async (cause) => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw Object.assign(new Error("fetch failed"), { cause });
+    }));
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" }));
+    expect(result.executionRecovery).toBeUndefined();
+  });
+
+  it.each([307, 308, 500, 503])("keeps create HTTP %i outcomes held", async (status) => {
+    vi.stubGlobal("fetch", vi.fn(async (_input: unknown, init?: RequestInit) => {
+      expect(init?.redirect).toBe("error");
+      return new Response(JSON.stringify({ error: "unconfirmed create" }), { status });
+    }));
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" }));
+    expect(result.executionRecovery).toBeUndefined();
+  });
+
   it("redacts echoed auth material from HTTP error payloads", async () => {
     vi.stubGlobal(
       "fetch",
@@ -596,18 +877,18 @@ describe("execute", () => {
       }
       if (url.endsWith("/stop")) {
         expect(init?.method).toBe("POST");
-        return new Response(JSON.stringify({ status: "stopped" }), { status: 200 });
+        return new Response(JSON.stringify({ status: "cancelled", completed: false, interrupted: true, partial: false }), { status: 200 });
       }
       if (url.endsWith("/events")) {
         // Abort the task as soon as event stream connection opens
         abortController.abort();
         return new Response(
-          sseStream(["event: run.stopped", "data: {\"status\":\"stopped\"}", ""].join("\n")),
+          sseStream(["event: run.cancelled", `data: ${JSON.stringify({ status: "cancelled", completed: false, interrupted: true, partial: false })}`, ""].join("\n")),
           { status: 200, headers: { "content-type": "text/event-stream" } },
         );
       }
       if (init?.method === "GET") {
-        return new Response(JSON.stringify({ status: "stopped" }), { status: 200 });
+        return new Response(JSON.stringify({ status: "cancelled", completed: false, interrupted: true, partial: false }), { status: 200 });
       }
       return new Response(JSON.stringify({ status: "running" }), { status: 200 });
     });
@@ -657,7 +938,7 @@ describe("execute", () => {
     expect(result.signal).toBe("SIGTERM");
     expect(result.resultJson?.executionCancellation).toMatchObject({
       state: "acknowledged",
-      proof: "hermes_gateway_terminal_cancelled",
+      proof: "hermes_gateway_not_dispatched",
     });
   });
 
@@ -712,7 +993,7 @@ describe("execute", () => {
         return new Response(JSON.stringify({ status: "stopping" }), { status: 200 });
       }
       if (init?.method === "GET") {
-        return new Response(JSON.stringify({ status: "cancelled" }), { status: 200 });
+        return new Response(JSON.stringify({ status: "cancelled", completed: false, interrupted: true, partial: false }), { status: 200 });
       }
       return new Response(JSON.stringify({ status: "running" }), { status: 200 });
     });
