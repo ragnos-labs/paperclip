@@ -6180,7 +6180,10 @@ describe("native warm session supervision", () => {
           normalizedSessionId: "session-runnerd-warm-authority",
           driverKind: "codex_app_server" as const,
           protocolVersion: 1 as const,
-          lifecyclePolicy: { mode: "warm" as const, idleTimeoutMs: 500 },
+          lifecyclePolicy: {
+            mode: "warm" as const,
+            idleTimeoutMs: replacesProvider ? 30_000 : 500,
+          },
         },
       } as NativeExecutionInputV1;
       const second = {

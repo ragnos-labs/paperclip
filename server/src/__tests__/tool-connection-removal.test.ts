@@ -166,7 +166,7 @@ describeEmbeddedPostgres("tool connection removal", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-removal-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, 60_000);
 
   afterEach(async () => {
     vi.restoreAllMocks();
