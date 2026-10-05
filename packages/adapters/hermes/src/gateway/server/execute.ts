@@ -738,6 +738,11 @@ export function mapFinalResultForTest(input: {
   };
 }
 
+function diagnosticLog(ctx: AdapterExecutionContext, stream: "stdout" | "stderr", message: string): void {
+  // Diagnostics must not prevent an admitted worker from being stopped.
+  try { void ctx.onLog(stream, message).catch(() => undefined); } catch { /* best effort */ }
+}
+
 async function stopRun(input: {
   ctx: AdapterExecutionContext;
   baseUrl: URL;
@@ -751,10 +756,10 @@ async function stopRun(input: {
       headers: input.headers,
       signal: AbortSignal.timeout(STOP_GRACE_MS),
     });
-    await input.ctx.onLog("stdout", `[hermes-gateway] stop requested for run ${input.runId}\n`);
+    diagnosticLog(input.ctx, "stdout", `[hermes-gateway] stop requested for run ${input.runId}\n`);
     return asRecord(stopped);
   } catch (err) {
-    await input.ctx.onLog("stderr", `[hermes-gateway] stop request failed: ${redactErrorMessage(err, input.redactText)}\n`);
+    diagnosticLog(input.ctx, "stderr", `[hermes-gateway] stop request failed: ${redactErrorMessage(err, input.redactText)}\n`);
     return null;
   }
 }
@@ -952,8 +957,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return errorResult(err, redactText);
   }
 
-  await ctx.onLog("stdout", `[hermes-gateway] run created: ${runId}\n`);
-
   let stopPromise: Promise<Record<string, unknown> | null> | null = null;
   const requestStop = () => {
     if (!runId) return Promise.resolve(null);
@@ -1058,6 +1061,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   try {
+    diagnosticLog(ctx, "stdout", `[hermes-gateway] run created: ${runId}\n`);
     const outcome = await Promise.race([state.terminalPromise, timeoutPromise, stopGracePromise]);
     if (timeoutTimer) clearTimeout(timeoutTimer);
     if (stopTimer) clearTimeout(stopTimer);

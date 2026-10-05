@@ -101,6 +101,38 @@ describe("parseSseFramesForTest", () => {
 });
 
 describe("execute", () => {
+  it.each(["reject", "hang"])("stops an admitted run despite %s diagnostics", async (failure) => {
+    const controller = new AbortController();
+    const terminal = { status: "cancelled", completed: false, interrupted: true, partial: false };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-log-failure" }));
+      if (url.endsWith("/events")) {
+        controller.abort();
+        return new Response(sseStream(`event: run.cancelled\ndata: ${JSON.stringify(terminal)}\n\n`));
+      }
+      if (url.endsWith("/stop")) {
+        expect(init?.method).toBe("POST");
+        return new Response(JSON.stringify({ status: "stopping" }));
+      }
+      return new Response(JSON.stringify(terminal));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const ctx = makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" });
+    ctx.signal = controller.signal;
+    ctx.onLog = async (_, message) => {
+      if (message.includes("run created:") || message.includes("stop requested")) {
+        if (failure === "reject") throw new Error("diagnostic store unavailable");
+        return new Promise<void>(() => {});
+      }
+    };
+    const result = await execute(ctx);
+    expect(result.resultJson?.executionCancellation).toMatchObject({
+      state: "acknowledged", proof: "hermes_gateway_terminal_cancelled",
+    });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/stop"))).toHaveLength(1);
+  });
+
   it.each(["metadata", "log"])("does not dispatch when cancellation arrives inside an awaited %s callback", async (callback) => {
     const controller = new AbortController();
     const fetchMock = vi.fn();
