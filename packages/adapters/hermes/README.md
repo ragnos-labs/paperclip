@@ -144,6 +144,19 @@ This mode does not start Hermes. It creates runs with `POST /v1/runs`, streams
 Hermes events with SSE, polls run status as a fallback, and stops timed-out runs
 with `POST /v1/runs/{run_id}/stop`.
 
+Paperclip cancellation uses the same stop route. Cancellation before dispatch
+does not create a remote run. Once a run exists, the adapter shares one stop
+request and waits for terminal evidence. Stock Hermes cancellation is confirmed
+only with its awaited-worker fields: `status: cancelled`, `completed: false`,
+`interrupted: true`, and a boolean `partial`. A status name alone does not prove
+that its worker stopped. If normal completion wins the race, its successful
+result is retained; the completed-worker fields establish quiescence.
+
+JSON requests, including response bodies, have a 30-second limit. Stop and final
+status requests also respect their shorter cleanup deadlines. A missing run ID,
+lost create response, or unconfirmed stop remains unconfirmed. The adapter does
+not replay the create request or certify safe recovery from those outcomes.
+
 ### Compatibility with the old gateway package
 
 `@paperclipai/adapter-hermes-gateway` remains as a deprecated compatibility shim
