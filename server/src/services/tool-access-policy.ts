@@ -49,6 +49,24 @@ import {
 } from "./tool-profile-binding-precedence.js";
 import { recordToolRuntimeAuditWriteFailure } from "./tool-runtime-metrics.js";
 
+/** Record the invocation before a native predecessor can close its inventory. */
+export async function withNativeToolInvocationAdmission<T>(
+  db: Db,
+  context: { companyId: string; agentId: string | null; runId: string | null; issueId: string | null },
+  persist: (tx: Db) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async tx => {
+    if (context.runId) {
+      const [run] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, context.runId)).for("update");
+      if (run?.runtimeMode === "native" && (run.status !== "running" || run.companyId !== context.companyId ||
+          run.agentId !== context.agentId || run.nativeIssueId !== context.issueId))
+        throw conflict("Native run no longer accepts tool invocations");
+      if (!run) throw conflict("Tool invocation run no longer exists");
+    }
+    return persist(tx as unknown as Db);
+  });
+}
+
 type ToolAccessContext = {
   companyId: string;
   actorType: "agent" | "user" | "system" | "plugin";
@@ -1409,11 +1427,13 @@ export function toolAccessPolicyService(db: Db) {
     const loaded = await loadContext(input);
     if (!loaded.ok) throw new Error("Cannot record invocation for invalid tool access context");
     const { ctx, redaction } = loaded;
+    return withNativeToolInvocationAdmission(db, { companyId: ctx.companyId, agentId: ctx.agentId,
+      runId: ctx.heartbeatRunId, issueId: ctx.issueId }, async tx => {
     const argumentsHash = redaction.summary.sha256 ?? sha256(input.request.arguments ?? {});
     const idempotencyKey = input.request.idempotencyKey
       ?? (input.request.sideEffecting ? sideEffectIdempotencyKey(ctx, argumentsHash) : null);
     if (idempotencyKey) {
-      const [existing] = await db.select().from(toolInvocations).where(and(
+      const [existing] = await tx.select().from(toolInvocations).where(and(
         eq(toolInvocations.companyId, input.companyId),
         eq(toolInvocations.idempotencyKey, idempotencyKey),
       ));
@@ -1426,7 +1446,7 @@ export function toolAccessPolicyService(db: Db) {
         : accessDecision.decision === "rate_limited"
           ? "rate_limited"
           : "denied";
-    const [invocation] = await db.insert(toolInvocations).values({
+    const [invocation] = await tx.insert(toolInvocations).values({
       companyId: ctx.companyId,
       idempotencyKey,
       actorType: ctx.actorType,
@@ -1456,7 +1476,7 @@ export function toolAccessPolicyService(db: Db) {
     }).returning();
     let actionRequest = null;
     if (accessDecision.decision === "require_approval") {
-      [actionRequest] = await db.insert(toolActionRequests).values({
+      [actionRequest] = await tx.insert(toolActionRequests).values({
         companyId: ctx.companyId,
         invocationId: invocation.id,
         issueId: ctx.issueId,
@@ -1468,6 +1488,7 @@ export function toolAccessPolicyService(db: Db) {
       }).returning();
     }
     return { invocation, replayed: false, actionRequest };
+    });
   }
 
   async function matchingApprovedActionRequestCount(input: {

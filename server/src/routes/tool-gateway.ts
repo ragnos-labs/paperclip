@@ -15,6 +15,7 @@ import {
 import { assertBoard, assertBoardOrAgent, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { ToolGatewayHttpError, type ToolGatewayService } from "../services/tool-gateway.js";
 import { forbidden, HttpError } from "../errors.js";
+import { namedGatewayToolResult } from "../services/tool-content-guards.js";
 import { accessService } from "../services/index.js";
 import { listConnectionLifecycleEvents } from "../services/tool-connection-activity.js";
 
@@ -172,20 +173,10 @@ async function handleMcpGatewayProtocol(
         parameters: params.arguments ?? {},
         callerHeaders: req.headers,
       });
-      const resultRecord = result.result && typeof result.result === "object" && !Array.isArray(result.result)
-        ? result.result as Record<string, unknown>
-        : null;
-      const contentText = typeof resultRecord?.content === "string"
-        ? resultRecord.content
-        : JSON.stringify(resultRecord?.data ?? result.result ?? null);
       res.json({
         jsonrpc: "2.0",
         id,
-        result: {
-          content: [{ type: "text", text: contentText }],
-          structuredContent: resultRecord?.data ?? null,
-          isError: false,
-        },
+        result: namedGatewayToolResult(result),
       });
       return;
     }

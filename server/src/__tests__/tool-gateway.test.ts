@@ -671,6 +671,35 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
         })
         .expect(200);
       expect(called.body.result.content).toEqual([{ type: "text", text: "read ok" }]);
+      expect(called.body.result._meta["paperclip.dev/invocationReceipt"]).toEqual({
+        schema: "paperclip.mcp_invocation_receipt.v1",
+        invocationId: expect.stringMatching(/^[a-f0-9-]{36}$/),
+      });
+      const nativeAgent = await createAgent(db, company.id);
+      const { issue: nativeIssue, run: pendingNativeRun } = await createIssueAndRun(db, company.id, nativeAgent.id);
+      await db.update(toolCatalogEntries).set({ schemaHash: "b".repeat(64) }).where(eq(toolCatalogEntries.id, catalogEntry.id));
+      await db.update(heartbeatRuns).set({ runtimeMode: "native", nativeIssueId: nativeIssue.id,
+        nativeSessionId: randomUUID(), runnerInstanceId: randomUUID(), startedAt: new Date(),
+        runnerProfileJson: { nativeExecutionInput: { synthetic: true } },
+      }).where(eq(heartbeatRuns.id, pendingNativeRun.id));
+      const nativeToken = await gateway.createNamedGatewayToken({ companyId: company.id, gatewayId: created.id,
+        body: { name: "Native read", clientLabel: "Native fixture", ownerNote: "Synthetic dispatch proof",
+          subjectType: "heartbeat_run", subjectId: pendingNativeRun.id },
+      });
+      const nativeCalled = await request(app).post(`/api/tool-gateway/gateways/${created.id}/mcp`)
+        .set("authorization", `Bearer ${nativeToken.token}`)
+        .send({ jsonrpc: "2.0", id: "native-read", method: "tools/call",
+          params: { name: gatewayToolName, arguments: { key: "a", value: "b" } } }).expect(200);
+      const [stoppedNativeRun] = await db.update(heartbeatRuns).set({ status: "failed", finishedAt: new Date() })
+        .where(eq(heartbeatRuns.id, pendingNativeRun.id)).returning();
+      const { readStoppedNativeMcpReceipts } = await import("../services/native-runtime/native-session-executor.js");
+      const nativeReceipts = await readStoppedNativeMcpReceipts(db, stoppedNativeRun!);
+      const [nativeInvocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.runId, pendingNativeRun.id));
+      expect(nativeInvocation!.headerPolicySummary).toMatchObject({ nativeReadEvidence: {
+        nativeSessionId: stoppedNativeRun!.nativeSessionId, runId: pendingNativeRun.id,
+      } });
+      expect(nativeReceipts).toHaveLength(1);
+      expect(nativeReceipts![0]!.result).toEqual(nativeCalled.body.result);
       const upstreamRequestCountAfterAllowedCall = remote.requests.length;
 
       const denied = await request(app)

@@ -1880,13 +1880,16 @@ fn terminal_events(state: &ManagedDurableState, event_type: &str) -> Vec<Normali
     } else {
         "failed"
     };
-    vec![
-        NormalizedProviderEvent {
+    let mut events = Vec::new();
+    // Keep the failed terminal receipt for cleanup, without inventing a result.
+    if event_type != "turn.failed" {
+        events.push(NormalizedProviderEvent {
             event_type: "run.result.proposed".to_owned(),
             priority: EventPriority::P0,
             payload: result,
-        },
-        NormalizedProviderEvent {
+        });
+    }
+    events.push(NormalizedProviderEvent {
             event_type: "run.terminal".to_owned(),
             priority: EventPriority::P0,
             payload: json!({
@@ -1896,8 +1899,8 @@ fn terminal_events(state: &ManagedDurableState, event_type: &str) -> Vec<Normali
                 "runTerminalState": if succeeded { "succeeded" } else if cancelled { "cancelled" } else { "failed" },
                 "reportedWorkDisposition": disposition,
             }),
-        },
-    ]
+    });
+    events
 }
 
 fn usage_request_count(params: &Value) -> Option<u64> {
@@ -2498,11 +2501,10 @@ mod tests {
     }
 
     #[test]
-    fn managed_crash_preserves_result_before_failure_closes_authority() {
+    fn managed_crash_does_not_manufacture_an_accepted_result() {
         assert_eq!(
             managed_failure_event_types(false),
             vec![
-                "run.result.proposed",
                 "session.failed",
                 "turn.failed",
                 "run.terminal",
@@ -2511,10 +2513,10 @@ mod tests {
     }
 
     #[test]
-    fn managed_active_turn_recovery_preserves_result_before_failure() {
+    fn managed_active_turn_recovery_preserves_a_bare_failure() {
         assert_eq!(
             managed_failure_event_types(true),
-            vec!["run.result.proposed", "turn.failed", "run.terminal",]
+            vec!["turn.failed", "run.terminal"]
         );
     }
 

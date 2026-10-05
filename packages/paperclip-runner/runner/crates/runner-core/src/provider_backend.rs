@@ -713,7 +713,9 @@ fn terminal_events(
         "reportedWorkDisposition": disposition,
     });
     let mut events = Vec::new();
-    if state.active_provider_result_fingerprint.is_none() {
+    // Preserve terminal/cleanup evidence without manufacturing a work result
+    // from a failed provider turn. Already-correlated results remain authority.
+    if state.active_provider_result_fingerprint.is_none() && event_type != "turn.failed" {
         events.push(NormalizedProviderEvent {
             event_type: "run.result.proposed".to_owned(),
             priority: EventPriority::P0,
@@ -5111,6 +5113,20 @@ mod tests {
         assert!(
             admit_terminal_tool_authority(&mut state, "paperclip_finish", &result, false,).is_err()
         );
+    }
+
+    #[test]
+    fn failed_turn_requires_an_already_accepted_result() {
+        let mut state = opencode_result_state();
+        let failed = terminal_events(&state, "turn.failed", None);
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].event_type, "run.terminal");
+        assert_eq!(failed[0].payload["runTerminalState"], "failed");
+        admit_terminal_tool_authority(&mut state, "paperclip_finish", &valid_opencode_result(), false).unwrap();
+        let events = terminal_events(&state, "turn.failed", None);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "run.terminal");
+        assert_eq!(events[0].payload["runTerminalState"], "succeeded");
     }
 
     #[test]

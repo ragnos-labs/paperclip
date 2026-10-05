@@ -41,7 +41,7 @@ export async function reconcileSafeNativeReplacements(
   options: {
     verifyStoppedSession?: (run: typeof heartbeatRuns.$inferSelect) => Promise<{
       evidence: Record<string, unknown>;
-      retire: () => boolean;
+      retire: (tx: Db) => boolean | Promise<boolean>;
     } | null>;
     /** Test fault injection at durability boundaries; never exposed by an API. */
     failpoint?: (phase: "successor_inserted" | "lineage_committed") => void;
@@ -104,7 +104,7 @@ export async function reconcileSafeNativeReplacements(
             eq(toolInvocations.companyId, run.companyId),
             eq(toolInvocations.runId, run.id),
           ),
-        );
+        ).orderBy(toolInvocations.id);
       const events = await db
         .select({
           eventType: heartbeatRunEvents.eventType,
@@ -157,8 +157,18 @@ export async function reconcileSafeNativeReplacements(
         if (event.eventType === "tool.execution.started") {
           const name = typeof p.name === "string" ? p.name : "unknown tool";
           const completedTaskControlCallIds = stoppedSession?.evidence.completedTaskControlCallIds;
-          if (name === "paperclip_finish" && Array.isArray(completedTaskControlCallIds) &&
+          if (name === "paperclip_finish" && p.transport === "dynamic" && p.namespace == null &&
+              Array.isArray(completedTaskControlCallIds) &&
               completedTaskControlCallIds.includes(p.executionId)) return [];
+          const completedReadCalls = stoppedSession?.evidence.completedReadCalls;
+          const provenRead = Array.isArray(completedReadCalls) && completedReadCalls.some(call => {
+            const receipt = record(call);
+            return receipt.callId === p.executionId && receipt.toolName === name &&
+              p.transport === "mcp" && p.namespace === "paperclip-assigned" &&
+              invocations.some(row => row.id === receipt.invocationId && row.toolName === name &&
+                row.argumentsHash === receipt.argumentsHash && row.riskLevel === "read" && row.status === "succeeded" && row.resultHash);
+          });
+          if (stoppedSession) return provenRead ? [] : [String(p.executionId ?? name)];
           const receiptedRead = invocations.some(
             (row) =>
               (row.id === p.executionId ||
@@ -301,6 +311,10 @@ export async function reconcileSafeNativeReplacements(
         await tx.execute(
           sql`select set_config('statement_timeout', '15000', true), set_config('lock_timeout', '1000', true)`,
         );
+        // Gateway admission takes this same lock before persisting work.
+        const [currentRun] = await tx.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+        )).for("update");
         const [task] = await tx
           .select()
           .from(issues)
@@ -344,12 +358,13 @@ export async function reconcileSafeNativeReplacements(
           });
           if (!ownsBlock) return false;
         }
-        if (stoppedSession) {
-          const [currentRun] = await tx.select().from(heartbeatRuns).where(and(
-            eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
-          )).for("update");
+        {
           if (!currentRun || currentRun.status !== "failed" || currentRun.runnerInstanceId !== run.runnerInstanceId ||
               currentRun.nativeSessionId !== run.nativeSessionId || currentRun.processPid || currentRun.processGroupId) return false;
+          const currentInvocations = await tx.select().from(toolInvocations).where(and(
+            eq(toolInvocations.companyId, run.companyId), eq(toolInvocations.runId, run.id),
+          )).orderBy(toolInvocations.id).for("update");
+          if (JSON.stringify(currentInvocations) !== JSON.stringify(invocations)) return false;
         }
         if (task.status === "blocked") {
           // Restore only this failure's unchanged projection. The normal issue
@@ -358,11 +373,12 @@ export async function reconcileSafeNativeReplacements(
         }
         if (stoppedSession) {
           // If the last ownership proof changes, roll back the status restoration.
-          if (!stoppedSession.retire()) throw new Error("native_replacement_stopped_session_changed");
+          if (!await stoppedSession.retire(tx as unknown as Db)) throw new Error("native_replacement_stopped_session_changed");
           await appendHeartbeatRunEvent(tx as unknown as Db, {
             companyId: run.companyId, runId: run.id, agentId: run.agentId,
-            eventType: "native.stopped_text_turn_verified", stream: "system", level: "info",
-            message: "The previous runner and provider stopped. The interrupted turn had no external actions; any completion bookkeeping has a verified receipt.",
+            eventType: stoppedSession.evidence.schema === "paperclip.stopped_read_turn.v1"
+              ? "native.stopped_read_turn_verified" : "native.stopped_text_turn_verified", stream: "system", level: "info",
+            message: "The previous runner and provider stopped. The closed turn's admitted calls have verified receipts.",
             payload: stoppedSession.evidence,
           });
         }
@@ -426,7 +442,8 @@ export async function reconcileSafeNativeReplacements(
           .set({
             failureDetail: {
               ...current.failureDetail,
-              ...(stoppedSession ? { stoppedTextTurn: stoppedSession.evidence } : {}),
+              ...(stoppedSession ? { [stoppedSession.evidence.schema === "paperclip.stopped_read_turn.v1"
+                ? "stoppedReadTurn" : "stoppedTextTurn"]: stoppedSession.evidence } : {}),
               successorRunId,
               nextAction:
                 "Continue in the linked fresh provider session after the retry delay.",

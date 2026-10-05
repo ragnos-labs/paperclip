@@ -13,7 +13,7 @@ import {
 } from "./check-pr-security.mjs";
 import { fetchAllPullRequestFiles } from "./fetch-pr-files.mjs";
 import { ghFetch } from "./get-bot-token.mjs";
-import { validateIndependentReview, reviewApiRoute } from "./ragnos-fork-release-source.mjs";
+import { validateIndependentReview, reviewApiRoute, reviewPermissionApiRoute, reviewAuthorIsTrusted } from "./ragnos-fork-release-source.mjs";
 
 const severityRank = new Map([
   ["info", 0],
@@ -89,11 +89,11 @@ export function sanitizeFlags(flags) {
   }));
 }
 
-export function requireIndependentInfrastructureReview(flags, statuses, headSha, review, sourceReview) {
+export function requireIndependentInfrastructureReview(flags, statuses, headSha, review, sourceReview, reviewPermissions = {}) {
   const receipts = {};
   for (const [scope, evidence] of [["infrastructure", review], ["source", sourceReview]]) {
     try { receipts[scope] = validateIndependentReview(statuses.find(status =>
-      status.context === `ragnos/fork-${scope}-review`), headSha, scope, evidence); }
+      status.context === `ragnos/fork-${scope}-review`), headSha, scope, evidence, reviewPermissions[scope]); }
     catch (error) {
       const status = statuses.find(status => status.context === `ragnos/fork-${scope}-review`);
       console.error("[fork-security] review rejected:", JSON.stringify({
@@ -107,7 +107,7 @@ export function requireIndependentInfrastructureReview(flags, statuses, headSha,
         reviewCommit: evidence?.commit_id === headSha,
         reviewState: ["COMMENTED", "APPROVED"].includes(evidence?.state),
         reviewSubmitted: Boolean(evidence?.submitted_at),
-        reviewAuthor: ["OWNER", "MEMBER", "COLLABORATOR"].includes(evidence?.author_association),
+        reviewAuthor: reviewAuthorIsTrusted(evidence, reviewPermissions[scope]),
       }));
     }
   }
@@ -170,7 +170,11 @@ async function runPullRequestScan() {
   const review = status ? await ghFetch(`/repos/${repo}/${reviewApiRoute(status)}`, token) : null;
   const sourceStatus = statuses.find(status => status.context === "ragnos/fork-source-review");
   const sourceReview = sourceStatus ? await ghFetch(`/repos/${repo}/${reviewApiRoute(sourceStatus)}`, token) : null;
-  const flags = requireIndependentInfrastructureReview(detectedFlags, statuses, headSha, review, sourceReview);
+  const reviewPermissions = {
+    infrastructure: review ? await ghFetch(`/repos/${repo}/${reviewPermissionApiRoute(review)}`, token) : null,
+    source: sourceReview ? await ghFetch(`/repos/${repo}/${reviewPermissionApiRoute(sourceReview)}`, token) : null,
+  };
+  const flags = requireIndependentInfrastructureReview(detectedFlags, statuses, headSha, review, sourceReview, reviewPermissions);
   if (flags.length > 0) {
     throw new Error(`read-only source scan failed:\n${JSON.stringify(sanitizeFlags(flags), null, 2)}`);
   }
@@ -194,7 +198,11 @@ async function runCommitScan() {
   const review = status ? await ghFetch(`/repos/${repo}/${reviewApiRoute(status)}`, token) : null;
   const sourceStatus = statuses.find(status => status.context === "ragnos/fork-source-review");
   const sourceReview = sourceStatus ? await ghFetch(`/repos/${repo}/${reviewApiRoute(sourceStatus)}`, token) : null;
-  const flags = requireIndependentInfrastructureReview(detectedFlags, statuses, source, review, sourceReview);
+  const reviewPermissions = {
+    infrastructure: review ? await ghFetch(`/repos/${repo}/${reviewPermissionApiRoute(review)}`, token) : null,
+    source: sourceReview ? await ghFetch(`/repos/${repo}/${reviewPermissionApiRoute(sourceReview)}`, token) : null,
+  };
+  const flags = requireIndependentInfrastructureReview(detectedFlags, statuses, source, review, sourceReview, reviewPermissions);
   if (flags.length) throw new Error(`read-only source scan failed: ${JSON.stringify(sanitizeFlags(flags))}`);
   console.log(`[fork-security] exact push source scan passed for ${files.length} changed files`);
 }

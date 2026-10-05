@@ -47,6 +47,13 @@ async function mcp(method, params = {}) {
   const text = await response.text();
   const envelope = JSON.parse(text.startsWith('event:') || text.startsWith('data:') ? text.split('\n').find((line) => line.startsWith('data:')).slice(5) : text);
   if (envelope.error) throw new Error(envelope.error.message);
+  if (recoveryFixture && method === 'tools/call') {
+    const receipt = envelope.result?._meta?.['paperclip.dev/invocationReceipt'];
+    if (receipt?.schema !== 'paperclip.mcp_invocation_receipt.v1' ||
+        !/^[a-f0-9-]{36}$/.test(receipt.invocationId ?? '')) {
+      throw new Error('Native gateway did not return its actual invocation receipt');
+    }
+  }
   return envelope.result;
 }
 async function finish(text, evidenceRef) {

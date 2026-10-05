@@ -114,7 +114,7 @@ import {
   REMOTE_URL_SECRET_CONFIG_PATH,
   remoteUrlCredentialMatchesPublicUrl,
 } from "./remote-url-credentials.js";
-import { toolAccessPolicyService } from "./tool-access-policy.js";
+import { toolAccessPolicyService, withNativeToolInvocationAdmission } from "./tool-access-policy.js";
 import { commitToolActionReview } from "./tool-action-review.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import {
@@ -141,6 +141,7 @@ import {
 } from "./vercel-connect.js";
 import {
   canonicalToolArguments,
+  hashToolValue,
   readSignedToolArgumentsPayload,
   signToolArguments,
   summarizeToolValue,
@@ -380,6 +381,7 @@ type RemoteHttpExecutionResult = {
   result: unknown;
   headerSummary?: HeaderPolicySummary;
   execution?: RemoteHttpExecutionAudit;
+  nativeReadEvidence?: Record<string, unknown>;
 };
 
 type RemoteHttpExecutionAudit = {
@@ -5797,6 +5799,32 @@ export function createToolGatewayService(
     }
     const grant = await resolveConnectionGrant(session, connection);
     const endpoint = await resolvedRemoteEndpoint(session, connection, grant);
+    // Capture the actual resolved target, never the provider's read-only hint.
+    const [nativeRun] = session.runId && session.agentId && tool.risk === "read" &&
+      entry.riskLevel === "read" && entry.isReadOnly && !entry.isWrite && !entry.isDestructive
+      ? await db.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, session.runId), eq(heartbeatRuns.companyId, session.companyId),
+          eq(heartbeatRuns.agentId, session.agentId), eq(heartbeatRuns.runtimeMode, "native"),
+        )).limit(1) : [];
+    const nativeReadEvidence = nativeRun?.nativeSessionId && nativeRun.runnerInstanceId &&
+      nativeRun.nativeIssueId === session.issueId && connection.transport === "mcp_remote"
+      ? {
+          schema: "paperclip.native_mcp_read_target.v1",
+          companyId: session.companyId, runId: nativeRun.id, agentId: session.agentId,
+          issueId: session.issueId, nativeSessionId: nativeRun.nativeSessionId,
+          runnerInstanceId: nativeRun.runnerInstanceId,
+          executionInputHash: hashToolValue(nativeRun.runnerProfileJson?.nativeExecutionInput),
+          gatewayId: session.gatewayId, gatewayTokenId: session.gatewayTokenId,
+          connectionId: connection.id, connectionConfigHash: hashToolValue(connection.config ?? {}),
+          connectionTransportConfigHash: hashToolValue(connection.transportConfig ?? {}),
+          credentialRefsHash: hashToolValue(connection.credentialRefs ?? []),
+          credentialSecretRefsHash: hashToolValue(connection.credentialSecretRefs ?? []),
+          endpointHash: hashToolValue(endpoint), credentialGrantId: grant.id,
+          grantCredentialRefsHash: hashToolValue(grant.credentialSecretRefs ?? []),
+          catalogEntryId: entry.id, catalogVersionHash: entry.versionHash,
+          catalogSchemaHash: entry.schemaHash, upstreamToolName: entry.toolName,
+          gatewayToolName: tool.name, riskLevel: "read", transport: "mcp_http",
+        } : undefined;
     // Method-defined headers are trusted catalog configuration. Treat them as
     // managed headers so callers cannot override the scope that was reviewed
     // during tools/list. Credentials remain authoritative on collisions.
@@ -6149,7 +6177,7 @@ export function createToolGatewayService(
         "ok",
         "Remote MCP server responded to tools/call.",
       );
-      return { result, headerSummary, execution };
+      return { result, headerSummary, execution, nativeReadEvidence };
     } catch (error) {
       if (error instanceof McpHttpResponseError) {
         const failure = error.reason === "too_large" ? responseTooLargeError()
@@ -9686,8 +9714,8 @@ export function createToolGatewayService(
           sensitiveMode: "redact",
           promptInjectionMode: "block",
         });
-        const [invocation] = await db
-          .insert(toolInvocations)
+        const invocation = await withNativeToolInvocationAdmission(db, session, async tx => {
+          const [recorded] = await tx.insert(toolInvocations)
           .values({
             companyId: session.companyId,
             actorType:
@@ -9717,6 +9745,8 @@ export function createToolGatewayService(
             completedAt: new Date(),
           })
           .returning();
+          return recorded!;
+        });
         await writeToolCallEvent({
           invocationId: invocation.id,
           session,
@@ -10265,6 +10295,8 @@ export function createToolGatewayService(
           .update(toolInvocations)
           .set({
             status: "executing",
+            gatewayId: session.gatewayId ?? null,
+            gatewayTokenId: session.gatewayTokenId ?? null,
             startedAt: new Date(),
             updatedAt: new Date(),
           })
@@ -10358,6 +10390,10 @@ export function createToolGatewayService(
             resultHash: resultValidation.summary.sha256 ?? null,
             resultSummary: resultValidation.summary,
             resultSizeBytes: resultValidation.summary.sizeBytes ?? null,
+            ...(connectedMcpExecution?.nativeReadEvidence ? {
+              headerPolicySummary: { ...connectedMcpExecution.headerSummary,
+                nativeReadEvidence: connectedMcpExecution.nativeReadEvidence },
+            } : {}),
             completedAt,
             updatedAt: completedAt,
           })

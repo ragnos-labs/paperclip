@@ -1,14 +1,27 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export function validateIndependentReview(status, source, scope, review) {
+export function reviewAuthorIsTrusted(review, permission) {
+  return Number.isSafeInteger(review?.user?.id) && review.user.id > 0 &&
+    /^[a-zA-Z0-9-]{1,39}$/.test(review.user.login ?? "") &&
+    permission?.user?.id === review.user.id && permission.user.login === review.user.login &&
+    ["write", "admin"].includes(permission.permission);
+}
+
+export function reviewPermissionApiRoute(review) {
+  if (!Number.isSafeInteger(review?.user?.id) || review.user.id <= 0 ||
+      !/^[a-zA-Z0-9-]{1,39}$/.test(review?.user?.login ?? "")) throw new Error("Submitted reviewer identity required");
+  return `collaborators/${encodeURIComponent(review.user.login)}/permission`;
+}
+
+export function validateIndependentReview(status, source, scope, review, permission) {
   const context = `ragnos/fork-${scope}-review`;
   const match = /^https:\/\/github\.com\/ragnos-labs\/paperclip\/pull\/(\d+)#pullrequestreview-(\d+)$/.exec(status?.target_url ?? "");
   if (!status || status.context !== context || status.state !== "success" ||
       status.url !== `https://api.github.com/repos/ragnos-labs/paperclip/statuses/${source}` || !match ||
       !review || review.html_url !== status.target_url || review.commit_id !== source ||
       !["COMMENTED", "APPROVED"].includes(review.state) || !review.submitted_at ||
-      !["OWNER", "MEMBER", "COLLABORATOR"].includes(review.author_association))
+      !reviewAuthorIsTrusted(review, permission))
     throw new Error(`Missing exact-commit independent review: ${context}`);
   const receiptBlock = /```ragnos-review\s*([\s\S]*?)```/.exec(review.body ?? "");
   const receipt = JSON.parse(receiptBlock?.[1] ?? "null");
@@ -20,11 +33,11 @@ export function validateIndependentReview(status, source, scope, review) {
   return receipt;
 }
 
-export function validateReviewedReleaseSource({ source, branch, statuses, checks, reviews, workflowRun }) {
+export function validateReviewedReleaseSource({ source, branch, statuses, checks, reviews, reviewPermissions, workflowRun }) {
   if (!/^[0-9a-f]{40}$/.test(source) || branch !== source) throw new Error("Source is not the exact maintenance head");
   for (const scope of ["source", "infrastructure"]) {
     const status = statuses.find(status => status.context === `ragnos/fork-${scope}-review`);
-    validateIndependentReview(status, source, scope, reviews?.[scope]);
+    validateIndependentReview(status, source, scope, reviews?.[scope], reviewPermissions?.[scope]);
   }
   const ci = checks.find(check => check.name === "RAGnos Fork CI");
   if (!ci || ci.head_sha !== source || ci.status !== "completed" || ci.conclusion !== "success" ||
@@ -55,11 +68,13 @@ async function main() {
     const status = statuses.find(status => status.context === `ragnos/fork-${scope}-review`);
     return [scope, api(reviewApiRoute(status))];
   }));
+  const reviewPermissions = Object.fromEntries(Object.entries(reviews).map(([scope, review]) =>
+    [scope, api(reviewPermissionApiRoute(review))]));
   const ci = checks.find(check => check.name === "RAGnos Fork CI");
   const runId = /^https:\/\/github\.com\/ragnos-labs\/paperclip\/actions\/runs\/(\d+)/.exec(ci?.details_url ?? "")?.[1];
   if (!runId) throw new Error("Fork CI must be a GitHub Actions run");
   const workflowRun = api(`actions/runs/${runId}`);
-  validateReviewedReleaseSource({ source, branch, statuses, checks, reviews, workflowRun });
+  validateReviewedReleaseSource({ source, branch, statuses, checks, reviews, reviewPermissions, workflowRun });
   if (execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() !== source) throw new Error("Checkout does not match reviewed source");
   if (execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim()) throw new Error("Release checkout is dirty");
   console.log(`Reviewed maintenance source and fork CI verified: ${source}`);

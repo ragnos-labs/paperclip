@@ -59,6 +59,9 @@ fork release/security script checks. The release gate requires the exact current
 statuses: `ragnos/fork-source-review` and `ragnos/fork-infrastructure-review`.
 Each status links a fork PR containing the actual independent review receipt.
 The status publisher records review evidence; it cannot replace independent review.
+The validator independently reads the reviewer's repository permission and requires
+matching numeric user ID and login with `write` or `admin` access. Missing, denied
+or mismatched permission evidence blocks delivery.
 Infrastructure review admits only infrastructure findings. A process-spawning
 test requires an explicit exact-file disposition in the current independent
 review receipt for its owning scope. Secret and supply-chain findings always

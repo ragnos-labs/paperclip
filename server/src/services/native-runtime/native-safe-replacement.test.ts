@@ -29,6 +29,7 @@ import {
   issueComments,
   issues,
   nativeRunFinalizations,
+  toolInvocations,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -116,7 +117,7 @@ const support = externalDatabaseUrl
       });
       return { companyId, agentId, issueId, runId };
     }
-    it.each(["verified", "unproven", "unknown_action"] as const)(
+    it.each(["verified", "verified_read", "unmapped_read", "correlation_collision", "namespace_spoof", "control_name_spoof", "unproven", "unknown_action"] as const)(
       "preserves saved work and a queued request at a controlled recovery boundary (%s)",
       async (mode) => {
         // The stopped-session verifier is the injected boundary here. These are
@@ -148,20 +149,31 @@ const support = externalDatabaseUrl
             eventType: "tool.execution.started", stream: "system",
             payload: { name: "send_email", executionId: "unconfirmed-write", transport: "process" },
           });
+          const invocationId = randomUUID();
+          if (["verified_read", "unmapped_read", "correlation_collision", "namespace_spoof", "control_name_spoof"].includes(mode)) {
+            await db.insert(toolInvocations).values({ id: invocationId, companyId: source.companyId,
+              agentId: source.agentId, issueId: source.issueId, runId: source.runId,
+              toolName: mode === "control_name_spoof" ? "connections_search" : "archive_read", riskLevel: "read", status: "succeeded", policyDecision: "allow",
+              completedAt: new Date(), correlationId: mode === "correlation_collision" ? "provider-call" : null,
+              resultHash: "verified", argumentsHash: "input", providerType: "mcp_remote_http" });
+            await appendHeartbeatRunEvent(db, { companyId: source.companyId, runId: source.runId, agentId: source.agentId,
+              eventType: "tool.execution.started", stream: "system", payload: { executionId: "provider-call",
+                name: mode === "control_name_spoof" ? "connections_search" : "archive_read", transport: "mcp", namespace: mode === "namespace_spoof" ? "untrusted" : "paperclip-assigned" } });
+          }
           const retire = vi.fn(() => true);
           const verifyStoppedSession = vi.fn(async (run: typeof heartbeatRuns.$inferSelect) =>
-            run.id === source.runId && mode !== "unproven" ? { evidence: {}, retire } : null);
+            run.id === source.runId && mode !== "unproven" ? { evidence: ["verified_read", "namespace_spoof"].includes(mode) ? { completedReadCalls: [{ callId: "provider-call", invocationId, toolName: "archive_read", argumentsHash: "input" }] } : {}, retire } : null);
           // Repeated sweeps must not create duplicate successors or user messages.
           await reconcileSafeNativeReplacements(db, new Date(), { verifyStoppedSession });
           await reconcileSafeNativeReplacements(db, new Date(), { verifyStoppedSession });
           const successors = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, source.runId));
-          expect(successors).toHaveLength(mode === "verified" ? 1 : 0);
+          expect(successors).toHaveLength(["verified", "verified_read"].includes(mode) ? 1 : 0);
           expect(await readFile(file, "utf8")).toBe(saved);
           const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, source.issueId));
           expect(comments.filter((row) => row.id === comment.id)).toMatchObject([{ body }]);
           expect(comments.filter((row) => row.body === body)).toHaveLength(1);
           const [task] = await db.select().from(issues).where(eq(issues.id, source.issueId));
-          if (mode === "verified") {
+          if (["verified", "verified_read"].includes(mode)) {
             expect(retire).toHaveBeenCalledOnce();
             expect(task!.status).toBe("in_progress");
             const continuation = await buildExecutionContinuation({
@@ -183,7 +195,7 @@ const support = externalDatabaseUrl
         }
       },
     );
-    it.each(["unproven", "changed", "verified"] as const)("requires stopped-session proof through commit (%s)", async (mode) => {
+    it.each(["unproven", "changed", "verified", "finish_mcp_spoof", "finish_namespace_spoof"] as const)("requires stopped-session proof through commit (%s)", async (mode) => {
       const source = await seed(2);
       await db.update(nativeRunFinalizations).set({ failureCode: "native_session_cleanup_quarantined" }).where(eq(nativeRunFinalizations.runId, source.runId));
       const [projected] = await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, source.issueId)).returning();
@@ -197,7 +209,9 @@ const support = externalDatabaseUrl
         run.id === source.runId && mode !== "unproven" ? { evidence: { completedTaskControlCallIds: ["completion"] }, retire } : null);
       await appendHeartbeatRunEvent(db, { companyId: source.companyId, runId: source.runId, agentId: source.agentId,
         eventType: "tool.execution.started", stream: "system",
-        payload: { name: "paperclip_finish", executionId: "completion", transport: "process" },
+        payload: { name: "paperclip_finish", executionId: "completion",
+          transport: mode === "finish_mcp_spoof" ? "mcp" : "dynamic",
+          namespace: mode === "finish_namespace_spoof" ? "external" : null },
       });
       await reconcileSafeNativeReplacements(db, new Date(), { verifyStoppedSession });
       await reconcileSafeNativeReplacements(db, new Date(), { verifyStoppedSession });

@@ -80,6 +80,20 @@ export function hashToolValue(value: unknown) {
   return createHash("sha256").update(stableSerialize(value)).digest("hex");
 }
 
+/** Keep the gateway response and stopped-provider receipt verifier identical. */
+export function namedGatewayToolResult(input: { invocationId: string; result: unknown }) {
+  const result = isPlainObject(input.result) ? input.result : null;
+  return {
+    content: [{ type: "text", text: typeof result?.content === "string"
+      ? result.content : JSON.stringify(result?.data ?? input.result ?? null) }],
+    structuredContent: result?.data ?? null,
+    isError: false,
+    _meta: { "paperclip.dev/invocationReceipt": {
+      schema: "paperclip.mcp_invocation_receipt.v1", invocationId: input.invocationId,
+    } },
+  };
+}
+
 export function signToolArguments(args: {
   invocationId: string;
   toolName: string;

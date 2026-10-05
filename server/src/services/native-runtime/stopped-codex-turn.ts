@@ -1,11 +1,19 @@
 import { parse } from "acorn";
 import { canonicalNativeJson } from "./canonical.js";
+import { hashToolValue } from "../tool-content-guards.js";
 
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown> : {};
 
 export interface CompletedTaskControlCall { callId: string; input: unknown }
+export interface CompletedMcpReadReceipt {
+  invocationId: string;
+  toolName: string;
+  argumentsHash: string;
+  result: unknown;
+  receiptHash: string;
+}
 
 // Interpret only JSON literals in one completion call. Never evaluate provider
 // JavaScript, and never infer safety merely from a script containing a tool name.
@@ -138,4 +146,74 @@ export function stoppedCodexTurnIsTextOnly(input: {
     }
   }
   return contextSeen && aborted && scripts.size === outputs.size && scripts.size === completedCalls.length && seenCalls.size === completedCalls.length;
+}
+
+/** An additive closed inventory. The caller authenticates every server receipt
+ * and its frozen target; provider hints and tool names grant no authority. */
+export function stoppedCodexTurnReadCalls(input: Parameters<typeof stoppedCodexTurnIsTextOnly>[0] & {
+  completedMcpReads: CompletedMcpReadReceipt[];
+}): { callId: string; invocationId: string; toolName: string; argumentsHash: string }[] | null {
+  try {
+    const receipts = new Map(input.completedMcpReads.map(receipt => [receipt.invocationId, receipt]));
+    if (!receipts.size || receipts.size > 512 || receipts.size !== input.completedMcpReads.length) return null;
+    const rows = input.rows.map(record);
+    const start = rows.findIndex(row => row.type === "event_msg" &&
+      record(row.payload).type === "task_started" && record(row.payload).turn_id === input.turnId);
+    if (start < 0) return null;
+    const calls = new Map<string, { toolName: string; argumentsHash: string }>();
+    const outputs = new Map<string, string>();
+    const completed = new Map<string, string>();
+    const used = new Set<string>();
+    let aborted = false;
+    const retained = rows.filter((row, index) => {
+      if (index < start) return true;
+      const payload = record(row.payload);
+      if (aborted) return true;
+      if (row.type === "event_msg" && payload.type === "turn_aborted") {
+        aborted = true;
+        return true;
+      }
+      if (row.type === "response_item" && payload.type === "function_call") {
+        if (typeof payload.call_id !== "string" || calls.has(payload.call_id) ||
+            typeof payload.name !== "string" || !payload.name.startsWith("mcp__paperclip_assigned__") ||
+            typeof payload.arguments !== "string") throw new Error("unsupported call");
+        calls.set(payload.call_id, { toolName: payload.name.slice("mcp__paperclip_assigned__".length),
+          argumentsHash: hashToolValue(JSON.parse(payload.arguments)) });
+        return false;
+      }
+      if (row.type === "response_item" && payload.type === "function_call_output") {
+        const call = typeof payload.call_id === "string" ? calls.get(payload.call_id) : undefined;
+        if (!call || outputs.has(payload.call_id as string) || typeof payload.output !== "string") throw new Error("unbound output");
+        const result = JSON.parse(payload.output);
+        const meta = record(record(result)._meta);
+        const bridge = record(meta["paperclip.dev/invocationReceipt"]);
+        const receipt = typeof bridge.invocationId === "string" ? receipts.get(bridge.invocationId) : undefined;
+        if (bridge.schema !== "paperclip.mcp_invocation_receipt.v1" || !receipt || used.has(receipt.invocationId) ||
+            receipt.toolName !== call.toolName || receipt.argumentsHash !== call.argumentsHash ||
+            canonicalNativeJson(receipt.result) !== canonicalNativeJson(result)) throw new Error("unverified output");
+        outputs.set(payload.call_id as string, receipt.invocationId);
+        used.add(receipt.invocationId);
+        return false;
+      }
+      if (row.type === "event_msg" && payload.type === "item_completed" && record(payload.item).type === "McpToolCall") {
+        const item = record(payload.item);
+        const call = typeof item.id === "string" ? calls.get(item.id) : undefined;
+        if (!call || completed.has(item.id as string) || item.server !== "paperclip-assigned" ||
+            item.tool !== call.toolName || item.status !== "completed" || item.error != null ||
+            record(item.result).isError !== false || payload.thread_id !== input.threadId || payload.turn_id !== input.turnId ||
+            hashToolValue(item.arguments) !== call.argumentsHash) throw new Error("unverified completed item");
+        const bridge = record(record(record(item.result)._meta)["paperclip.dev/invocationReceipt"]);
+        const receipt = typeof bridge.invocationId === "string" ? receipts.get(bridge.invocationId) : undefined;
+        if (!receipt || receipt.argumentsHash !== call.argumentsHash || receipt.toolName !== call.toolName ||
+            canonicalNativeJson(item.result) !== canonicalNativeJson(receipt.result)) throw new Error("unverified completed result");
+        completed.set(item.id as string, receipt.invocationId);
+        return false;
+      }
+      return true;
+    });
+    if (calls.size !== receipts.size || calls.size !== completed.size || calls.size !== outputs.size ||
+      ![...outputs].every(([callId, invocationId]) => completed.get(callId) === invocationId) ||
+      used.size !== receipts.size || !stoppedCodexTurnIsTextOnly({ ...input, rows: retained })) return null;
+    return [...outputs].map(([callId, invocationId]) => ({ callId, invocationId, ...calls.get(callId)! }));
+  } catch { return null; }
 }

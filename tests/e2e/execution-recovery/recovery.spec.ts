@@ -504,7 +504,10 @@ for (const journey of [
         await expect(page.getByRole("button", { name: /Reconcile and continue|Try again/ })).toHaveCount(0);
         await expect(page.getByRole("dialog", { name: "Reconcile execution" })).toHaveCount(0);
         const recovery = (await api(`/issues/${task.id}`)).activeRecoveryAction;
-        expect(recovery).toBeNull();
+        expect(recovery).toMatchObject({
+          status: "active", ownerType: "board", outcome: null,
+          evidence: { recoveryMode: "ambiguous_state" },
+        });
         await page.screenshot({ path: info.outputPath("uncertain-automatic-no-replay.png"), fullPage: true });
         // Past the retry delay, unknown effects still cannot be replayed.
         await page.waitForTimeout(35_000);

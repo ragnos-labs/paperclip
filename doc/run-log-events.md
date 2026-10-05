@@ -77,6 +77,15 @@ and turn IDs, and IDs of exactly receipted task-completion calls. The server fir
 checks the complete turn inventory, process-stop receipt, and execution binding.
 Unknown actions or changed retained state prevent this event and replacement.
 
+The separate `native.stopped_read_turn_verified` event uses
+`paperclip.stopped_read_turn.v1` evidence for a stopped turn containing completed
+read-only MCP calls. It adds correlated invocation IDs and a receipt digest.
+Each invocation must match the closed provider transcript, original execution
+binding and frozen tool target, with unchanged database receipts checked again
+under transaction locks. Incomplete calls, uncertain writes, changed targets and
+explicit cancellation remain held. The existing text-only evidence stays at its
+original version.
+
 The record documents why the old execution can be retired. It does not make the
 old session resumable, rewrite provider files, or authorize replay on its own.
 It remains in the local run log and adds no Telemetry or OpenTelemetry export.

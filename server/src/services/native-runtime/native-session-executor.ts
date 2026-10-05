@@ -4,7 +4,8 @@ import { readVerifiedRemoteWorkspaceFile } from "./remote-deliverable-file.js";
 import { copyBackCodexAuth } from "@paperclipai/adapter-codex-local/server";
 import { nativeCompletionFeedback } from "./native-completion-feedback.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent } from "../acknowledged-native-stop.js";
-import { stoppedCodexTurnIsTextOnly } from "./stopped-codex-turn.js";
+import { stoppedCodexTurnIsTextOnly, stoppedCodexTurnReadCalls, type CompletedMcpReadReceipt } from "./stopped-codex-turn.js";
+import { hashToolValue, namedGatewayToolResult, summarizeToolValue } from "../tool-content-guards.js";
 import { prepareVerifiedRemoteProviderPack } from "./remote-provider-pack.js";
 import { readNativeLocalProcessStop, PROCESS_START_REQUESTED } from "../native-local-process-stop.js";
 import { remoteLeaseCleanupScope } from "../remote-execution-termination.js";
@@ -109,6 +110,10 @@ import {
   issues,
   nativeRunFinalizations,
   nativeRunResults,
+  toolInvocations,
+  toolCatalogEntries,
+  toolConnections,
+  connectionGrants,
 } from "@paperclipai/db";
 import { PaperclipControlPlanePort } from "./paperclip-control-plane-port.js";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
@@ -2365,10 +2370,81 @@ export function rebaseRetainedNativeCleanupProviderHome(
 /** Prove that a crashed local Codex turn ended without external effects. No provider
  * is launched and no retained state is rewritten. The successor must use a fresh
  * normalized session; the old directory remains available for investigation. */
+export async function readStoppedNativeMcpReceipts(
+  source: Db, run: typeof heartbeatRuns.$inferSelect, lock = false,
+): Promise<CompletedMcpReadReceipt[] | null> {
+  try {
+      const query = source.select().from(toolInvocations).where(and(
+        eq(toolInvocations.companyId, run.companyId), eq(toolInvocations.runId, run.id),
+      )).orderBy(toolInvocations.id).limit(513);
+      const invocations = lock ? await query.for("update") : await query;
+      if (invocations.length > 512) return null;
+      const verified: CompletedMcpReadReceipt[] = [];
+      for (const invocation of invocations) {
+        const target = record(record(invocation.headerPolicySummary).nativeReadEvidence);
+        const summary = record(invocation.resultSummary);
+        if (invocation.agentId !== run.agentId || invocation.issueId !== run.nativeIssueId ||
+            invocation.providerType !== "mcp_remote_http" || invocation.riskLevel !== "read" ||
+            invocation.policyDecision !== "allow" || invocation.approvalState !== "not_required" ||
+            invocation.status !== "succeeded" || !invocation.startedAt || !invocation.completedAt ||
+            invocation.completedAt < invocation.startedAt || !run.startedAt ||
+            invocation.startedAt < run.startedAt || invocation.completedAt > run.finishedAt! ||
+            invocation.errorCode || invocation.errorMessage || !invocation.catalogEntryId || !invocation.connectionId ||
+            !invocation.argumentsHash || record(invocation.argumentsSummary).redactedFields instanceof Array &&
+              (record(invocation.argumentsSummary).redactedFields as unknown[]).length > 0 ||
+            typeof summary.summary !== "string" || Buffer.byteLength(summary.summary) > 4000 ||
+            Buffer.byteLength(summary.summary) !== summary.sizeBytes ||
+            !Array.isArray(summary.redactedFields) || summary.redactedFields.length > 0 ||
+            target.schema !== "paperclip.native_mcp_read_target.v1" ||
+            target.companyId !== run.companyId || target.runId !== run.id || target.agentId !== run.agentId ||
+            target.issueId !== run.nativeIssueId || target.nativeSessionId !== run.nativeSessionId ||
+            target.runnerInstanceId !== run.runnerInstanceId ||
+            target.executionInputHash !== hashToolValue(record(run.runnerProfileJson).nativeExecutionInput) ||
+            target.gatewayId !== invocation.gatewayId || target.gatewayTokenId !== invocation.gatewayTokenId ||
+            !target.gatewayId || !target.gatewayTokenId || target.riskLevel !== "read" || target.transport !== "mcp_http" ||
+            target.connectionId !== invocation.connectionId || target.catalogEntryId !== invocation.catalogEntryId ||
+            !invocation.catalogVersionHash || !invocation.catalogSchemaHash ||
+            target.catalogVersionHash !== invocation.catalogVersionHash || target.catalogSchemaHash !== invocation.catalogSchemaHash ||
+            target.gatewayToolName !== invocation.toolName || target.upstreamToolName !== invocation.upstreamToolName ||
+            typeof target.endpointHash !== "string" || !/^[a-f0-9]{64}$/.test(target.endpointHash)) return null;
+        const result = JSON.parse(summary.summary);
+        const data = record(record(result).data);
+        if (summarizeToolValue(result).sha256 !== invocation.resultHash || summary.sha256 !== invocation.resultHash ||
+            record(result).error || data.isError !== false || data.transport !== "mcp_http" || data.spawnedLocalProcess !== false) return null;
+        const catalogQuery = source.select({ entry: toolCatalogEntries, connection: toolConnections, grant: connectionGrants })
+          .from(toolCatalogEntries).innerJoin(toolConnections, eq(toolConnections.id, toolCatalogEntries.connectionId))
+          .innerJoin(connectionGrants, and(eq(connectionGrants.connectionId, toolConnections.id),
+            eq(connectionGrants.id, String(target.credentialGrantId))))
+          .where(and(eq(toolCatalogEntries.id, invocation.catalogEntryId),
+            eq(toolCatalogEntries.companyId, run.companyId), eq(toolConnections.companyId, run.companyId),
+            eq(connectionGrants.companyId, run.companyId))).limit(1);
+        const [current] = lock ? await catalogQuery.for("update") : await catalogQuery;
+        if (!current || current.entry.entryKind !== "tool" || current.entry.status !== "active" ||
+            current.entry.riskLevel !== "read" || !current.entry.isReadOnly || current.entry.isWrite || current.entry.isDestructive ||
+            current.entry.versionHash !== invocation.catalogVersionHash || current.entry.schemaHash !== invocation.catalogSchemaHash ||
+            current.entry.toolName !== target.upstreamToolName || current.connection.transport !== "mcp_remote" ||
+            current.connection.status !== "active" || !current.connection.enabled || current.grant.status !== "active" ||
+            hashToolValue(current.connection.config ?? {}) !== target.connectionConfigHash ||
+            hashToolValue(current.connection.transportConfig ?? {}) !== target.connectionTransportConfigHash ||
+            hashToolValue(current.connection.credentialRefs ?? []) !== target.credentialRefsHash ||
+            hashToolValue(current.connection.credentialSecretRefs ?? []) !== target.credentialSecretRefsHash ||
+            hashToolValue(current.grant.credentialSecretRefs ?? []) !== target.grantCredentialRefsHash) return null;
+        verified.push({ invocationId: invocation.id, toolName: invocation.toolName,
+          argumentsHash: invocation.argumentsHash, result: namedGatewayToolResult({ invocationId: invocation.id, result }),
+          receiptHash: nativeSha256({ target, policyDecision: invocation.policyDecision,
+            approvalState: invocation.approvalState, argumentsHash: invocation.argumentsHash,
+            resultHash: invocation.resultHash, startedAt: invocation.startedAt.toISOString(),
+            completedAt: invocation.completedAt.toISOString() }),
+        });
+      }
+      return verified;
+  } catch { return null; }
+}
+
 export async function verifyStoppedNativeSessionForReplacement(
   db: Db,
   run: typeof heartbeatRuns.$inferSelect,
-): Promise<{ evidence: Record<string, unknown>; retire: () => boolean } | null> {
+): Promise<{ evidence: Record<string, unknown>; retire: (tx: Db) => boolean | Promise<boolean> } | null> {
   try {
     if (run.runtimeMode !== "native" || run.status !== "failed" || !run.finishedAt ||
         !run.nativeIssueId || !run.nativeSessionId || !run.runnerInstanceId) return null;
@@ -2468,16 +2544,22 @@ export async function verifyStoppedNativeSessionForReplacement(
     // A partial final write is not a closed transcript.
     if (!bytes.toString("utf8").endsWith("\n")) return null;
     const rows = bytes.toString("utf8").trimEnd().split("\n").map(line => JSON.parse(line));
-    if (!stoppedCodexTurnIsTextOnly({ rows, threadId: provider.providerSessionId, turnId, cwd: execution.workspace.cwd, completedTaskControlCalls })) return null;
+    const inventory = { rows, threadId: provider.providerSessionId, turnId, cwd: execution.workspace.cwd, completedTaskControlCalls };
+    const textOnly = stoppedCodexTurnIsTextOnly(inventory);
+    const reads = await readStoppedNativeMcpReceipts(db, run);
+    const completedReadCalls = !textOnly && reads ? stoppedCodexTurnReadCalls({ ...inventory, completedMcpReads: reads }) : [];
+    if (!reads || (textOnly ? reads.length !== 0 : !completedReadCalls)) return null;
     const rolloutSha256 = nativeSha256(bytes.toString("utf8"));
-    const evidence = { schema: "paperclip.stopped_text_turn.v1", runId: run.id, nativeSessionId: run.nativeSessionId,
+    const evidence = { schema: textOnly ? "paperclip.stopped_text_turn.v1" : "paperclip.stopped_read_turn.v1", runId: run.id, nativeSessionId: run.nativeSessionId,
       runnerInstanceId: run.runnerInstanceId, processPid: stopped.processPid, providerPid: provider.processId,
       providerSessionId: provider.providerSessionId, providerTurnId: turnId,
       stateFingerprint: snapshot.fingerprint, rolloutSha256,
-      completedTaskControlCallIds: completedTaskControlCalls.map(call => call.callId) };
+      completedTaskControlCallIds: completedTaskControlCalls.map(call => call.callId),
+      ...(!textOnly ? { completedReadCalls, readInvocationIds: reads.map(read => read.invocationId), readReceiptsHash: nativeSha256(reads) } : {}) };
     return {
       evidence,
-      retire: () => idle() && cleanupProcessAbsent(stopped.processPid) && cleanupProcessAbsent(provider.processId) &&
+      retire: async (tx) => (nativeSha256(await readStoppedNativeMcpReceipts(tx, run, true)) === nativeSha256(reads)) &&
+        idle() && cleanupProcessAbsent(stopped.processPid) && cleanupProcessAbsent(provider.processId) &&
         cleanupStateSnapshot(root).fingerprint === snapshot.fingerprint &&
         nativeSha256(readBoundedNativeFile(rolloutPath, 32 * 1024 * 1024, "native_crash_inventory_unproven").toString("utf8")) === rolloutSha256 &&
         completeTerminatedLocalNativeSessionCleanup({ companyId: run.companyId, runId: run.id, runnerInstanceId: run.runnerInstanceId! }),
