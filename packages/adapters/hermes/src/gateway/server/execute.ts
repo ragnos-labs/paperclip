@@ -39,6 +39,7 @@ type HermesHttpError = Error & {
   code?: string;
   retryNotBefore?: string | null;
   body?: unknown;
+  providerWorkStarted?: false;
 };
 
 type TerminalState = {
@@ -377,8 +378,17 @@ async function fetchJson(input: RequestInfo | URL, init: RequestInit): Promise<u
   try {
     response = await fetch(input, init);
   } catch (err) {
-    const fetchErr = new Error(`Hermes gateway request failed: ${fetchFailureMessage(err)}`) as HermesHttpError;
+    const fetchErr = new Error(`Hermes gateway request failed: ${fetchFailureMessage(err)}`, {
+      cause: err instanceof Error ? err.cause : undefined,
+    }) as HermesHttpError;
     fetchErr.code = "hermes_gateway_connect_failed";
+    const cause = err instanceof Error && !(err.cause instanceof AggregateError) ? (asRecord(err.cause) ?? {}) : {};
+    // Only a refused original connection proves create never reached Hermes.
+    // Redirects must be disabled: a redirect may follow an accepted POST.
+    if (init.method === "POST" && init.redirect === "error"
+        && cause.code === "ECONNREFUSED" && cause.syscall === "connect") {
+      fetchErr.providerWorkStarted = false;
+    }
     throw fetchErr;
   }
   const body = await readResponseJson(response);
@@ -808,6 +818,9 @@ function errorResult(err: unknown, redactText: TextRedactor = sanitizeSensitiveT
     errorCode: code,
     errorFamily: classified?.family ?? (code === "hermes_gateway_connect_failed" ? "transient_upstream" : null),
     retryNotBefore: hermesError.retryNotBefore ?? null,
+    ...(hermesError.providerWorkStarted === false
+      ? { executionRecovery: { kind: "bootstrap" as const, providerWorkStarted: false as const } }
+      : {}),
     errorMessage,
     errorMeta: {
       ...(hermesError.status ? { status: hermesError.status } : {}),
@@ -939,6 +952,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     ctx.onDispatch?.();
     const created = await fetchJson(createRunUrl, {
       method: "POST",
+      redirect: "error",
       headers: runHeaders,
       body: JSON.stringify(body),
     });

@@ -157,6 +157,13 @@ status requests also respect their shorter cleanup deadlines. A missing run ID,
 lost create response, or unconfirmed stop remains unconfirmed. The adapter does
 not replay the create request or certify safe recovery from those outcomes.
 
+Create requests reject redirects. A direct structured `ECONNREFUSED` with
+`syscall: connect` on that original request proves Hermes work did not start.
+Only this failure supplies bootstrap recovery evidence for Paperclip's existing
+bounded retry scheduler. Generic network errors, resets, timeouts, failed
+response bodies, HTTP errors and post-create failures supply no such evidence;
+uncertain action outcomes still require reconciliation.
+
 ### Compatibility with the old gateway package
 
 `@paperclipai/adapter-hermes-gateway` remains as a deprecated compatibility shim

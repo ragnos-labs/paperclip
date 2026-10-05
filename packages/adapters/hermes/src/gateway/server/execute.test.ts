@@ -1,7 +1,10 @@
+import { createServer } from "node:http";
 import { describe, expect, it, vi, afterEach } from "vitest";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { execute, mapFinalResultForTest, parseSseFramesForTest, resolveSessionKey } from "./execute.js";
 import { testEnvironment } from "./test.js";
+
+const nativeFetch = globalThis.fetch;
 
 // Shorten the post-stop grace period so the unconfirmed-stop path runs quickly.
 vi.mock("../shared/constants.js", async (importOriginal) => ({
@@ -677,6 +680,127 @@ describe("execute", () => {
     expect(result.errorCode).toBe("hermes_gateway_connect_failed");
     expect(result.errorMessage).toContain("ENOTFOUND");
     expect(result.errorMessage).toContain("host.docker.internal");
+  });
+
+  it("proves bootstrap recovery on an actual refused loopback connection", async () => {
+    const server = createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing loopback port");
+    await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    vi.stubGlobal("fetch", nativeFetch);
+    const result = await execute(makeCtx({
+      apiBaseUrl: `http://127.0.0.1:${address.port}`, apiKey: "test-key",
+    }));
+    expect(result.errorCode).toBe("hermes_gateway_connect_failed");
+    expect(result.executionRecovery).toEqual({ kind: "bootstrap", providerWorkStarted: false });
+  });
+
+  it("rejects an accepted create redirect without following it or granting retry evidence", async () => {
+    let creates = 0;
+    let redirectsFollowed = 0;
+    const server = createServer((req, res) => {
+      if (req.url === "/v1/runs") {
+        creates++;
+        res.writeHead(307, { Location: "/redirect-destination" });
+      } else {
+        redirectsFollowed++;
+        res.writeHead(200);
+      }
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Missing loopback port");
+      vi.stubGlobal("fetch", nativeFetch);
+      const result = await execute(makeCtx({
+        apiBaseUrl: `http://127.0.0.1:${address.port}`, apiKey: "test-key",
+      }));
+      expect(creates).toBe(1);
+      expect(redirectsFollowed).toBe(0);
+      expect(result.exitCode).toBe(1);
+      expect(result.executionRecovery).toBeUndefined();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+    }
+  });
+
+  it("keeps an accepted create with a failed response body unconfirmed", async () => {
+    const cause = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED", syscall: "connect" });
+    const fetchMock = vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { controller.error(Object.assign(new Error("body lost"), { cause })); },
+    })));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" }));
+    expect(result.exitCode).toBe(1);
+    expect(result.executionRecovery).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never turns a post-create refused connection into bootstrap evidence", async () => {
+    const cause = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED", syscall: "connect" });
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      if (String(input).endsWith("/v1/runs") && init?.method === "POST") {
+        return new Response(JSON.stringify({ run_id: "run-created" }));
+      }
+      throw Object.assign(new Error("fetch failed"), { cause });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await execute(makeCtx({
+      apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key", timeoutSec: 0.05,
+    }));
+    expect(result.exitCode).toBe(1);
+    expect(result.executionRecovery).toBeUndefined();
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/v1/runs") && init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("preserves transient classification for a create failure without a structured cause", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("fetch failed"); }));
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" }));
+    expect(result.errorCode).toBe("hermes_gateway_connect_failed");
+    expect(result.errorFamily).toBe("transient_upstream");
+    expect(result.executionRecovery).toBeUndefined();
+  });
+
+  it("provides bootstrap recovery only for a structured refused create connection", async () => {
+    const cause = Object.assign(new Error("connection refused"), {
+      code: "ECONNREFUSED", syscall: "connect",
+    });
+    const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      expect(init?.redirect).toBe("error");
+      throw Object.assign(new Error("fetch failed"), { cause });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" }));
+    expect(result.errorFamily).toBe("transient_upstream");
+    expect(result.executionRecovery).toEqual({ kind: "bootstrap", providerWorkStarted: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { code: "ECONNREFUSED" },
+    { code: "ENOTFOUND", syscall: "getaddrinfo" },
+    { code: "ECONNRESET", syscall: "read" },
+    { code: "ETIMEDOUT", syscall: "connect" },
+    { message: "ECONNREFUSED connect" },
+    Object.assign(new AggregateError([], "connect failures"), { code: "ECONNREFUSED", syscall: "connect" }),
+  ])("keeps uncertain create transport failures held: %j", async (cause) => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw Object.assign(new Error("fetch failed"), { cause });
+    }));
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" }));
+    expect(result.executionRecovery).toBeUndefined();
+  });
+
+  it.each([307, 308, 500, 503])("keeps create HTTP %i outcomes held", async (status) => {
+    vi.stubGlobal("fetch", vi.fn(async (_input: unknown, init?: RequestInit) => {
+      expect(init?.redirect).toBe("error");
+      return new Response(JSON.stringify({ error: "unconfirmed create" }), { status });
+    }));
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "test-key" }));
+    expect(result.executionRecovery).toBeUndefined();
   });
 
   it("redacts echoed auth material from HTTP error payloads", async () => {
