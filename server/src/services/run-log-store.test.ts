@@ -377,3 +377,34 @@ describe("in-flight mirror", () => {
     }
   });
 });
+
+describe("accepted run log resumption", () => {
+  it("retains prefix bytes, hash and sequence across store instances", async () => {
+    const first = createDurableRunLogStore({ basePath: baseDir });
+    const handle = await first.begin(begin);
+    await first.append(handle, { stream: "stdout", chunk: "retained checkpoint", ts: "t1", seq: 7 });
+    const prefix = await first.read(handle);
+    const summary = await first.finalize(handle);
+    const second = createDurableRunLogStore({ basePath: baseDir });
+    const resumed = await second.resume!({ ...begin, logRef: handle.logRef,
+      minimumBytes: summary.bytes, sha256: summary.sha256 });
+    expect(resumed).toMatchObject({ sequence: 7, bytes: summary.bytes, sha256: summary.sha256 });
+    await second.append(resumed.handle, { stream: "stdout", chunk: "completion", ts: "t2", seq: resumed.sequence + 1 });
+    expect((await second.read(handle)).content.startsWith(prefix.content)).toBe(true);
+  });
+  it("holds missing, truncated, corrupt and foreign logs without recreating them", async () => {
+    const store = createDurableRunLogStore({ basePath: baseDir });
+    const handle = await store.begin(begin);
+    await store.append(handle, { stream: "stdout", chunk: "checkpoint", ts: "t", seq: 2 });
+    const prefix = (await store.read(handle)).content;
+    await expect(store.resume!({ ...begin, runId: "other", logRef: handle.logRef })).rejects.toThrow("identity");
+    await expect(store.resume!({ ...begin, logRef: handle.logRef, minimumBytes: 10000 })).rejects.toThrow("truncated");
+    await expect(store.resume!({ ...begin, logRef: handle.logRef, sha256: "bad" })).rejects.toThrow("integrity");
+    expect((await store.read(handle)).content).toBe(prefix);
+    await fs.writeFile(path.join(baseDir, handle.logRef), prefix.slice(0, -1));
+    await expect(store.resume!({ ...begin, logRef: handle.logRef })).rejects.toThrow("Incomplete");
+    await fs.unlink(path.join(baseDir, handle.logRef));
+    await expect(store.resume!({ ...begin, logRef: handle.logRef })).rejects.toThrow();
+    await expect(fs.stat(path.join(baseDir, handle.logRef))).rejects.toThrow();
+  });
+});

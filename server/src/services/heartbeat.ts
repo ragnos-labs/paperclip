@@ -5,7 +5,7 @@ import { readQueuedInteractionResponse } from "./queued-interaction-response.js"
 import { AGENT_CHAT_DIRECTIVE, conversationReplay, isConversation, isConversationExecutionWake, isWaitingConversation, prepareConversationTurn, settleConversationTurn } from "./agent-conversations.js";
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
-import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease, readLegacyRemoteRunBinding, persistLegacyRemoteRunBinding, claimLegacyRemoteRunObservation, releaseLegacyRemoteRunObservation, legacyObserverOwnerCondition } from "./legacy-controller-lease.js";
+import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease, readLegacyRemoteRunBinding, persistLegacyRemoteRunBinding, claimLegacyRemoteRunObservation, releaseLegacyRemoteRunObservation, legacyObserverOwnerCondition, withLegacyObserverOwnership } from "./legacy-controller-lease.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped, remoteTerminationReceipt, stoppedRemoteCleanupScopes } from "./remote-execution-termination.js";
 import { applyConnectorSkills, prepareConnectorSkillDelivery, resolveConnectorAssignments } from "./connector-runtime.js";
@@ -19984,6 +19984,143 @@ export function heartbeatService(
     return promise;
   }
 
+  // Accepted work is observed before fresh admission, provisioning or task
+  // suppression. No create request or new subscriber belongs on this path.
+  async function observeAcceptedRemoteRun(run: typeof heartbeatRuns.$inferSelect) {
+    const binding = readLegacyRemoteRunBinding(run);
+    if (!binding || run.controllerBootId !== legacyControllerBootId) return;
+    const control = createAdapterExecutionControl();
+    remoteRunObservers.set(run.id, control);
+    activeRunExecutions.add(run.id);
+    const lease = watchLegacyControllerLease(db, run, control.observerDetachController);
+    const issueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+    let logWrites = Promise.resolve();
+    try {
+      const agent = await getAgent(run.agentId);
+      if (!agent || agent.companyId !== run.companyId || agent.adapterType !== binding.adapterType ||
+          ["paused", "terminated"].includes(agent.status)) throw new Error("Accepted run observation requires its original available agent");
+      const { resolvedConfig } = await resolveExecutionRunAdapterConfig({
+        companyId: run.companyId, agentId: run.agentId, adapterType: binding.adapterType,
+        issueId, heartbeatRunId: run.id, responsibleUserId: run.responsibleUserId,
+        executionRunConfig: parseObject(agent.adapterConfig), projectEnv: null, secretsSvc,
+      });
+      if (!run.logRef || run.logStore !== "local_file" || !runLogStore.resume) {
+        throw new Error("Accepted run log cannot be safely resumed");
+      }
+      const resumed = await withLegacyObserverOwnership(db, run, async () => runLogStore.resume!({
+        companyId: run.companyId, agentId: run.agentId, runId: run.id, logRef: run.logRef!,
+        minimumBytes: run.logBytes ?? 0, sha256: run.logSha256,
+      }));
+      let sequence = resumed.sequence;
+      let stdout = run.stdoutExcerpt ?? "", stderr = run.stderrExcerpt ?? "";
+      const redaction = await getCurrentUserRedactionOptions();
+      const onLog = (stream: "stdout" | "stderr", chunk: string) => {
+        const write = logWrites.then(() => withLegacyObserverOwnership(db, run, async tx => {
+          control.observerDetachController.signal.throwIfAborted();
+          const clean = compactRunLogChunk(redactSensitiveText(redactCurrentUserText(chunk, redaction)));
+          if (stream === "stdout") stdout = appendExcerpt(stdout, clean);
+          else stderr = appendExcerpt(stderr, clean);
+          const bytes = await runLogStore.append(resumed.handle, { stream, chunk: clean,
+            ts: new Date().toISOString(), seq: ++sequence });
+          await tx.update(heartbeatRuns).set({ logBytes: sql`coalesce(${heartbeatRuns.logBytes}, ${resumed.bytes}) + ${bytes}`,
+            stdoutExcerpt: stdout, stderrExcerpt: stderr, updatedAt: new Date() })
+            .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+              legacyObserverOwnerCondition(legacyControllerBootId)));
+        }));
+        logWrites = write.catch(() => { control.observerDetachController.abort(new Error("Accepted log write failed")); });
+        return write;
+      };
+      const result = await getServerAdapter(binding.adapterType).execute({
+        runId: run.id, agent, config: resolvedConfig, context: parseObject(run.contextSnapshot),
+        runtime: { sessionId: run.sessionIdBefore, sessionParams: null,
+          sessionDisplayId: run.sessionIdBefore, taskKey: issueId },
+        remoteRunRecovery: binding, observerDetachSignal: control.observerDetachController.signal,
+        signal: control.controller.signal, onLog, onMeta: async () => {},
+        onCancellationReady: async () => {
+          await lease.assertOwned();
+          await registerAdapterExecutionControl(run.id, control);
+        },
+      });
+      await logWrites;
+      if (result.remoteRunDetached || control.observerDetachController.signal.aborted) return;
+      const remoteStatus = readNonEmptyString(result.resultJson?.status);
+      if (!remoteStatus || !["completed", "succeeded", "done", "failed", "error", "cancelled", "canceled"].includes(remoteStatus)) {
+        throw new Error("Accepted remote status remains unverified");
+      }
+      if ((remoteStatus === "cancelled" || remoteStatus === "canceled") &&
+          parseObject(result.resultJson?.executionCancellation).state !== "acknowledged") {
+        throw new Error("Native worker stop remains unverified");
+      }
+      const status = result.timedOut ? "timed_out" : result.signal === "SIGTERM" ? "cancelled" :
+        result.exitCode === 0 ? "succeeded" : "failed";
+      const settled = await db.transaction(async tx => {
+        // Keep the existing issue-before-run lock order used by board Stop.
+        if (issueId) await tx.select({ id: issues.id }).from(issues)
+          .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId))).for("update");
+        return withLegacyObserverOwnership(tx as unknown as Db, run, async owned => {
+          control.observerDetachController.signal.throwIfAborted();
+          const summary = await runLogStore.finalize(resumed.handle);
+          const [updated] = await owned.update(heartbeatRuns).set({
+            status, finishedAt: new Date(), updatedAt: new Date(), executionStatusDeliveryId: randomUUID(),
+            error: result.errorMessage ?? null, errorCode: result.errorCode ?? null,
+            exitCode: result.exitCode, signal: result.signal,
+            sessionIdAfter: result.sessionDisplayId ?? result.sessionId ?? run.sessionIdBefore,
+            usageJson: result.usage ? { ...result.usage } : null,
+            resultJson: { ...parseObject(run.resultJson), ...parseObject(result.resultJson), remoteRunBinding: binding,
+              ...(result.executionRecovery ? { executionRecovery: result.executionRecovery } : {}) },
+            stdoutExcerpt: stdout, stderrExcerpt: stderr,
+            logBytes: summary.bytes, logSha256: summary.sha256, logCompressed: summary.compressed,
+          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+            eq(heartbeatRuns.status, "running"), legacyObserverOwnerCondition(legacyControllerBootId))).returning();
+          if (!updated) throw new Error("Accepted terminal transition lost ownership");
+          if (run.wakeupRequestId) await owned.update(agentWakeupRequests).set({
+            status: status === "succeeded" ? "completed" : status, finishedAt: new Date(), error: updated.error,
+          }).where(and(eq(agentWakeupRequests.id, run.wakeupRequestId), eq(agentWakeupRequests.companyId, run.companyId)));
+          if (issueId) {
+            await owned.update(issues).set({ executionRunId: null, executionAgentNameKey: null, executionLockedAt: null })
+              .where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId), eq(issues.executionRunId, run.id)));
+            await owned.update(issues).set({ checkoutRunId: null })
+              .where(and(eq(issues.companyId, run.companyId), eq(issues.id, issueId), eq(issues.checkoutRunId, run.id)));
+            await owned.update(agentTaskSessions).set({ sessionParamsJson: result.sessionParams ?? null,
+              sessionDisplayId: updated.sessionIdAfter, lastError: updated.error, updatedAt: new Date() })
+              .where(and(eq(agentTaskSessions.companyId, run.companyId), eq(agentTaskSessions.agentId, run.agentId),
+                eq(agentTaskSessions.lastRunId, run.id)));
+          }
+          await owned.update(agentRuntimeState).set({ lastRunId: run.id, lastRunStatus: status,
+            lastError: updated.error, updatedAt: new Date() })
+            .where(and(eq(agentRuntimeState.companyId, run.companyId), eq(agentRuntimeState.agentId, run.agentId)));
+          return updated;
+        });
+      });
+      publishLiveEvent({ companyId: run.companyId, type: "heartbeat.run.status",
+        payload: buildHeartbeatRunStatusLiveEventPayload(settled) });
+      publishRunLifecyclePluginEvent(settled);
+      emitTerminalAgentTaskRun(settled, "running");
+      await finalizeAgentStatus(run.agentId, status, settled.error);
+    } catch (error) {
+      // Configuration, credentials and unavailable evidence are observation
+      // holds. They cannot revoke accepted work or provide bootstrap proof.
+      if (!control.observerDetachController.signal.aborted) {
+        await withLegacyObserverOwnership(db, run, async tx => {
+          await tx.update(heartbeatRuns).set({ errorCode: "hermes_gateway_observation_held",
+            error: "Accepted Hermes job requires observation reconciliation", updatedAt: new Date() })
+            .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+              legacyObserverOwnerCondition(legacyControllerBootId)));
+        }).catch(() => undefined);
+      }
+      logger.warn({ runId: run.id, err: error }, "accepted remote observation held");
+    } finally {
+      control.observerDetachController.abort(new Error("Remote observation detached"));
+      await logWrites;
+      lease.stop();
+      if (remoteRunObservers.get(run.id) === control) remoteRunObservers.delete(run.id);
+      if (adapterExecutionControls.get(run.id) === control) adapterExecutionControls.delete(run.id);
+      activeRunExecutions.delete(run.id);
+      control.finish();
+      await releaseLegacyRemoteRunObservation(db, run);
+    }
+  }
+
   async function executeRun(
     runId: string,
     runOptions: {
@@ -19992,6 +20129,11 @@ export function heartbeatService(
       remoteRunRecovery?: boolean;
     } = {},
   ) {
+    if (runOptions.remoteRunRecovery) {
+      const accepted = await getRun(runId);
+      if (accepted) await observeAcceptedRemoteRun(accepted);
+      return;
+    }
     const attemptStartedAtMs = Date.now();
     let attestedQuestionResponseAtMs: number | null = null;
     if ((await getSchedulingSuppression()).suppressed) {

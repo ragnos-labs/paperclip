@@ -1,5 +1,6 @@
 import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { createHash } from "node:crypto";
 import { notFound } from "../errors.js";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
@@ -31,6 +32,9 @@ export interface RunLogFinalizeSummary {
 
 export interface RunLogStore {
   begin(input: { companyId: string; agentId: string; runId: string }): Promise<RunLogHandle>;
+  resume?(input: { companyId: string; agentId: string; runId: string;
+    logRef: string; minimumBytes?: number; sha256?: string | null }):
+    Promise<{ handle: RunLogHandle; bytes: number; sha256: string; sequence: number }>;
   append(
     handle: RunLogHandle,
     event: { stream: "stdout" | "stderr" | "system"; chunk: string; ts: string; seq?: number },
@@ -286,6 +290,44 @@ export function createDurableRunLogStore(options: DurableRunLogStoreOptions): Ru
       await fs.writeFile(absPath, "", "utf8");
       await retireInflightMirror(relPath);
       return { store: "local_file", logRef: relPath };
+    },
+
+    async resume(input) {
+      const [companyId, agentId, runId] = safeSegments(input.companyId, input.agentId, input.runId);
+      const expected = path.join(companyId!, agentId!, `${runId}.ndjson`);
+      if (input.logRef !== expected) throw new Error("Run log identity does not match accepted run");
+      const absPath = resolveWithin(basePath, input.logRef);
+      const realPath = await fs.realpath(absPath);
+      const realBase = await fs.realpath(basePath);
+      resolveWithin(realBase, path.relative(realBase, realPath));
+      const stat = await fs.lstat(absPath);
+      if (!stat.isFile() || stat.size < (input.minimumBytes ?? 0)) {
+        throw new Error("Accepted run log is missing or truncated");
+      }
+      const sha256 = await sha256File(absPath);
+      if (input.sha256 && input.sha256 !== sha256) throw new Error("Run log integrity mismatch");
+      let sequence = 0;
+      const stream = createReadStream(absPath);
+      try {
+        for await (const line of createInterface({ input: stream, crlfDelay: Infinity })) {
+          const event = JSON.parse(line);
+          if (!event || typeof event.chunk !== "string" ||
+              !["stdout", "stderr", "system"].includes(event.stream)) throw new Error("Invalid run log prefix");
+          if (event.seq !== undefined && (!Number.isSafeInteger(event.seq) || event.seq <= sequence)) {
+            throw new Error("Invalid run log sequence");
+          }
+          sequence = event.seq ?? sequence + 1;
+        }
+      } finally { stream.destroy(); }
+      if (stat.size > 0) {
+        const file = await fs.open(absPath, "r");
+        try {
+          const last = Buffer.alloc(1);
+          await file.read(last, 0, 1, stat.size - 1);
+          if (last[0] !== 10) throw new Error("Incomplete run log prefix");
+        } finally { await file.close(); }
+      }
+      return { handle: { store: "local_file", logRef: input.logRef }, bytes: stat.size, sha256, sequence };
     },
 
     async append(handle, event) {

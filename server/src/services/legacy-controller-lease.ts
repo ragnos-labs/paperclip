@@ -34,8 +34,10 @@ export function legacyObserverOwnerCondition(bootId: string) {
 }
 
 export async function persistLegacyRemoteRunBinding(db: Db, run: Run, binding: AdapterRemoteRunBinding) {
-  if (claimedAdapterType(run) !== "hermes_gateway" || binding.adapterType !== "hermes_gateway") {
-    throw new Error("Remote run binding requires the claimed Hermes gateway adapter.");
+  const candidate = { ...run, externalRunId: binding?.providerRunId,
+    resultJson: { remoteRunBinding: binding } };
+  if (!readLegacyRemoteRunBinding(candidate)) {
+    throw new Error("Invalid accepted Hermes run binding.");
   }
   // The accepted identity is immutable. A retry of this exact callback may
   // acknowledge the same binding, but may never overwrite another accepted job.
@@ -179,4 +181,20 @@ export function watchLegacyControllerLease(db: Db, run: Run, controller: AbortCo
   }, LEGACY_CONTROLLER_RENEW_MS);
   timer.unref();
   return { assertOwned, stop() { stopped = true; clearInterval(timer); clearTimeout(deadline); } };
+}
+
+/** Row lock serializes filesystem effects with lease takeover. Never use an
+ * in-memory ownership check as permission for a durable write. */
+export async function withLegacyObserverOwnership<T>(
+  db: Db, run: Pick<Run, "id" | "companyId">,
+  effect: (tx: Db) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async tx => {
+    const [owned] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+        eq(heartbeatRuns.status, "running"), legacyObserverOwnerCondition(legacyControllerBootId)))
+      .for("update");
+    if (!owned) throw new Error("Remote observer no longer owns this run");
+    return effect(tx as unknown as Db);
+  });
 }
