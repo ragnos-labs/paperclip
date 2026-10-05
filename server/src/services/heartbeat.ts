@@ -20141,6 +20141,11 @@ export function heartbeatService(
             ...(result.executionRecovery ? { executionRecovery: result.executionRecovery } : {}) },
           stdoutExcerpt: stdout, stderrExcerpt: stderr },
       });
+      await revokeHeartbeatRunGatewayTokens({ db, companyId: run.companyId, runId: run.id });
+      await releaseEnvironmentLeasesForRun({ runId: run.id, companyId: run.companyId,
+        agentId: run.agentId, status: settled.status, failureReason: settled.error,
+        providerResourceDisposition: "stop_and_retain" });
+      await releaseRuntimeServicesForRun(run.id);
       await finalizeAgentStatus(run.agentId, status, settled.error);
     } catch (error) {
       // Configuration, credentials and unavailable evidence are observation
@@ -29082,8 +29087,10 @@ export function heartbeatService(
         ? captureAdapterStopOwnership(run.id)
         : undefined;
     const control = stopOwnership?.control;
-    if (claimedAdapterType(run) === "hermes_gateway" && run.status === "running" && !control)
+    if (claimedAdapterType(run) === "hermes_gateway" && run.status === "running" && !control) {
+      stopOwnership?.release();
       throw conflict("Hermes termination is unverified; accepted work remains held for observation reconciliation.");
+    }
     // Capture the existing adapter owner before waiting on the run lock. Then
     // atomically fence preparation and refresh the selected runtime, so Stop
     // cannot miss a native handoff that won after its first read.

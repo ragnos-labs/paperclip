@@ -257,6 +257,15 @@ describe("accepted Hermes observation ownership", () => {
     const [task] = await db.select().from(issues).where(eq(issues.id, fixture.issueId));
     expect(task.executionRunId).toBe(fixture.run.id);
     expect((await fixture.store.read(fixture.handle)).content).toBe(fixture.prefix);
+    await db.update(agents).set({ status: "idle" }).where(eq(agents.id, fixture.run.agentId));
+    adapterExecute.mockImplementation(async context => {
+      await context.onCancellationReady();
+      return { exitCode: 0, signal: null, timedOut: false, resultJson: { status: "completed" } };
+    });
+    const successor = heartbeatService(db);
+    await successor.reapOrphanedRuns({ staleThresholdMs: 0 });
+    await successor.drainActiveRunExecutions();
+    expect(await saved(fixture.run.id)).toMatchObject({ status: "succeeded", externalRunId: binding.providerRunId });
   });
   it("operator Stop holds an observed job whose provider stop remains unconfirmed", async () => {
     const fixture = await acceptedWithLog();
