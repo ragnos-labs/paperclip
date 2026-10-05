@@ -115,7 +115,8 @@ for (const journey of [
         PAPERCLIP_RECOVERY_CEO_LINEAGE: journey === "ceo_lineage" ? "1" : "0",
         IN_FEED_FIXTURE_KEY: "not-a-real-model-key",
         NODE_ENV: "test",
-        FORCE_COLOR: "0", // The fixture reads the CLI ready URL from plain stdout, including in CI.
+        FORCE_COLOR: "0",
+        NO_COLOR: "1", // Picocolors enables ANSI for CI and FORCE_COLOR="0" unless NO_COLOR is set.
         PATH: `${root}/tests/e2e/fixtures/recovery-bin:${process.env.PATH}`,
       };
       delete env.DATABASE_URL;
