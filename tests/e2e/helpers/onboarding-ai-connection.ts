@@ -6,6 +6,10 @@ import { expect, type Page } from "@playwright/test";
 export async function mockOnboardingLocalAiConnection(page: Page) {
   const connectionId = randomUUID();
   const grantId = randomUUID();
+  await page.route("**/ai-connections/local/check", async (route) => {
+    expect(route.request().method()).toBe("POST");
+    await route.fulfill({ json: { status: "ready" } });
+  });
   await page.route("**/ai-connections/local", async (route) => {
     expect(route.request().method()).toBe("POST");
     expect(route.request().postDataJSON()).toMatchObject({ method: "subscription", ownership: "personal" });

@@ -144,13 +144,10 @@ for (const journey of [
       });
       await expect
         .poll(
-          () =>
-            logs.match(
-              /Paperclip is ready at (http:\/\/127\.0\.0\.1:\d+)/,
-            )?.[1],
+          () => logs,
           { timeout: 100_000 },
         )
-        .toBeTruthy();
+        .toMatch(/Paperclip is ready at (http:\/\/127\.0\.0\.1:\d+)/);
       let base = logs.match(
         /Paperclip is ready at (http:\/\/127\.0\.0\.1:\d+)/,
       )![1]!;
@@ -176,7 +173,7 @@ for (const journey of [
             branchName: execFileSync("git", ["branch", "--show-current"], {
               cwd: root,
               encoding: "utf8",
-            }).trim(),
+            }).trim() || null,
           },
         },
       });
