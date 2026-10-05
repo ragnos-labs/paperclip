@@ -399,12 +399,14 @@ export const defineSmokeLabSuite = (label: string, scenarios: SmokeLabScenario[]
           const flipped = await testCall(request, connection.id, scout, scenario.lifecycle.schemaChangeQuarantine);
           expect(flipped.decision).toBe("allowed");
           expect(flipped.error).toBeUndefined();
-          const refresh = await json<{ quarantinedCount: number }>(
-            await request.post(`/api/tool-connections/${connection.id}/catalog/refresh`),
+          await json(await request.post(`/api/tool-connections/${connection.id}/catalog/refresh`));
+          const quarantined = (await catalog(request, connection.id)).catalog.filter(
+            (entry) => entry.status === "quarantined" &&
+              entry.toolName === scenario.lifecycle.schemaChangeQuarantine.parameters.toolName,
           );
-          expect(refresh.quarantinedCount).toBeGreaterThan(0);
+          expect(quarantined.length).toBeGreaterThan(0);
           await page.goto(`/${seed.prefix}/apps/connections`);
-          return `Catalog refresh quarantined ${refresh.quarantinedCount} changed entries.`;
+          return `Catalog retains ${quarantined.length} quarantined entries after the schema change.`;
         });
 
         await runRecordedStep(page, request, seed, smokeRun.id, scenario, "revoke", async () => {

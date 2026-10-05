@@ -17,6 +17,7 @@ for (const journey of [
   test(`fresh execution recovery and current-request journey: ${journey}`, async ({
     page,
   }, info) => {
+    test.slow(); // Includes a fresh database, server startup, and the no-replay observation window.
     const root = resolve(import.meta.dirname, "../../..");
     let processHandle: ChildProcess | undefined;
     let logs = "";
@@ -114,6 +115,7 @@ for (const journey of [
         PAPERCLIP_RECOVERY_CEO_LINEAGE: journey === "ceo_lineage" ? "1" : "0",
         IN_FEED_FIXTURE_KEY: "not-a-real-model-key",
         NODE_ENV: "test",
+        FORCE_COLOR: "0", // The fixture reads the CLI ready URL from plain stdout, including in CI.
         PATH: `${root}/tests/e2e/fixtures/recovery-bin:${process.env.PATH}`,
       };
       delete env.DATABASE_URL;

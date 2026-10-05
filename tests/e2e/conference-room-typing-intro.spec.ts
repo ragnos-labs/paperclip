@@ -94,16 +94,7 @@ async function runOnboardingWizard(page: Page, companyName: string) {
   await source.waitFor({ timeout: 30_000 });
   await source.click();
 
-  // "Connect", not "Next": this step's button starts the sign-in where there
-  // is one to start, so it is named for what it does. This test simulates
-  // successful local account connection before the environment check and hire.
-  //
-  // Waited on for enabled rather than for visible: it is already on screen,
-  // disabled, and clicking a disabled button raises nothing and does nothing.
-  const connectNext = page.getByRole("button", { name: /^Connect$/ });
-  await expect(connectNext).toBeEnabled({ timeout: 30_000 });
-  await connectNext.click();
-
+  // The ready login fixture verifies and hires automatically after selection.
   // Step 5: review → Get started creates the first task and opens its
   // detail page.
   const getStarted = page.getByRole("button", { name: /Get started/ });
