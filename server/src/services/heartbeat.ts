@@ -5,7 +5,7 @@ import { readQueuedInteractionResponse } from "./queued-interaction-response.js"
 import { AGENT_CHAT_DIRECTIVE, conversationReplay, isConversation, isConversationExecutionWake, isWaitingConversation, prepareConversationTurn, settleConversationTurn } from "./agent-conversations.js";
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
-import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
+import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease, readLegacyRemoteRunBinding, persistLegacyRemoteRunBinding, claimLegacyRemoteRunObservation, releaseLegacyRemoteRunObservation, legacyObserverOwnerCondition } from "./legacy-controller-lease.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped, remoteTerminationReceipt, stoppedRemoteCleanupScopes } from "./remote-execution-termination.js";
 import { applyConnectorSkills, prepareConnectorSkillDelivery, resolveConnectorAssignments } from "./connector-runtime.js";
@@ -1283,6 +1283,9 @@ const failedProcessRunCancellations = new Map<
 // that must guarantee no run write is still in flight (graceful shutdown, and
 // tests tearing down a shared database) can await drainActiveRunExecutions().
 const activeRunExecutionPromises = new Set<Promise<void>>();
+// Observer detachment must be available during preparation, before operator
+// cancellation readiness publishes the adapter in adapterExecutionControls.
+const remoteRunObservers = new Map<string, ReturnType<typeof createAdapterExecutionControl>>();
 // Routes dispatch a wakeup fire-and-forget (void heartbeat.wakeup(...)). The
 // wakeup promise stays pending through its asynchronous prologue, and it
 // resolves only after it inserts the queued run and registers the run
@@ -12690,6 +12693,7 @@ export function heartbeatService(
     runId: string,
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
+    expectedControllerBootId?: string,
   ) {
     const previousStatus = await db
       .select()
@@ -12727,6 +12731,7 @@ export function heartbeatService(
             run: previousStatus,
             status,
             patch,
+            expectedControllerBootId,
           })
         : await db
             .update(heartbeatRuns)
@@ -12736,7 +12741,8 @@ export function heartbeatService(
               executionStatusDeliveryId: randomUUID(),
               updatedAt: new Date(),
             })
-            .where(eq(heartbeatRuns.id, runId))
+            .where(and(eq(heartbeatRuns.id, runId),
+              ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : [])))
             .returning()
             .then((rows) => rows[0] ?? null);
 
@@ -12757,8 +12763,9 @@ export function heartbeatService(
     runId: string,
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
+    expectedControllerBootId?: string,
   ) {
-    return setRunStatusFromLive(runId, status, ["running"], patch);
+    return setRunStatusFromLive(runId, status, ["running"], patch, expectedControllerBootId);
   }
 
   // Move a run to a new status only when its current status is one of
@@ -12771,6 +12778,7 @@ export function heartbeatService(
     status: string,
     fromStatuses: string[],
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
+    expectedControllerBootId?: string,
   ) {
     // fromStatuses can name a terminal status as its own source (for example,
     // an idempotent "still failed" patch), so the write below is not always a
@@ -12812,6 +12820,7 @@ export function heartbeatService(
             status,
             patch,
             fromStatuses,
+            expectedControllerBootId,
           })
         : await db
             .update(heartbeatRuns)
@@ -12825,6 +12834,7 @@ export function heartbeatService(
               and(
                 eq(heartbeatRuns.id, runId),
                 inArray(heartbeatRuns.status, fromStatuses),
+                ...(expectedControllerBootId ? [legacyObserverOwnerCondition(expectedControllerBootId)] : []),
                 ...(isHeartbeatRunTerminalStatus(status)
                   ? [nativeRunnerOwnershipNotHeldCondition()]
                   : []),
@@ -14495,6 +14505,9 @@ export function heartbeatService(
       .map(({ run }) => run.id);
     const detachedNativeSessions =
       await detachNativeSessionsForRestart(nativeRunIds);
+    await detachLegacyRemoteObservers(activeRuns
+      .filter(({ run }) => claimedAdapterType(run) === "hermes_gateway")
+      .map(({ run }) => run.id));
 
     logger.info(
       {
@@ -15002,6 +15015,11 @@ export function heartbeatService(
       // owners belong to the reaper, not another container's drain.
       if (run.runtimeMode === "legacy" && run.controllerBootId &&
           run.controllerBootId !== legacyControllerBootId) continue;
+      if (run.runtimeMode === "legacy" && claimedAdapterType(run) === "hermes_gateway") {
+        await detachLegacyRemoteObservers([run.id]);
+        restartSuspendedRunIds.push(run.id);
+        continue;
+      }
       if (isNativeRunnerOwnershipHeld(run)) continue;
       if (
         run.runtimeMode === "native" &&
@@ -18741,9 +18759,45 @@ export function heartbeatService(
     void cleanup.finally(() => activeRunExecutionPromises.delete(cleanup));
   }
 
+  async function recoverLegacyRemoteRuns() {
+    const candidates = await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
+      sql`${heartbeatRuns.runnerProfileJson}->'adapterDispatch'->>'adapterType' = 'hermes_gateway'`,
+    ));
+    const recoveredRunIds: string[] = [];
+    for (const candidate of candidates) {
+      if (activeRunExecutions.has(candidate.id)) continue;
+      const claimed = await claimLegacyRemoteRunObservation(db, candidate);
+      if (!claimed) continue;
+      recoveredRunIds.push(claimed.id);
+      const execution = executeRun(claimed.id, { remoteRunRecovery: true }).catch((error) => {
+        logger.error({ err: error, runId: claimed.id }, "remote run observer recovery failed");
+      });
+      activeRunExecutionPromises.add(execution);
+      void execution.finally(() => activeRunExecutionPromises.delete(execution));
+    }
+    return { recoveredRunIds };
+  }
+
+  async function detachLegacyRemoteObservers(runIds: readonly string[]) {
+    for (const runId of runIds) {
+      const run = await getRun(runId);
+      if (!run || claimedAdapterType(run) !== "hermes_gateway" || run.controllerBootId !== legacyControllerBootId) continue;
+      const control = remoteRunObservers.get(runId);
+      if (control) {
+        control.observerDetachController.abort(new Error("Remote observer detached for server restart"));
+        await waitForAdapterStop(control.settled, 30_000);
+      }
+      await releaseLegacyRemoteRunObservation(db, run);
+    }
+  }
+
   async function reapOrphanedRuns(opts?: { staleThresholdMs?: number }) {
     const staleThresholdMs = opts?.staleThresholdMs ?? 0;
     const now = new Date();
+    // Adopt only confirmed accepted jobs. Generic process-loss cleanup cannot
+    // infer that a remote gateway worker stopped when its observer disappeared.
+    await recoverLegacyRemoteRuns();
 
     // Complete persisted native results before generic orphan recovery. The
     // reconciler reads the durable workspace barrier and persisted runtime
@@ -18996,6 +19050,9 @@ export function heartbeatService(
       nativeControllerProcessStartedAt,
       nativeControllerLeaseExpiresAt,
     } of activeRuns) {
+      // Missing bindings never prove that a remote create was unaccepted.
+      // Confirmed bindings were handled by observer takeover above.
+      if (run.runtimeMode === "legacy" && claimedAdapterType(run) === "hermes_gateway") continue;
       // Authentication timeout requires an explicit ownership resolution, not
       // repeated reattachment or a process-gone guess on subsequent sweeps.
       if (isNativeRunnerOwnershipHeld(run)) continue;
@@ -19932,6 +19989,7 @@ export function heartbeatService(
     runOptions: {
       nativeLeaseOwner?: string;
       nativeRestartRecovery?: NativeRestartRecoveryClaim;
+      remoteRunRecovery?: boolean;
     } = {},
   ) {
     const attemptStartedAtMs = Date.now();
@@ -20049,9 +20107,22 @@ export function heartbeatService(
 
     if (run.runtimeMode === "legacy" && run.controllerBootId &&
         run.controllerBootId !== legacyControllerBootId) return;
+    const isRemoteObserver = run.runtimeMode === "legacy" && claimedAdapterType(run) === "hermes_gateway";
+    const expectedControllerBootId = isRemoteObserver ? legacyControllerBootId : undefined;
+    const remoteRecoveryBinding = runOptions.remoteRunRecovery ? readLegacyRemoteRunBinding(run) : null;
+    if (runOptions.remoteRunRecovery && !remoteRecoveryBinding) return;
+    legacyAdapterEntered = remoteRecoveryBinding !== null;
     activeRunExecutions.add(run.id);
     const executionControl = createAdapterExecutionControl();
-    const controllerLease = watchLegacyControllerLease(db, run, executionControl.controller);
+    if (isRemoteObserver) remoteRunObservers.set(run.id, executionControl);
+    const controllerLease = watchLegacyControllerLease(db, run,
+      isRemoteObserver ? executionControl.observerDetachController : executionControl.controller);
+    let remoteObserverDetached = false;
+    const observerOwnershipLost = () => isRemoteObserver && executionControl.observerDetachController.signal.aborted;
+    const setOwnedRunStatus: typeof setRunStatus = (id, status, patch) =>
+      setRunStatus(id, status, patch, expectedControllerBootId);
+    const setOwnedRunStatusIfRunning: typeof setRunStatusIfRunning = (id, status, patch) =>
+      setRunStatusIfRunning(id, status, patch, expectedControllerBootId);
     let runScratch: HeartbeatRunScratch | null = null;
     let githubLauncherLocation:
       Parameters<typeof cleanupGitHubOperationLaunchers>[0] | null = null;
@@ -20082,7 +20153,7 @@ export function heartbeatService(
     try {
       const agent = await getAgent(run.agentId);
       if (!agent) {
-        await setRunStatus(runId, "failed", {
+        await setOwnedRunStatus(runId, "failed", {
           error: "Agent not found",
           errorCode: "agent_not_found",
           finishedAt: new Date(),
@@ -20108,7 +20179,7 @@ export function heartbeatService(
         && typeof run.contextSnapshot?.conversationSessionGeneration === "number";
       if (dispatchIssueId && isConversation(await getIssueExecutionContext(run.companyId, dispatchIssueId))
         && !resumingAdmittedConversationTurn && !(await instanceSettings.getExperimental()).enableAgentChat) {
-        await setRunStatus(run.id, "cancelled", { finishedAt: new Date(), error: "Agent Chat is disabled", errorCode: "agent_chat_disabled" });
+        await setOwnedRunStatus(run.id, "cancelled", { finishedAt: new Date(), error: "Agent Chat is disabled", errorCode: "agent_chat_disabled" });
         await setWakeupStatus(run.wakeupRequestId, "cancelled", { finishedAt: new Date() });
         await releaseIssueExecutionAndPromote((await getRun(run.id))!, { suppressImmediateRecovery: true });
         await finalizeAgentStatus(agent.id, "cancelled");
@@ -20118,7 +20189,7 @@ export function heartbeatService(
       run = { ...run, contextSnapshot: preparedConversation.context };
       if (preparedConversation.reset) {
         const contextSnapshot = { ...preparedConversation.context, conversationReset: true };
-        await setRunStatus(run.id, "succeeded", { finishedAt: new Date(), contextSnapshot, resultJson: { conversationReset: true }, issueCommentStatus: "not_applicable" });
+        await setOwnedRunStatus(run.id, "succeeded", { finishedAt: new Date(), contextSnapshot, resultJson: { conversationReset: true }, issueCommentStatus: "not_applicable" });
         await setWakeupStatus(run.wakeupRequestId, "completed", { finishedAt: new Date() });
         const resetRun = (await getRun(run.id))!;
         await settleConversationTurn(db, resetRun);
@@ -22664,7 +22735,7 @@ export function heartbeatService(
           );
           const abortReason =
             "Cancelled: agent not invokable at execution-start";
-          await setRunStatus(run.id, "cancelled", {
+          await setOwnedRunStatus(run.id, "cancelled", {
             finishedAt: new Date(),
             error: abortReason,
             errorCode: "agent_not_invokable",
@@ -24310,6 +24381,13 @@ export function heartbeatService(
                     },
                     onDispatch: markDispatchStarted,
                     signal: executionControl.controller.signal,
+                    ...(isRemoteObserver ? {
+                      observerDetachSignal: executionControl.observerDetachController.signal,
+                      ...(remoteRecoveryBinding ? { remoteRunRecovery: remoteRecoveryBinding } : {}),
+                      onRemoteRunStarted: async (binding: import("@paperclipai/adapter-utils").AdapterRemoteRunBinding) => {
+                        run = await persistLegacyRemoteRunBinding(db, run, binding);
+                      },
+                    } : {}),
                     ...(executionTarget?.kind === "remote" && executionTarget.transport === "sandbox" ? {
                       stopRemoteStartup: async () => {
                         // Scope comes from the running host invocation, never agent
@@ -24356,6 +24434,11 @@ export function heartbeatService(
             if (!guardedDispatch.dispatched) return;
             adapterResult = await guardedDispatch.resultPromise;
           }
+          if (adapterResult.remoteRunDetached || observerOwnershipLost()) {
+            remoteObserverDetached = true;
+            return;
+          }
+          if (isRemoteObserver) await controllerLease.assertOwned();
           // Adapter returned cleanly, which means its workspace-restore finally
           // block also ran without throwing. Record the workspace_finalize
           // barrier so dependents that share this executionWorkspace can wake.
@@ -24399,6 +24482,10 @@ export function heartbeatService(
             }
           }
         } catch (adapterErr) {
+          if (observerOwnershipLost()) {
+            remoteObserverDetached = true;
+            return;
+          }
           if (adapterErr instanceof NativeControllerDetachedForRestartError) {
             // Preserve the provider and its run for the new controller. This
             // also keeps generic teardown from terminalizing/releasing its lease.
@@ -24815,6 +24902,9 @@ export function heartbeatService(
           mergeRunStopMetadataForAgent(agent, outcome, {
             resultJson: mergeAdapterRecoveryMetadata({
               resultJson: {
+                ...(isRemoteObserver && run.resultJson?.remoteRunBinding
+                  ? { remoteRunBinding: run.resultJson.remoteRunBinding }
+                  : {}),
                 ...(adapterResult.nativeFinalization || outcome === "cancelled"
                   ? parseObject(latestRun?.resultJson)
                   : {}),
@@ -24849,13 +24939,18 @@ export function heartbeatService(
           logSha256: logSummary?.sha256,
           logCompressed: logSummary?.compressed ?? false,
         };
-        const persistedRunWrite = await setRunStatusIfRunning(
+        const persistedRunWrite = await setOwnedRunStatusIfRunning(
           run.id,
           status,
           finalRunPatch,
+          expectedControllerBootId,
         );
         let persistedRun: typeof heartbeatRuns.$inferSelect | null =
           persistedRunWrite.run;
+        if (isRemoteObserver && !persistedRunWrite.updated) {
+          remoteObserverDetached = true;
+          return;
+        }
         if (!persistedRunWrite.updated) {
           persistedRun = null;
           // Native reconciliation can commit and project the terminal status in
@@ -25261,6 +25356,10 @@ export function heartbeatService(
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
         });
       } catch (err) {
+        if (observerOwnershipLost()) {
+          remoteObserverDetached = true;
+          return;
+        }
         if (err instanceof NativeControllerDetachedForRestartError) {
           nativeSessionResumeScheduled = true;
           return;
@@ -25447,7 +25546,7 @@ export function heartbeatService(
         const stoppedDuringFailure = executionControl.controller.signal.aborted;
         const stopSnapshot = stoppedDuringFailure ? await getRun(run.id) : null;
         const failureOutcome = stoppedDuringFailure ? "cancelled" : "failed";
-        const failedRunWrite = await setRunStatusIfRunning(run.id, failureOutcome, {
+        const failedRunWrite = await setOwnedRunStatusIfRunning(run.id, failureOutcome, {
           error: message,
           errorCode: stopSnapshot?.errorCode ?? failureErrorCode,
           finishedAt: new Date(),
@@ -25475,6 +25574,10 @@ export function heartbeatService(
           logSha256: logSummary?.sha256,
           logCompressed: logSummary?.compressed ?? false,
         });
+        if (isRemoteObserver && !failedRunWrite.updated) {
+          remoteObserverDetached = true;
+          return;
+        }
         if (
           !failedRunWrite.updated &&
           !(
@@ -25591,6 +25694,10 @@ export function heartbeatService(
         });
       }
     } catch (outerErr) {
+      if (observerOwnershipLost()) {
+        remoteObserverDetached = true;
+        return;
+      }
       if (
         nativeOwnershipHeld ||
         outerErr instanceof NativeRunnerOwnershipUnverifiedError
@@ -25698,9 +25805,11 @@ export function heartbeatService(
             : null);
         const setupFailureResultJson = {
           ...setupFailureDetails,
-          executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+          ...(readLegacyRemoteRunBinding(run)
+            ? { remoteRunBinding: run.resultJson?.remoteRunBinding }
+            : { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } }),
         };
-        const setupFailureWrite = await setRunStatusIfRunning(runId, "failed", {
+        const setupFailureWrite = await setOwnedRunStatusIfRunning(runId, "failed", {
           error: message,
           errorCode: setupFailureErrorCode,
           finishedAt: new Date(),
@@ -25835,8 +25944,11 @@ export function heartbeatService(
         }
       }
     } finally {
+      remoteObserverDetached = remoteObserverDetached || observerOwnershipLost();
       if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
       let latestRun = await getRun(run.id).catch(() => null);
+      if (isRemoteObserver && latestRun?.controllerBootId === legacyControllerBootId &&
+          isHeartbeatRunTerminalStatus(latestRun.status)) remoteObserverDetached = false;
       try {
         if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
           await db
@@ -25876,7 +25988,7 @@ export function heartbeatService(
           latestRun &&
           !nativeSessionResumeScheduled &&
           !nativeWorkspaceFinalizeScheduled &&
-          !nativeOwnershipHeld
+          !nativeOwnershipHeld && !remoteObserverDetached
         ) {
           latestRun = await terminalizeRunOnLeaseRelease(latestRun).catch(
             (terminalizeErr) => {
@@ -25902,7 +26014,7 @@ export function heartbeatService(
         if (
           !nativeSessionResumeScheduled &&
           !nativeWorkspaceFinalizeScheduled &&
-          !nativeOwnershipHeld
+          !nativeOwnershipHeld && !remoteObserverDetached
         ) {
           // Keep launchers during same-run recovery. At a terminal boundary all
           // operations have settled; clean before the remote lease can be stopped.
@@ -26003,6 +26115,7 @@ export function heartbeatService(
         }
       } finally {
         controllerLease.stop();
+        if (remoteRunObservers.get(run.id) === executionControl) remoteRunObservers.delete(run.id);
         activeRunExecutions.delete(run.id);
         // A failed owned Stop remains visible until this exact executor settles,
         // including a graceful exit result arriving after the cancellation error.

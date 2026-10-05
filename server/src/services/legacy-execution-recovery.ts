@@ -7,6 +7,7 @@ import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
+import { legacyObserverOwnerCondition } from "./legacy-controller-lease.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 export const LEGACY_RECOVERY_CAUSE = "legacy_execution_requires_reconciliation";
@@ -55,6 +56,7 @@ export async function terminalizeLegacyExecution(input: {
   status: string;
   patch?: Partial<typeof heartbeatRuns.$inferInsert>;
   fromStatuses?: string[];
+  expectedControllerBootId?: string;
 }) {
   const { db, run, status, patch } = input;
   const issueId =
@@ -88,6 +90,7 @@ export async function terminalizeLegacyExecution(input: {
           eq(heartbeatRuns.id, run.id),
           eq(heartbeatRuns.companyId, run.companyId),
           inArray(heartbeatRuns.status, input.fromStatuses ?? [run.status]),
+          ...(input.expectedControllerBootId ? [legacyObserverOwnerCondition(input.expectedControllerBootId)] : []),
         ),
       )
       .returning();
