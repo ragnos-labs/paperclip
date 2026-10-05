@@ -230,6 +230,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Verify runner Chrome
         run: google-chrome --version
+      - name: Build native runner for recovery journeys
+        run: pnpm --filter @paperclipai/paperclip-runner build:binary
       - name: Generate test configuration
         run: |
           mkdir -p ~/.paperclip/instances/default
