@@ -53,29 +53,29 @@ When local dependency lifecycle scripts are disabled, run the installed native
 package's reviewed `scripts/hydrate-symlinks.js` before integration tests; do not
 change the global package-script policy.
 
-Run `pnpm -r typecheck`, `pnpm test:run`, `pnpm build`, the browser validation and
-fork release/security script checks. The release gate requires the exact current
-`codex/paperclip-stable` head, successful `RAGnos Fork CI`, and two current commit
-statuses: `ragnos/fork-source-review` and `ragnos/fork-infrastructure-review`.
-Each status links a fork PR containing the actual independent review receipt.
-The status publisher records review evidence; it cannot replace independent review.
-The validator independently reads the reviewer's repository permission and requires
-matching numeric user ID and login with `write` or `admin` access. Missing, denied
-or mismatched permission evidence blocks delivery.
-Infrastructure review admits only infrastructure findings. A process-spawning
-test requires an explicit exact-file disposition in the current independent
-review receipt for its owning scope. Secret and supply-chain findings always
-block. Historical commit exemptions are removed. The production dependency
-audit is bound to the unchanged installed-upstream lockfile, SHA-256 recorded
-in the baseline. Its inherited vulnerability counts are 11 low, 31 moderate and 22 high
-(62 distinct advisory IDs); regression validation does not certify those dependencies secure.
+`RAGnos Fork CI` runs typecheck, tests, build, browser validation and the fork
+security script checks on every pull request and on every push to
+`codex/paperclip-stable`. Secret, supply-chain, build-script and sensitive-path
+findings block. Workflow changes and process-spawning tests are printed for the
+change author and do not block. The production dependency audit is bound to the
+unchanged installed-upstream lockfile, SHA-256 recorded in the baseline. Added
+advisories or severity increases fail; the baseline discloses the inherited
+advisories and does not certify those dependencies secure.
 
-The existing protected `paperclip-alpha-release` environment retains its required
-human reviewer. Its maintenance-branch admission must be configured without
-removing that gate. The image-only workflow publishes `ragnos/v0.x.x`, exact
-source-tagged image digest, upstream baseline, migration manifest, checksums,
-platform SBOMs and provenance. It never publishes npm, deploys CompanyOS or
-activates agents. Release, deployment, activation and qualification are separate.
+To release, dispatch `RAGnos Paperclip Fork Release` with the current
+`codex/paperclip-stable` head and a new version. The workflow checks that the
+commit is the branch head with green `RAGnos Fork CI`, builds one `linux/amd64`
+image with the layer cache, pushes it to `ghcr.io/ragnos-labs/paperclip`, tags
+the source `ragnos/v0.x.x` after the push, and uploads a small JSON receipt with
+the image digest and migration identity. CompanyOS selects the image by that
+digest. The workflow never publishes npm, deploys CompanyOS or activates agents.
+
+This fork serves one operator on one AMD64 host. Do not add any of the following
+back to the fork's delivery or release path unless Hunter asks for it by name:
+additional image platforms, SBOM or provenance gates, independent-review receipts
+or review commit statuses, a typed confirmation phrase, a protected-environment
+approval, an immutable GitHub release, or checksum and attestation readback. An
+agent that believes one of them is needed proposes it and waits for a yes.
 
 ## Upstream integration rehearsal
 
