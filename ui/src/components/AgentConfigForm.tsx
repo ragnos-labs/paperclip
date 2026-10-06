@@ -3640,7 +3640,7 @@ export function AdapterTypeDropdown({
           <ChevronDown className="h-3 w-3 text-muted-foreground" />
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-(--radix-popover-trigger-width) p-1" align="start">
+      <PopoverContent className="w-(--radix-popover-trigger-width) max-h-(--radix-popover-content-available-height) overflow-y-auto p-1" align="start">
         {adapterList.map((item) => (
           <button
             key={item.value}
