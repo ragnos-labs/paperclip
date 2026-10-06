@@ -98,14 +98,20 @@ export function blockingFlags(flags) {
   return flags.filter(flag => !reportedOnly.has(flag.check));
 }
 
-async function runAuditGate() {
+export function validateAuditBaseline(baseline) {
+  // The hash identifies the inherited upstream lock, not the repaired current lock.
+  if (baseline?.schemaVersion !== 1 ||
+      baseline.sourceCommit !== "8f8a0ab7effbd6a0584107d8038736c134ee5047" ||
+      baseline.lockfileSha256 !== "d7d96cf0d98cf0946f6195e29ba173b03711a947a1c38f312b67cda56c254c22" ||
+      !baseline.advisories || typeof baseline.advisories !== "object" || Array.isArray(baseline.advisories) ||
+      Object.entries(baseline.advisories).some(([id, severity]) => !/^\d+$/.test(id) || !severityRank.has(severity)))
+    throw new Error("Invalid inherited upstream audit baseline");
+}
+
+export async function runAuditGate() {
   const baselineUrl = new URL("../ragnos-production-audit-baseline.json", import.meta.url);
   const baseline = JSON.parse(await readFile(baselineUrl, "utf8"));
-  const { createHash } = await import("node:crypto");
-  const lock = await readFile(new URL("../../pnpm-lock.yaml", import.meta.url));
-  if (baseline.sourceCommit !== "8f8a0ab7effbd6a0584107d8038736c134ee5047" ||
-      baseline.lockfileSha256 !== createHash("sha256").update(lock).digest("hex"))
-    throw new Error("Audit baseline does not match the installed upstream lockfile");
+  validateAuditBaseline(baseline);
   const result = spawnSync("pnpm", ["audit", "--prod", "--json"], {
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024,

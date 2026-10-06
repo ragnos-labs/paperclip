@@ -128,6 +128,7 @@ import {
 } from "./origins.js";
 import { withRecoveryContext } from "./status-only-context.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
+import { hasPendingHumanConfirmation } from "../pending-human-confirmation.js";
 import {
   collectDispositionRepairSourceState,
   dispositionRepairDelayMs,
@@ -1108,6 +1109,7 @@ export function recoveryService(
   }
 
   async function hasPendingWakeInteraction(companyId: string, issueId: string) {
+    if (await hasPendingHumanConfirmation(db, companyId, issueId)) return true;
     return db
       .select({ id: issueThreadInteractions.id })
       .from(issueThreadInteractions)

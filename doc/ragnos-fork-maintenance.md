@@ -57,10 +57,22 @@ change the global package-script policy.
 security script checks on every pull request and on every push to
 `codex/paperclip-stable`. Secret, supply-chain, build-script and sensitive-path
 findings block. Workflow changes and process-spawning tests are printed for the
-change author and do not block. The production dependency audit is bound to the
-unchanged installed-upstream lockfile, SHA-256 recorded in the baseline. Added
-advisories or severity increases fail; the baseline discloses the inherited
-advisories and does not certify those dependencies secure.
+change author and do not block. The production dependency audit checks the
+current lockfile against the unchanged advisory baseline from the original
+upstream lockfile. The baseline retains that upstream source and lockfile hash;
+compatible repairs may remove advisories, while added advisories or severity
+increases fail. The baseline does not certify inherited dependencies secure.
+
+Pending human-only confirmation interactions suppress issue wakes at admission,
+queued dispatch, and dependency recovery regardless of their continuation policy.
+Resolve them through the authenticated interaction API before requesting more
+work. A manual or comment wake does not resolve a confirmation.
+
+The compatible dependency repairs leave major-version work separate: the
+Cursor SDK's undici 5 and busboy 2 chains, uuid, KaTeX, selector-parser, and the
+older drizzle-kit esbuild chain. The low body-parser finding is also deferred
+because its fix introduces a transitive major dependency. Keep the existing
+audit checks and advisory baseline when revisiting these packages.
 
 To release, dispatch `RAGnos Paperclip Fork Release` with the current
 `codex/paperclip-stable` head and a new version. The workflow checks that the
