@@ -12,6 +12,11 @@ on:
         required: true
         type: string
 
+      export_only:
+        description: Export an existing release image for private host delivery
+        type: boolean
+        default: false
+
 permissions:
   contents: read
 
@@ -20,7 +25,56 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  export_image:
+    if: inputs.export_only && github.repository == 'ragnos-labs/paperclip'
+    name: Export published image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Resolve published release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s' "$VERSION" | grep -Eq '^0\.[0-9]+\.[0-9]+$'
+          gh release download "ragnos/v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern release-receipt.json
+          jq -e --arg sha "$SOURCE_SHA" --arg version "$VERSION" --arg repo "$GITHUB_REPOSITORY" \
+            '.source_sha == $sha and .version == $version and .repository == $repo and (.image_digest | test("^sha256:[0-9a-f]{64}$"))' release-receipt.json
+          echo "image=ghcr.io/$GITHUB_REPOSITORY@$(jq -r .image_digest release-receipt.json)" >> "$GITHUB_OUTPUT"
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Export existing image without rebuilding
+        env:
+          IMAGE: ${{ steps.release.outputs.image }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo
+          skopeo copy --all --preserve-digests "docker://$IMAGE" oci-archive:paperclip-image.tar:ghcr.io/ragnos-labs/paperclip
+      - name: Upload private image archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: paperclip-private-image
+          path: |
+            paperclip-image.tar
+            release-receipt.json
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
   publish_image:
+    if: ${{ !inputs.export_only }}
     name: Publish RAGnos image
     runs-on: ubuntu-latest
     timeout-minutes: 60

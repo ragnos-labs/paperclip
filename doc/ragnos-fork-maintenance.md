@@ -91,3 +91,12 @@ upstream [PR 13363](https://github.com/paperclipai/paperclip/pull/13363), head
 `1e96e1a469181c9691a1d6f42997ab78f2dfb99f`. It repairs the two reproduced HTTP
 400 responses with explicit SDK linking when install lifecycle scripts are off.
 Document/conversation changes from that proposal are not included.
+
+## Private image delivery
+
+If the host cannot pull the private registry package, dispatch the release
+workflow with `export_only: true`, the existing release version and its source
+SHA. Download `paperclip-private-image` with `gh run download` and transfer it
+to private host custody. Import the OCI archive into Docker's containerd image
+store, selecting `linux/amd64`, and verify the selected digest before replacement.
+This exports the published bytes; it creates no release and rebuilds no image.
