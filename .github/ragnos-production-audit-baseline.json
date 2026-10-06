@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "sourceCommit": "8f8a0ab7effbd6a0584107d8038736c134ee5047",
-  "capturedAt": "2026-10-05",
+  "capturedAt": "2026-10-06",
   "lockfileSha256": "d7d96cf0d98cf0946f6195e29ba173b03711a947a1c38f312b67cda56c254c22",
   "policy": "Inherited installed-upstream advisories are disclosed, not security approval. Removals permitted; added advisories or severity increases fail.",
   "advisories": {
@@ -66,6 +66,14 @@
     "1240622": "high",
     "1240624": "low",
     "1240640": "moderate",
-    "1240982": "high"
+    "1240982": "high",
+    "1241204": "low",
+    "1241205": "moderate",
+    "1241206": "low",
+    "1241209": "high",
+    "1241210": "critical",
+    "1241232": "moderate",
+    "1241257": "moderate",
+    "1241276": "moderate"
   }
 }
