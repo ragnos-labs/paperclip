@@ -10,6 +10,8 @@ it("loads the TypeScript config and generates from compiled ESM schema without t
   const packageDir = fileURLToPath(new URL("..", import.meta.url));
   const require = createRequire(import.meta.url);
   const cli = path.join(path.dirname(require.resolve("drizzle-kit")), "bin.cjs");
+  expect(() => createRequire(cli).resolve("@esbuild-kit/esm-loader"))
+    .toThrowError(expect.objectContaining({ code: "MODULE_NOT_FOUND" }));
   const directory = mkdtempSync(path.join(tmpdir(), "paperclip-drizzle-compatibility-"));
   try {
     mkdirSync(path.join(directory, "dist/schema"), { recursive: true });
