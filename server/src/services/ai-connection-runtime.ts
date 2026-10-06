@@ -94,8 +94,11 @@ export async function assertManagedAiProjectAuth(
       : provider === "openai"
         ? [".codex/config.toml"]
         : [];
-  const pattern =
+  let pattern =
     "apiKeyHelper|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|model_provider[[:space:]]*=|env_key[[:space:]]*=|experimental_bearer_token|cli_auth_credentials_store";
+  if (provider === "openai") {
+    pattern = `^[[:blank:]]*([^#[:blank:]].*)?(${pattern})`;
+  }
   if (target?.kind === "remote" && files.length) {
     // Only inspect for conflicting keys; never return configuration or credential values.
     const result = await runAdapterExecutionTargetProcess(
@@ -145,7 +148,10 @@ done`,
   for (;;) {
     for (const relative of files) {
       try {
-        const content = await readFile(path.join(directory, relative), "utf8");
+        const rawContent = await readFile(path.join(directory, relative), "utf8");
+        const content = provider === "openai"
+          ? rawContent.replace(/^[ \t]*#.*$/gm, "")
+          : rawContent;
         if (
           /apiKeyHelper|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|model_provider\s*=|env_key\s*=|experimental_bearer_token|cli_auth_credentials_store/.test(
             content,
