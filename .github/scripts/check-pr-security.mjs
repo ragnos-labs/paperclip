@@ -386,6 +386,9 @@ async function main() {
     if (response.encoding !== 'base64' || typeof response.content !== 'string') throw new Error('Base lockfile content unavailable');
     baseLockfile = Buffer.from(response.content, 'base64').toString('utf8');
   }
+  const currentPr = await ghFetch(`/repos/${GH_REPO}/pulls/${prNumber}`, GH_TOKEN);
+  if (pr.head?.sha !== currentPr.head?.sha) throw new Error('PR head moved during review');
+  if (pr.base?.sha !== currentPr.base?.sha) throw new Error('PR base moved during review');
 
   const allFlags = [
     ...scanSecrets(files),
