@@ -137,7 +137,12 @@
       "ip-address@10": "10.7.1",
       "dompurify@3": "3.4.16",
       "smol-toml@1": "1.9.0",
-      "fast-copy@4": "4.1.0"
+      "fast-copy@4": "4.1.0",
+      "mermaid@11>katex": "0.18.2",
+      "@tailwindcss/typography@0.5>postcss-selector-parser": "7.1.6",
+      "drizzle-kit@0.31.10>@esbuild-kit/esm-loader": "-",
+      "body-parser@2": "2.3.0",
+      "@modelcontextprotocol/sdk@1": "1.31.0"
     }
   }
 }

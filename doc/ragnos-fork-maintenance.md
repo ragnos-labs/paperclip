@@ -68,11 +68,19 @@ queued dispatch, and dependency recovery regardless of their continuation policy
 Resolve them through the authenticated interaction API before requesting more
 work. A manual or comment wake does not resolve a confirmation.
 
-The compatible dependency repairs leave major-version work separate: the
-Cursor SDK's undici 5 and busboy 2 chains, uuid, KaTeX, selector-parser, and the
-older drizzle-kit esbuild chain. The low body-parser finding is also deferred
-because its fix introduces a transitive major dependency. Keep the existing
-audit checks and advisory baseline when revisiting these packages.
+The inherited dependency chains are repaired with supported parent updates and
+scoped overrides: Cursor SDK 1.0.36 removes old Undici/Busboy; Svix 1.99.1 removes
+UUID 10; Mermaid uses KaTeX 0.18.2; Typography uses selector-parser 7.1.6;
+body-parser uses 2.3.0; MCP SDK uses its patched 1.31.0 release. Drizzle's unused
+legacy loader dependency is removed through pnpm's scoped removal override.
+The actual TypeScript configuration and migration generation paths are tested.
+
+The production audit reports no critical, high or moderate findings. Its one low
+`cli@0.3.1` report has no dependency paths and refers to the unrelated npm `cli`
+package. This workspace directory is named `cli`, but its package is `paperclipai`;
+no registry `cli` package is installed. Keep this report visible, with the
+existing audit checks and advisory baseline unchanged. Do not suppress it by
+renaming the workspace or expanding the baseline.
 
 To release, dispatch `RAGnos Paperclip Fork Release` with the current
 `codex/paperclip-stable` head and a new version. The workflow checks that the
