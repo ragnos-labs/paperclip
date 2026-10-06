@@ -50,7 +50,8 @@ jobs:
     name: Publish immutable RAGnos image
     needs: verify_source
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # The arm64 image compiles the Rust runner under emulation, which alone takes over an hour.
+    timeout-minutes: 240
     environment:
       name: paperclip-alpha-release
     permissions:
