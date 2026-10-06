@@ -6,6 +6,8 @@ export function shouldFocusMainContentAfterNavigation(
   if (!(activeElement instanceof HTMLElement)) return true;
   if (!document.contains(activeElement)) return true;
   if (activeElement === document.body || activeElement === document.documentElement) return true;
+  // A dialog opened during navigation owns focus; moving it dismisses popovers inside the dialog.
+  if (activeElement.closest('[role="dialog"], [role="alertdialog"]')) return false;
   return !mainElement.contains(activeElement);
 }
 

@@ -53,6 +53,22 @@ describe("main-content-focus", () => {
     expect(document.activeElement).toBe(input);
   });
 
+  it("does not steal focus from an open dialog outside main content", async () => {
+    const main = document.createElement("main");
+    const dialog = document.createElement("div");
+    const input = document.createElement("input");
+    main.tabIndex = -1;
+    dialog.setAttribute("role", "dialog");
+    dialog.appendChild(input);
+    document.body.append(main, dialog);
+    input.focus();
+
+    scheduleMainContentFocus(main);
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(document.activeElement).toBe(input);
+  });
+
   it("treats disconnected elements as needing main-content focus", () => {
     const main = document.createElement("main");
     main.tabIndex = -1;
