@@ -262,6 +262,8 @@ async function dragCardToColumn(page: Page, itemTitle: string, fromColumn: strin
   await page.mouse.down();
   await page.mouse.move(columnBox.x + columnBox.width / 2, columnBox.y + Math.max(88, columnBox.height / 2), { steps: 25 });
   await page.mouse.up();
+  // dnd-kit swallows document clicks for 50ms after a drop, so a confirm click inside that window is lost.
+  await page.waitForTimeout(100);
 
   try {
     await expect(page.getByRole("dialog")).toBeVisible({ timeout: 3_000 });
