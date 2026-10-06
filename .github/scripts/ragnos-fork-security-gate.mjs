@@ -137,15 +137,21 @@ async function runPullRequestScan() {
   const pullRequestBefore = await ghFetch(`/repos/${repo}/pulls/${prNumber}`, token);
   const files = await fetchAllPullRequestFiles(ghFetch, repo, prNumber, token);
   const pullRequestAfter = await ghFetch(`/repos/${repo}/pulls/${prNumber}`, token);
+  if (pullRequestBefore?.head?.sha !== pullRequestAfter?.head?.sha) throw new Error("PR head moved during review");
+  const base = pullRequestBefore?.base?.sha;
+  if (!/^[0-9a-f]{40}$/.test(base ?? "")) throw new Error("Exact PR base SHA required");
+  if (base !== pullRequestAfter?.base?.sha) throw new Error("PR base moved during review");
+  const baseLockfile = files.some(file => file.filename === "pnpm-lock.yaml" && file.patch)
+    ? execFileSync("git", ["show", `${base}:pnpm-lock.yaml`], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 })
+    : undefined;
   const detectedFlags = [
     ...scanSecrets(files),
     ...scanCITampering(files),
     ...scanBuildScripts(files),
-    ...scanSupplyChain(files),
+    ...scanSupplyChain(files, baseLockfile),
     ...scanTestPatterns(files),
     ...scanSensitivePaths(files),
   ];
-  if (pullRequestBefore?.head?.sha !== pullRequestAfter?.head?.sha) throw new Error("PR head moved during review");
   const flags = blockingFlags(detectedFlags);
   if (flags.length > 0) {
     throw new Error(`read-only source scan failed:\n${JSON.stringify(sanitizeFlags(flags), null, 2)}`);
@@ -162,8 +168,12 @@ async function runCommitScan() {
   const git = args => execFileSync("git", args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
   const files = git(["diff", "--name-only", baseline, source]).trim().split("\n").filter(Boolean)
     .map(filename => ({ filename, patch: git(["diff", "--no-ext-diff", baseline, source, "--", filename]) }));
-  const detectedFlags = [scanSecrets, scanCITampering, scanSensitivePaths, scanBuildScripts,
-    scanTestPatterns, scanSupplyChain].flatMap(scan => scan(files));
+  const baseLockfile = files.some(file => file.filename === "pnpm-lock.yaml" && file.patch)
+    ? git(["show", `${baseline}:pnpm-lock.yaml`]) : undefined;
+  const detectedFlags = [
+    ...[scanSecrets, scanCITampering, scanSensitivePaths, scanBuildScripts, scanTestPatterns].flatMap(scan => scan(files)),
+    ...scanSupplyChain(files, baseLockfile),
+  ];
   const flags = blockingFlags(detectedFlags);
   if (flags.length) throw new Error(`read-only source scan failed: ${JSON.stringify(sanitizeFlags(flags))}`);
   console.log(`[fork-security] exact push source scan passed for ${files.length} changed files`);

@@ -58,7 +58,7 @@ export function scanBuildScripts(files) {
     .map(f => ({ check: 'build-script-change', file: f.filename }));
 }
 
-export function scanSupplyChain(files) {
+export function scanSupplyChain(files, baseLockfile) {
   const lockfile = files.find(f => f.filename === 'pnpm-lock.yaml');
   if (!lockfile?.patch) return [];
 
@@ -72,8 +72,24 @@ export function scanSupplyChain(files) {
     if (entry.sign === '-') removed.add(entry.packageName);
   }
 
-  const netNew = [...added].filter(p => !removed.has(p));
+  const existing = baseLockfile === undefined ? removed : baseLockfilePackageNames(baseLockfile);
+  const netNew = [...added].filter(p => !existing.has(p));
   return netNew.length ? [{ check: 'supply-chain', packages: netNew }] : [];
+}
+
+function baseLockfilePackageNames(lockfile) {
+  if (typeof lockfile !== 'string' || !/^lockfileVersion: (?:'9\.0'|"9\.0"|9\.0)\r?$/m.test(lockfile)) {
+    throw new Error('Invalid base pnpm lockfile');
+  }
+  const section = lockfile.match(/^packages:\r?\n((?:[ \t].*\r?\n|\r?\n)*)/m);
+  if (!section) throw new Error('Base pnpm lockfile is missing its packages section');
+  const names = new Set();
+  for (const line of section[1].split('\n').filter(line => /^  \S/.test(line))) {
+    const entry = parseLockfilePackageDiffEntry(`+${line}`);
+    if (!entry) throw new Error('Invalid base pnpm lockfile package entry');
+    names.add(entry.packageName);
+  }
+  return names;
 }
 
 function parseLockfilePackageDiffEntry(line) {
@@ -363,11 +379,19 @@ async function main() {
     fetchAllPullRequestFiles(ghFetch, GH_REPO, prNumber, GH_TOKEN),
   ]);
 
+  let baseLockfile;
+  if (files.some(file => file.filename === 'pnpm-lock.yaml' && file.patch)) {
+    if (!/^[0-9a-f]{40}$/.test(pr.base?.sha ?? '')) throw new Error('Exact PR base SHA required');
+    const response = await ghFetch(buildContentsPath(GH_REPO, 'pnpm-lock.yaml', pr.base.sha), GH_TOKEN);
+    if (response.encoding !== 'base64' || typeof response.content !== 'string') throw new Error('Base lockfile content unavailable');
+    baseLockfile = Buffer.from(response.content, 'base64').toString('utf8');
+  }
+
   const allFlags = [
     ...scanSecrets(files),
     ...scanCITampering(files),
     ...scanBuildScripts(files),
-    ...scanSupplyChain(files),
+    ...scanSupplyChain(files, baseLockfile),
     ...scanTestPatterns(files),
     ...scanSensitivePaths(files),
   ];
