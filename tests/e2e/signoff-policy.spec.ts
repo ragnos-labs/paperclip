@@ -376,12 +376,13 @@ async function createIssueWithPolicy(ctx: TestContext, title: string, stages?: u
 test.describe("Signoff execution policy", () => {
   let ctx: TestContext;
 
-  test.beforeAll(async () => {
+  // Each case owns its agents so unfinished negative-path issues cannot occupy the next case's run queue.
+  test.beforeEach(async () => {
     const boardRequest = await pwRequest.newContext({ baseURL: BASE_URL });
     ctx = await setupCompany(boardRequest);
   });
 
-  test.afterAll(async () => {
+  test.afterEach(async () => {
     if (!ctx) return;
     const board = ctx.boardRequest;
 

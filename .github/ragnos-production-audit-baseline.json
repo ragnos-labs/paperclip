@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "sourceCommit": "8f8a0ab7effbd6a0584107d8038736c134ee5047",
   "capturedAt": "2026-10-06",
-  "lockfileSha256": "795edcca8a97a906f04412ac5bc1fd78346859325c84efa577a6d023188dc214",
+  "lockfileSha256": "d7d96cf0d98cf0946f6195e29ba173b03711a947a1c38f312b67cda56c254c22",
   "policy": "Inherited installed-upstream advisories are disclosed, not security approval. Removals permitted; added advisories or severity increases fail.",
   "advisories": {
     "1090893": "low",

@@ -2,6 +2,7 @@ import { publicChatTaskUrl } from "./chat-task-url.js";
 import { toolActionDeliveryService } from "./tool-action-delivery.js";
 import { githubBotConnectionIdsForRun } from "./chat-github-tools.js";
 import { readQueuedInteractionResponse } from "./queued-interaction-response.js";
+import { hasPendingHumanConfirmation } from "./pending-human-confirmation.js";
 import { AGENT_CHAT_DIRECTIVE, conversationReplay, isConversation, isConversationExecutionWake, isWaitingConversation, prepareConversationTurn, settleConversationTurn } from "./agent-conversations.js";
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
@@ -17211,6 +17212,14 @@ export function heartbeatService(
       if (settlingOwner) return null;
     }
     if (issueId) {
+      if (await hasPendingHumanConfirmation(db, run.companyId, issueId)) {
+        await cancelQueuedRunForIssueGate(run, issueId, {
+          reason: "Cancelled because issue awaits human confirmation",
+          errorCode: "issue_pending_human_confirmation",
+          timeoutSource: "human_confirmation_gate",
+        });
+        return null;
+      }
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
         run.companyId,
         issueId,
@@ -17268,11 +17277,12 @@ export function heartbeatService(
           ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
         )
       ) {
-        await cancelQueuedRunForBlockedDependencies(
-          run,
-          issueId,
-          readiness?.unresolvedBlockerIssueIds ?? [],
-        );
+        await cancelQueuedRunForIssueGate(run, issueId, {
+          reason: "Cancelled because issue dependencies are still blocked; Paperclip will wake the assignee when blockers resolve",
+          errorCode: "issue_dependencies_blocked",
+          timeoutSource: "dependency_gate",
+          payload: { unresolvedBlockerIssueIds: readiness?.unresolvedBlockerIssueIds ?? [] },
+        });
         logger.info(
           { runId: run.id, issueId, unresolvedBlockerCount },
           "claimQueuedRun: cancelled blocked queued run",
@@ -17789,24 +17799,23 @@ export function heartbeatService(
     });
   }
 
-  async function cancelQueuedRunForBlockedDependencies(
+  async function cancelQueuedRunForIssueGate(
     run: typeof heartbeatRuns.$inferSelect,
     issueId: string,
-    unresolvedBlockerIssueIds: string[],
+    gate: { reason: string; errorCode: string; timeoutSource: string; payload?: Record<string, unknown> },
   ) {
     const now = new Date();
-    const reason =
-      "Cancelled because issue dependencies are still blocked; Paperclip will wake the assignee when blockers resolve";
+    const { reason, errorCode } = gate;
     const cancelled = await setRunStatus(run.id, "cancelled", {
       finishedAt: now,
       error: reason,
-      errorCode: "issue_dependencies_blocked",
+      errorCode,
       resultJson: {
         ...parseObject(run.resultJson),
-        stopReason: "issue_dependencies_blocked",
+        stopReason: errorCode,
         effectiveTimeoutSec: 0,
         timeoutConfigured: false,
-        timeoutSource: "dependency_gate",
+        timeoutSource: gate.timeoutSource,
         timeoutFired: false,
       },
     });
@@ -17840,7 +17849,7 @@ export function heartbeatService(
       message: reason,
       payload: {
         issueId,
-        unresolvedBlockerIssueIds,
+        ...gate.payload,
       },
     });
 
@@ -26927,6 +26936,10 @@ export function heartbeatService(
     }
 
     if (issueId) {
+      if (await hasPendingHumanConfirmation(db, agent.companyId, issueId)) {
+        await writeSkippedRequest("issue.pending_human_confirmation", {}, { issueId });
+        return null;
+      }
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
         agent.companyId,
         issueId,

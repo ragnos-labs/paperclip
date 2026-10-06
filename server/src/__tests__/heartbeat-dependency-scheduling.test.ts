@@ -21,6 +21,7 @@ import {
   issueRelations,
   issueRecoveryActions,
   issueTreeHolds,
+  issueThreadInteractions,
   issues,
   workspaceOperations,
 } from "@paperclipai/db";
@@ -29,6 +30,9 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { heartbeatService } from "../services/heartbeat.ts";
+import { hasPendingHumanConfirmation } from "../services/pending-human-confirmation.js";
+import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
+import { recoveryService } from "../services/recovery/service.js";
 import { runningProcesses } from "../adapters/index.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
@@ -169,6 +173,121 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
   afterAll(async () => {
     await tempDb?.cleanup();
   });
+
+  async function seedHumanConfirmation(continuationPolicy = "none") {
+    const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Human hold", issuePrefix: `H${companyId.slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(agents).values({
+      id: agentId, companyId, name: "Held runner", role: "engineer", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, permissions: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, enabled: true, maxConcurrentRuns: 1 } },
+    });
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "Await human decision", status: "todo", priority: "medium",
+      assigneeAgentId: agentId, responsibleUserId: "responsible-user",
+    });
+    const [interaction] = await db.insert(issueThreadInteractions).values({
+      companyId, issueId, kind: "request_confirmation", continuationPolicy,
+      requestedResolverPolicy: "human_only", effectiveResolverPolicy: "human_only",
+      payload: { version: 1, prompt: "Proceed?" },
+    }).returning();
+    return { companyId, agentId, issueId, interaction };
+  }
+
+  it.each(["none", "wake_assignee", "wake_assignee_on_accept"])(
+    "human confirmation suppresses every wake with continuation %s",
+    async (continuationPolicy) => {
+      const { companyId, agentId, issueId, interaction } = await seedHumanConfirmation(continuationPolicy);
+      for (const [source, reason] of [
+        ["automation", "issue_blockers_resolved"],
+        ["automation", "issue_children_completed"],
+        ["automation", "issue_graph_liveness_backstop"],
+        ["assignment", "issue_assigned"],
+        ["on_demand", "issue_comment_created"],
+        ["timer", "heartbeat"],
+        ["on_demand", "manual"],
+      ] as const) {
+        expect(await heartbeat.wakeup(agentId, {
+          source, reason, payload: { issueId }, contextSnapshot: { issueId },
+          requestedByActorType: "user", requestedByActorId: "local-board",
+        })).toBeNull();
+      }
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      expect(await hasPendingHumanConfirmation(db, companyId, issueId)).toBe(true);
+      expect(await hasPendingHumanConfirmation(db, randomUUID(), issueId)).toBe(false);
+      const [preserved] = await db.select().from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.id, interaction.id));
+      expect(preserved.status).toBe("pending");
+      const requests = await db.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.companyId, companyId));
+      expect(requests).toHaveLength(7);
+      expect(requests.every((request) => request.status === "skipped" &&
+        request.reason === "issue.pending_human_confirmation")).toBe(true);
+    },
+  );
+
+  it("authenticated human resolution restores wake eligibility without bypassing the hold", async () => {
+    const { companyId, agentId, issueId, interaction } = await seedHumanConfirmation();
+    const service = issueThreadInteractionService(db);
+    const issue = { id: issueId, companyId, projectId: null, goalId: null };
+    await expect(service.acceptInteraction(issue, interaction.id, {}, { agentId, runId: randomUUID() }))
+      .rejects.toThrow("human-only");
+    expect(await hasPendingHumanConfirmation(db, companyId, issueId)).toBe(true);
+    await service.acceptInteraction(issue, interaction.id, {}, { userId: "local-board" });
+    expect(await hasPendingHumanConfirmation(db, companyId, issueId)).toBe(false);
+    const run = await heartbeat.wakeup(agentId, {
+      source: "assignment", reason: "issue_assigned", payload: { issueId },
+      contextSnapshot: { issueId },
+    });
+    expect(run).not.toBeNull();
+    expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length > 0)).toBe(true);
+    await heartbeat.waitForRunExecutionDrain(run!.id);
+  });
+
+  it("a human confirmation added after enqueue prevents queued dispatch", async () => {
+    const { companyId, agentId, issueId, interaction } = await seedHumanConfirmation();
+    await db.delete(issueThreadInteractions).where(eq(issueThreadInteractions.id, interaction.id));
+    const [wake] = await db.insert(agentWakeupRequests).values({
+      companyId, agentId, source: "assignment", reason: "issue_assigned", status: "queued",
+      payload: { issueId },
+    }).returning();
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId, agentId, status: "queued", invocationSource: "assignment",
+      wakeupRequestId: wake.id, contextSnapshot: { issueId },
+    }).returning();
+    await db.update(agentWakeupRequests).set({ runId: run.id }).where(eq(agentWakeupRequests.id, wake.id));
+    await db.insert(issueThreadInteractions).values(interaction);
+    await heartbeat.resumeQueuedRuns();
+    const [cancelled] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.error).toContain("human confirmation");
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect(await hasPendingHumanConfirmation(db, companyId, issueId)).toBe(true);
+  });
+
+  it.each(["issue_graph_liveness.backstop", "workspace.finalize"])(
+    "dependency recovery preserves a human hold during %s",
+    async (source) => {
+      const { companyId, issueId } = await seedHumanConfirmation();
+      const [blocker] = await db.insert(issues).values({
+        companyId, title: "Completed dependency", status: "done", priority: "medium",
+        responsibleUserId: "responsible-user",
+      }).returning();
+      await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issueId));
+      await db.insert(issueRelations).values({ companyId, issueId: blocker.id,
+        relatedIssueId: issueId, type: "blocks" });
+      const enqueueWakeup = vi.fn(async () => null);
+      const result = await recoveryService(db, { enqueueWakeup })
+        .reconcileResolvedDependencyWakeBackstop({ companyId, source,
+          ...(source === "workspace.finalize" ? { blockerIssueId: blocker.id } : {}) });
+      expect(result.interactionSkipped).toBe(1);
+      expect(enqueueWakeup).not.toHaveBeenCalled();
+      expect(await hasPendingHumanConfirmation(db, companyId, issueId)).toBe(true);
+    },
+  );
 
   it("dispatches and coalesces durable native status wake intents into one heartbeat run", async () => {
     const companyId = randomUUID();

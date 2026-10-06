@@ -501,10 +501,18 @@ for (const journey of [
         await expect(page.getByText(/GMAIL-73/)).toHaveCount(0);
         await expect(page.getByRole("button", { name: /Reconcile and continue|Try again/ })).toHaveCount(0);
         await expect(page.getByRole("dialog", { name: "Reconcile execution" })).toHaveCount(0);
-        const recovery = (await api(`/issues/${task.id}`)).activeRecoveryAction;
-        expect(recovery).toMatchObject({
-          status: "active", ownerType: "board", outcome: null,
-          evidence: { recoveryMode: "ambiguous_state" },
+        const failedRuns = await Promise.all(
+          (await api(`/companies/${company.id}/heartbeat-runs`))
+            .filter((run: { status: string }) => run.status === "failed")
+            .map((run: { id: string }) => api(`/heartbeat-runs/${run.id}`)),
+        );
+        expect(failedRuns).toHaveLength(1);
+        expect(failedRuns[0]).toMatchObject({ nativeIssueId: task.id, runtimeMode: "native" });
+        // The replacement sweep supersedes the initial ambiguity projection
+        // with its durable no-replay decision for this exact failed run.
+        await expect.poll(async () => (await api(`/issues/${task.id}`)).activeRecoveryAction, { timeout: 100_000 }).toMatchObject({
+          status: "active", ownerType: "board", outcome: null, cause: "uncertain_provider_action",
+          evidence: { runId: failedRuns[0].id },
         });
         await page.screenshot({ path: info.outputPath("uncertain-automatic-no-replay.png"), fullPage: true });
         // Past the retry delay, unknown effects still cannot be replayed.
