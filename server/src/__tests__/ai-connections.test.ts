@@ -4,7 +4,8 @@ import { issueRecoveryActionService } from "../services/issue-recovery-actions.j
 import * as localCredentials from "../services/local-ai-credentials.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, access, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, access, readFile, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { and, eq, sql } from "drizzle-orm";
@@ -147,6 +148,38 @@ describe("managed AI connections", () => {
       await expect(assertManagedAiProjectAuth({}, "openai", target)).resolves.toBeUndefined();
       await expect(assertManagedAiProjectAuth({ args: ["--api-key=override"] }, "xai", target)).rejects.toThrow("overrides");
     } finally { execute.mockRestore(); }
+  });
+  it.each(["local", "remote"] as const)("ignores full-line OpenAI TOML comments but rejects auth settings (%s)", async (kind) => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "paperclip-project-auth-"));
+    const configDir = path.join(cwd, ".codex");
+    await mkdir(configDir);
+    const configFile = path.join(configDir, "config.toml");
+    const execute = kind === "remote" ? vi.spyOn(executionTarget, "runAdapterExecutionTargetProcess") : null;
+    execute?.mockImplementation(async (_id, _target, command, args) => {
+      const result = spawnSync(command, args, { encoding: "utf8" });
+      return { exitCode: result.status, stdout: result.stdout, stderr: result.stderr, signal: result.signal, timedOut: false } as Awaited<ReturnType<typeof executionTarget.runAdapterExecutionTargetProcess>>;
+    });
+    const target = kind === "remote"
+      ? { kind: "remote", transport: "sandbox", remoteCwd: cwd } as Parameters<typeof assertManagedAiProjectAuth>[2]
+      : undefined;
+    try {
+      const comments = '# OPENAI_API_KEY is supplied separately\n  # model_provider = "example"\n\t# env_key = "OPENAI_API_KEY"\n# experimental_bearer_token cli_auth_credentials_store\n';
+      await writeFile(configFile, `${comments}model = "fixture"\n`);
+      await expect(assertManagedAiProjectAuth({ cwd }, "openai", target)).resolves.toBeUndefined();
+      for (const setting of [
+        'model_provider = "fixture"',
+        'env_key = "FIXTURE_API_KEY"',
+        'experimental_bearer_token = "fixture-token"',
+        'cli_auth_credentials_store = "file"',
+        'OPENAI_API_KEY = "fixture-key"',
+      ]) {
+        await writeFile(configFile, `${comments}${setting}\n`);
+        await expect(assertManagedAiProjectAuth({ cwd }, "openai", target)).rejects.toMatchObject({ details: { code: "ai_connection_incompatible" } });
+      }
+    } finally {
+      execute?.mockRestore();
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
   it("keeps personal defaults separate and does not replace the first default", async () => {
     const first = await create("alice", "Alice first");

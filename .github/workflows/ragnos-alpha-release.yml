@@ -33,6 +33,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      actions: read
     steps:
       - name: Resolve published release
         id: release
@@ -44,9 +45,17 @@ jobs:
           set -euo pipefail
           printf '%s' "$SOURCE_SHA" | grep -Eq '^[0-9a-f]{40}$'
           printf '%s' "$VERSION" | grep -Eq '^0\.[0-9]+\.[0-9]+$'
-          gh release download "ragnos/v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern release-receipt.json
-          jq -e --arg sha "$SOURCE_SHA" --arg version "$VERSION" --arg repo "$GITHUB_REPOSITORY" \
-            '.source_sha == $sha and .version == $version and .repository == $repo and (.image_digest | test("^sha256:[0-9a-f]{64}$"))' release-receipt.json
+          artifact="paperclip-ragnos-${VERSION}-release-receipt"
+          runs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$artifact&per_page=100" \
+            --jq '.artifacts[] | select(.expired == false) | .workflow_run.id' | sort -u)"
+          [ "$(printf '%s\n' "$runs" | grep -c '^[0-9][0-9]*$')" = 1 ]
+          run_id="$runs"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" > publication-run.json
+          jq -e --arg sha "$SOURCE_SHA" \
+            '.head_sha == $sha and .head_branch == "codex/paperclip-stable" and .event == "workflow_dispatch" and .conclusion == "success" and .path == ".github/workflows/ragnos-alpha-release.yml"' publication-run.json
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "$artifact"
+          jq -e --arg sha "$SOURCE_SHA" --arg version "$VERSION" --arg repo "$GITHUB_REPOSITORY" --arg run "https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id" \
+            '.workflow_run == $run and .source_sha == $sha and .version == $version and .repository == $repo and (.image_digest | test("^sha256:[0-9a-f]{64}$"))' release-receipt.json
           echo "image=ghcr.io/$GITHUB_REPOSITORY@$(jq -r .image_digest release-receipt.json)" >> "$GITHUB_OUTPUT"
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
@@ -109,6 +118,11 @@ jobs:
             exit 1
           fi
 
+          trusted_head="$(gh api "repos/ragnos-labs/paperclip/git/ref/heads/codex/paperclip-stable" --jq .object.sha)"
+          if [ "$INPUT_SOURCE_SHA" != "$trusted_head" ]; then
+            echo "source_sha must match the current trusted maintenance head." >&2
+            exit 1
+          fi
           SOURCE_SHA="$INPUT_SOURCE_SHA" node .github/scripts/ragnos-fork-release-source.mjs
           release_tag="ragnos/v${INPUT_VERSION}"
           if [ -n "$(git ls-remote origin "refs/tags/${release_tag}")" ]; then
