@@ -6,12 +6,18 @@ const BASE = "/api";
 export class ApiError extends Error {
   status: number;
   body: unknown;
+  retryAfterMs?: number;
 
-  constructor(message: string, status: number, body: unknown) {
+  constructor(message: string, status: number, body: unknown, retryAfter?: string | null) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.body = body;
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter) - Date.now();
+      if (Number.isFinite(delay)) this.retryAfterMs = Math.max(0, delay);
+    }
   }
 }
 
@@ -63,6 +69,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       (errorBody as { error?: string } | null)?.error ?? `Request failed: ${res.status}`,
       res.status,
       errorBody,
+      res.headers.get("Retry-After"),
     );
   }
   if (res.status === 204) return undefined as T;

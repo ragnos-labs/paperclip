@@ -142,6 +142,8 @@ export function getHeartbeatRunRuntimeStatus(
     agentId?: string | null;
     now?: Date;
     ttlMs?: number;
+    /** Observation-only callers must not prune runtime state. */
+    pruneExpired?: boolean;
   },
 ): HeartbeatRunRuntimeStatus | null {
   const status = runtimeStatusesByRunId.get(runId);
@@ -150,7 +152,7 @@ export function getHeartbeatRunRuntimeStatus(
   const now = expected?.now ?? new Date();
   const ttlMs = expected?.ttlMs ?? HEARTBEAT_RUN_RUNTIME_STATUS_TTL_MS;
   if (isExpired(status, now, ttlMs)) {
-    runtimeStatusesByRunId.delete(runId);
+    if (expected?.pruneExpired !== false) runtimeStatusesByRunId.delete(runId);
     return null;
   }
 

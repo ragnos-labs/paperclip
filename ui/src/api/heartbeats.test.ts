@@ -44,6 +44,11 @@ describe("heartbeatsApi.liveRunsForCompany", () => {
     mockApi.get.mockResolvedValue([]);
   });
 
+  it("serializes zero without allowing completed history to pad the active list", async () => {
+    await heartbeatsApi.liveRunsForCompany("company-1", { minCount: 0, limit: 50 });
+    expect(mockApi.get).toHaveBeenCalledWith("/companies/company-1/live-runs?minCount=0&limit=50");
+  });
+
   it("keeps the legacy numeric minCount signature", async () => {
     await heartbeatsApi.liveRunsForCompany("company-1", 4);
 
