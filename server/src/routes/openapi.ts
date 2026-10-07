@@ -1321,6 +1321,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/project-repositories",
   "PUT /api/projects/{id}/repositories",
   "DELETE /api/issues/{id}/documents/{key}",
+  "GET /api/companies/{companyId}/operator-overview",
   "GET /api/companies/{companyId}/decisions",
   "GET /api/cloud/stacks",
   "GET /api/companies",
@@ -1715,6 +1716,10 @@ function applyDocumentFixups(document: any): any {
                 : { actor: "public" };
 
       const key = operationKey(method, path);
+      if (key === "GET /api/companies/{companyId}/operator-overview") {
+        operation.security = [securityRequirement(BOARD_SESSION_AUTH_SCHEME)];
+        operation["x-paperclip-authorization"] = { actor: "board", humanSession: true };
+      }
       if (authLevel !== "public") {
         const responses = (operation.responses ??= {}) as Record<
           string,
@@ -5340,6 +5345,23 @@ registry.registerPath({
   summary: "List issues for a heartbeat run",
   request: { params: z.object({ runId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/operator-overview",
+  tags: ["dashboard"],
+  summary: "Get bounded Work or Team observation data",
+  description: "Requires a human board session with company access. Agent and board API keys and implicit local access are rejected. Pure reads return only safe fields; task completion does not establish human acceptance.",
+  request: {
+    params: z.object({ companyId: z.string().uuid() }),
+    query: z.object({
+      view: z.enum(["work", "team"]).default("work"),
+      limit: z.string().regex(/^(?:[1-9]|[1-9][0-9]|100)$/).default("50"),
+      offset: z.string().regex(/^(?:[0-9]{1,6}|1000000)$/).default("0"),
+    }),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
 });
 
 // ─── Dashboard ───────────────────────────────────────────────────────────────

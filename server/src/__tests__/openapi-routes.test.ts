@@ -56,6 +56,7 @@ const apiPrefixes: Record<string, string> = {
   "managed-agent-profiles.ts": "/api",
   "onboarding-seed.ts": "/api",
   "openapi.ts": "/api",
+  "operator-overview.ts": "/api",
   "plugin-ui-static.ts": "/api",
   "plugins.ts": "/api",
   "projects.ts": "/api",
@@ -225,6 +226,13 @@ function loadSpecRoutes() {
 }
 
 describe("openapi routes", () => {
+  it("documents overview as a human-session-only read", () => {
+    const operation = buildOpenApiSpec().paths["/api/companies/{companyId}/operator-overview"].get;
+    expect(operation.security).toEqual([{ BoardSessionAuth: [] }]);
+    expect(operation["x-paperclip-authorization"]).toEqual({ actor: "board", humanSession: true });
+    expect(Object.keys(operation.responses)).toEqual(expect.arrayContaining(["200", "400", "401", "403"]));
+  });
+
   it("documents personal board-only announcements and private responses", () => {
     const { spec } = loadSpecRoutes();
     const current = spec.paths["/api/announcements/current"].get;
