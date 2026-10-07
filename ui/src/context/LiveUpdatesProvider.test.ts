@@ -1615,11 +1615,11 @@ describe("operator overview relay", () => {
     const invalidations: unknown[] = [];
     const client = { invalidateQueries: (input: unknown) => invalidations.push(input), getQueryData: () => undefined, setQueryData: () => undefined };
     for (const type of ["heartbeat.run.queued", "heartbeat.run.status", "heartbeat.run.progress", "agent.status", "activity.logged"]) {
-      __liveUpdatesTestUtils.handleLiveEvent(client as never, "company", "/companyos/work", { id: 1, companyId: "company", type, createdAt: new Date().toISOString(), payload: {} } as never, () => null, { cooldownHits: new Map(), suppressUntil: 0 }, { userId: null, agentId: null });
+      __liveUpdatesTestUtils.handleLiveEvent(client as never, "company", "/companyos/work", { id: 1, companyId: "company", type, createdAt: new Date().toISOString(), payload: {} } as never, () => null, { cooldownHits: new Map(), suppressUntil: 0, observedRunOutcomes: new Set() }, { userId: null, agentId: null });
     }
     expect(invalidations.filter((entry) => JSON.stringify(entry) === JSON.stringify({ queryKey: queryKeys.operatorOverview("company") }))).toHaveLength(5);
     invalidations.length = 0;
-    __liveUpdatesTestUtils.handleLiveEvent(client as never, "company", "/companyos/work", { companyId: "foreign", type: "agent.status", payload: {} } as never, () => null, { cooldownHits: new Map(), suppressUntil: 0 }, { userId: null, agentId: null });
+    __liveUpdatesTestUtils.handleLiveEvent(client as never, "company", "/companyos/work", { companyId: "foreign", type: "agent.status", payload: {} } as never, () => null, { cooldownHits: new Map(), suppressUntil: 0, observedRunOutcomes: new Set() }, { userId: null, agentId: null });
     expect(invalidations).toEqual([]);
   });
 });
