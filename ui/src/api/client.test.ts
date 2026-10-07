@@ -25,8 +25,8 @@ function jsonResponse(body: unknown) {
   return { ok: true, status: 200, json: async () => body } as unknown as Response;
 }
 
-function errorResponse(body: unknown, status = 401) {
-  return { ok: false, status, json: async () => body } as unknown as Response;
+function errorResponse(body: unknown, status = 401, headers = new Headers()) {
+  return { ok: false, status, headers, json: async () => body } as unknown as Response;
 }
 
 const fetchMock = vi.fn();
@@ -74,6 +74,14 @@ describe("tenant-session recovery", () => {
       status: 401,
       message: "unauthorized",
     });
+  });
+});
+
+describe("Retry-After response handling", () => {
+  it.each([["2", 2000], ["0", 0], ["Thu, 01 Jan 1970 00:00:02 GMT", 2000]])("retains the server delay %s", async (value, retryAfterMs) => {
+    vi.spyOn(Date, "now").mockReturnValue(0);
+    fetchMock.mockResolvedValue(errorResponse({ error: "throttled" }, 429, new Headers({ "Retry-After": value })));
+    await expect(api.get("/throttled")).rejects.toMatchObject({ name: "ApiError", status: 429, retryAfterMs });
   });
 });
 
