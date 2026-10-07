@@ -238,7 +238,7 @@ export const heartbeatsApi = {
     if (typeof options === "number") {
       searchParams.set("minCount", String(options));
     } else if (options) {
-      if (options.minCount)
+      if (options.minCount !== undefined)
         searchParams.set("minCount", String(options.minCount));
       if (options.limit) searchParams.set("limit", String(options.limit));
     }

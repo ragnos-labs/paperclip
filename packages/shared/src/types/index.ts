@@ -1069,3 +1069,5 @@ export * from "./chat-channels.js";
 export * from "./chat-github.js";
 
 export * from "./email.js";
+
+export type { OperatorOverviewView, OperatorWorkItem, OperatorTeamItem, OperatorRun, OperatorOverview } from "./operator-overview.js";

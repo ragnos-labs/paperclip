@@ -1,4 +1,5 @@
 export const queryKeys = {
+  operatorOverview: (companyId: string) => ["operator-overview", companyId] as const,
   agentChats: {
     detail: (companyId: string | null, userId: string | null, agentId: string | undefined) =>
       ["agent-chat", companyId, userId, agentId] as const,

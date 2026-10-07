@@ -6,6 +6,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   type ReactNode,
 } from "react";
 import {
@@ -80,6 +81,12 @@ export type CompanyLiveEventHandler = (event: LiveEvent) => void;
 
 interface LiveEventSubscription {
   subscribe: (handler: CompanyLiveEventHandler) => () => void;
+}
+
+const OverviewConnectionContext = createContext<{ companyId: string | null; connected: boolean }>({ companyId: null, connected: false });
+export function useOverviewConnection(companyId: string | null) {
+  const value = useContext(OverviewConnectionContext);
+  return value.companyId === companyId && value.connected;
 }
 
 const LiveEventSubscriptionContext =
@@ -1655,6 +1662,9 @@ function handleLiveEvent(
 ) {
   if (event.companyId !== expectedCompanyId) return;
 
+  if (["heartbeat.run.queued", "heartbeat.run.status", "heartbeat.run.progress", "agent.status", "activity.logged"].includes(event.type)) {
+    queryClient.invalidateQueries({ queryKey: queryKeys.operatorOverview(expectedCompanyId) });
+  }
   const nameOf = (id: string) =>
     resolveAgentName(queryClient, expectedCompanyId, id);
   const payload = event.payload ?? {};
@@ -1827,6 +1837,7 @@ function closeSocketQuietly(
 }
 
 export const __liveUpdatesTestUtils = {
+  handleLiveEvent,
   applyRunLifecycleToCompanyLiveRuns,
   buildAgentStatusToast,
   buildRunStatusToast,
@@ -1880,6 +1891,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
     userId: currentUserId,
     agentId: null,
   });
+  const [overviewConnection, setOverviewConnection] = useState({ companyId: null as string | null, connected: false });
   const subscribersRef = useRef<Set<CompanyLiveEventHandler>>(new Set());
   const subscribe = useCallback((handler: CompanyLiveEventHandler) => {
     subscribersRef.current.add(handler);
@@ -1917,6 +1929,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
   }, [currentUserId]);
 
   useEffect(() => {
+    setOverviewConnection({ companyId: liveCompanyId, connected: false });
     if (!visible) {
       wasHidden.current = true;
       invalidationBatcher.dispose();
@@ -1989,6 +2002,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
           return;
         }
         stopPolling();
+        setOverviewConnection({ companyId: liveCompanyId, connected: true });
         if (reconnectAttempt > 0) {
           gateRef.current.suppressUntil = Date.now() + RECONNECT_SUPPRESS_MS;
           // Reconcile all visible data after a gap: missed events cannot be replayed.
@@ -2037,6 +2051,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
         if (socket !== nextSocket) return;
         socket = null;
         if (closed) return;
+        setOverviewConnection({ companyId: liveCompanyId, connected: false });
         startPolling();
         scheduleReconnect();
       };
@@ -2068,8 +2083,10 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
   ]);
 
   return (
+    <OverviewConnectionContext.Provider value={overviewConnection}>
     <LiveEventSubscriptionContext.Provider value={subscriptionValue}>
       {children}
     </LiveEventSubscriptionContext.Provider>
+    </OverviewConnectionContext.Provider>
   );
 }
