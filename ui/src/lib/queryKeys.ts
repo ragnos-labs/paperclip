@@ -1,4 +1,5 @@
 export const queryKeys = {
+  operatorOverview: (companyId: string) => ["operator-overview", companyId] as const,
   companies: {
     all: ["companies"] as const,
     detail: (id: string) => ["companies", id] as const,

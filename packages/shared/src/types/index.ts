@@ -958,3 +958,5 @@ export type {
   PluginDatabaseNamespaceStatus,
 } from "./plugin.js";
 export * from "./app-definition.js";
+
+export type { OperatorOverviewView, OperatorWorkItem, OperatorTeamItem, OperatorRun, OperatorOverview } from "./operator-overview.js";

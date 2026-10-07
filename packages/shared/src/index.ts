@@ -2378,3 +2378,5 @@ export {
   type FeatureTier,
   type InstanceFeatureKey,
 } from "./feature-catalog.js";
+
+export type { OperatorOverviewView, OperatorWorkItem, OperatorTeamItem, OperatorRun, OperatorOverview } from "./types/operator-overview.js";

@@ -197,6 +197,8 @@ export function Sidebar() {
               collapsed rail, where the old header icon was dropped entirely.
               Cmd/Ctrl+K remains the keyboard path (command palette). */}
           <SidebarNavItem to="/search" label="Search" icon={Search} />
+          <SidebarNavItem to="/companyos/work" label="Work" icon={ListChecks} />
+          <SidebarNavItem to="/companyos/team" label="Team" icon={Network} />
           <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
           <SidebarNavItem
             to="/inbox"
