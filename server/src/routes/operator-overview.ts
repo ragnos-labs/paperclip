@@ -39,10 +39,10 @@ export function operatorOverviewRoutes(db: Db) {
           projectId: sql<string | null>`(select id from ${projects} where id = ${issues.projectId} and company_id = ${companyId})`,
           assigneeAgentId: sql<string | null>`(select id from ${agents} where id = ${issues.assigneeAgentId} and company_id = ${companyId})`,
           assigneeUserId: sql<string | null>`(select principal_id from ${companyMemberships} where company_id = ${companyId} and principal_type = 'user' and principal_id = ${issues.assigneeUserId} and status = 'active' limit 1)`, updatedAt: issues.updatedAt,
-          executionRunId: sql<string | null>`(select id from ${heartbeatRuns} where id = ${issues.executionRunId} and company_id = ${companyId})`,
-          checkoutRunId: sql<string | null>`(select id from ${heartbeatRuns} where id = ${issues.checkoutRunId} and company_id = ${companyId})`,
+          executionRunId: sql<string | null>`(select r.id from ${heartbeatRuns} r join ${agents} a on a.id = r.agent_id and a.company_id = ${companyId} where r.id = ${issues.executionRunId} and r.company_id = ${companyId})`,
+          checkoutRunId: sql<string | null>`(select r.id from ${heartbeatRuns} r join ${agents} a on a.id = r.agent_id and a.company_id = ${companyId} where r.id = ${issues.checkoutRunId} and r.company_id = ${companyId})`,
           humanHold: sql<boolean>`(${issues.executionState}->>'status' = 'pending' and ${issues.executionState}->'currentParticipant'->>'type' = 'user' and exists (select 1 from ${companyMemberships} where company_id = ${companyId} and principal_type = 'user' and principal_id = ${issues.executionState}->'currentParticipant'->>'userId' and status = 'active')) or exists (select 1 from ${issueApprovals} ia join ${approvals} a on a.id = ia.approval_id and a.company_id = ia.company_id where ia.company_id = ${companyId} and ia.issue_id = ${issues.id} and a.status = 'pending')`,
-          executionAgentId: sql<string | null>`(select agent_id from ${heartbeatRuns} where id = ${issues.executionRunId} and company_id = ${companyId})`,
+          executionAgentId: sql<string | null>`(select r.agent_id from ${heartbeatRuns} r join ${agents} a on a.id = r.agent_id and a.company_id = ${companyId} where r.id = ${issues.executionRunId} and r.company_id = ${companyId})`,
         }).from(issues).where(and(eq(issues.companyId, companyId), isNull(issues.hiddenAt)))
           .orderBy(desc(issues.updatedAt), issues.id).limit(limit + 1).offset(offset)
       : db.select({ companyId: agents.companyId, agentId: agents.id, name: agents.name, role: agents.role, status: agents.status })
