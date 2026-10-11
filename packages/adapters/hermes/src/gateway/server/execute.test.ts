@@ -349,6 +349,30 @@ describe("accepted remote run recovery", () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/v1/runs"))).toBe(false);
   });
 
+  it.each(["deadline", "operator stop"])("ends an accepted run that Hermes no longer has after its %s", async (trigger) => {
+    const { binding, fetchMock } = await acceptAndDetach();
+    fetchMock.mockClear().mockImplementation(async () => new Response(
+      JSON.stringify({ error: { message: "Run not found: accepted-run", code: "run_not_found" } }), { status: 404 },
+    ));
+    const ctx = makeCtx(config);
+    ctx.remoteRunRecovery = trigger === "deadline"
+      ? { ...binding, deadlineAt: new Date(Date.now() - 1).toISOString() } : binding;
+    if (trigger === "operator stop") {
+      const cancel = new AbortController();
+      cancel.abort();
+      ctx.signal = cancel.signal;
+    }
+    const result = await execute(ctx);
+    expect(result).toMatchObject({
+      exitCode: 1, signal: null, timedOut: false,
+      errorCode: "hermes_gateway_provider_run_missing",
+      resultJson: { run_id: "accepted-run", providerRunMissing: true },
+    });
+    expect(result.resultJson?.executionCancellation).toBeUndefined();
+    expect(fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith("/stop") && init?.method === "POST")).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/v1/runs"))).toBe(false);
+  });
+
   it.each([false, true])("cancels accepted work even when observer detach is %s", async (detachRequested) => {
     const { binding, fetchMock } = await acceptAndDetach();
     fetchMock.mockClear().mockImplementation(async () => new Response(JSON.stringify({
@@ -1167,6 +1191,55 @@ describe("execute", () => {
     expect(result.timedOut).toBe(true);
     expect(result.errorCode).toBe("hermes_gateway_timeout");
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/stop"))).toBe(true);
+  });
+
+  const runNotFound = () => new Response(
+    JSON.stringify({ error: { message: "Run not found: run-gone", type: "invalid_request_error", param: null, code: "run_not_found" } }),
+    { status: 404 },
+  );
+
+  function stubTimedOutRun(stop: () => Response, status: () => Response) {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-gone", status: "started" }), { status: 200 });
+      if (url.endsWith("/events")) return new Promise<Response>(() => {});
+      return url.endsWith("/stop") ? stop() : status();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("ends a timed-out run as failed when Hermes reports run_not_found on stop and status", async () => {
+    const fetchMock = stubTimedOutRun(runNotFound, runNotFound);
+
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key", timeoutSec: 0.001 }));
+
+    expect(result).toMatchObject({
+      exitCode: 1, signal: null, timedOut: false,
+      errorCode: "hermes_gateway_provider_run_missing",
+      resultJson: { run_id: "run-gone", status: "run_not_found", providerRunMissing: true },
+    });
+    expect(result.resultJson?.executionCancellation).toBeUndefined();
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/stop"))).toHaveLength(1);
+  });
+
+  it.each([
+    ["Hermes accepts the stop and the run stays active",
+      () => new Response(JSON.stringify({ status: "stopping" })), () => new Response(JSON.stringify({ status: "running" }))],
+    ["the run finished and keeps a status without stop proof",
+      runNotFound, () => new Response(JSON.stringify({ status: "cancelled", last_event: "run.cancelled" }))],
+    ["only the status reports run_not_found",
+      () => new Response(JSON.stringify({ status: "stopping" })), runNotFound],
+    ["a 404 carries no Hermes run_not_found code",
+      () => new Response("Not Found", { status: 404 }), () => new Response("Not Found", { status: 404 })],
+  ] as const)("keeps a timed-out run unconfirmed when %s", async (_name, stop, status) => {
+    stubTimedOutRun(stop, status);
+
+    const result = await execute(makeCtx({ apiBaseUrl: "http://127.0.0.1:8642", apiKey: "secret-key", timeoutSec: 0.001 }));
+
+    expect(result).toMatchObject({ timedOut: true, errorCode: "hermes_gateway_timeout" });
+    expect(result.resultJson?.providerRunMissing).toBeUndefined();
+    expect(result.resultJson?.executionCancellation).toBeUndefined();
   });
 
   it("propagates Paperclip cancellation signal to Hermes POST /v1/runs/{id}/stop and returns executionCancellation", async () => {

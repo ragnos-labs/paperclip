@@ -758,25 +758,32 @@ function diagnosticLog(ctx: AdapterExecutionContext, stream: "stdout" | "stderr"
   try { void ctx.onLog(stream, message).catch(() => undefined); } catch { /* best effort */ }
 }
 
+// Hermes answers 404 with error.code run_not_found when it holds no record of
+// the run. A bare 404 can come from a proxy or a wrong path and proves nothing.
+function isRunNotFound(err: unknown): boolean {
+  const httpError = err as HermesHttpError;
+  return httpError?.status === 404 && asRecord(asRecord(httpError.body)?.error)?.code === "run_not_found";
+}
+
 async function stopRun(input: {
   ctx: AdapterExecutionContext;
   baseUrl: URL;
   headers: Record<string, string>;
   runId: string;
   redactText?: TextRedactor;
-}): Promise<Record<string, unknown> | null> {
+}): Promise<"requested" | "run_not_found" | "failed"> {
   try {
-    const stopped = await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.runId)}/stop`), {
+    await fetchJson(apiUrl(input.baseUrl, `/v1/runs/${encodeURIComponent(input.runId)}/stop`), {
       method: "POST",
       redirect: "error",
       headers: input.headers,
       signal: AbortSignal.timeout(STOP_GRACE_MS),
     });
     diagnosticLog(input.ctx, "stdout", `[hermes-gateway] stop requested for run ${input.runId}\n`);
-    return asRecord(stopped);
+    return "requested";
   } catch (err) {
     diagnosticLog(input.ctx, "stderr", `[hermes-gateway] stop request failed: ${redactErrorMessage(err, input.redactText)}\n`);
-    return null;
+    return isRunNotFound(err) ? "run_not_found" : "failed";
   }
 }
 
@@ -785,7 +792,7 @@ async function fetchFinalStatus(input: {
   headers: Record<string, string>;
   runId: string;
   deadlineMs: number;
-}): Promise<Record<string, unknown> | null> {
+}): Promise<Record<string, unknown> | "run_not_found" | null> {
   const deadline = Date.now() + input.deadlineMs;
   while (Date.now() < deadline) {
     try {
@@ -800,8 +807,8 @@ async function fetchFinalStatus(input: {
       const record = asRecord(status);
       const normalized = extractStatus(status);
       if (normalized && TERMINAL_STATUSES.has(normalized)) return record;
-    } catch {
-      return null;
+    } catch (err) {
+      return isRunNotFound(err) ? "run_not_found" : null;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
@@ -1023,10 +1030,20 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
   if (!runId) return errorResult(new Error("Missing accepted Hermes run binding."), redactText);
 
-  let stopPromise: Promise<Record<string, unknown> | null> | null = null;
+  const state = createExecutionState(runId);
+  let stopPromise: ReturnType<typeof stopRun> | null = null;
   const requestStop = () => {
-    if (!runId) return Promise.resolve(null);
-    return stopPromise ??= stopRun({ ctx, baseUrl, headers: eventHeaders, runId, redactText });
+    return stopPromise ??= stopRun({ ctx, baseUrl, headers: eventHeaders, runId: state.runId, redactText });
+  };
+  // Stop, then read the final status. The run is missing only when Hermes
+  // answers run_not_found to both: a finished run also answers run_not_found
+  // to /stop, but keeps a pollable status.
+  const stopAndReadFinalStatus = async (deadlineMs: number) => {
+    const stop = await requestStop();
+    const finalStatus = await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId: state.runId, deadlineMs });
+    return finalStatus === "run_not_found"
+      ? { finalStatus: null, runMissing: stop === "run_not_found" }
+      : { finalStatus, runMissing: false };
   };
 
   const abortListener = () => {
@@ -1041,7 +1058,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
   }
 
-  const state = createExecutionState(runId);
   const controller = new AbortController();
   // Hermes event streams are single-consumer. Recovery uses status polling,
   // so a stale observer cannot consume the replacement observer's result.
@@ -1136,6 +1152,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
+  // Hermes holds neither a worker handle nor a status for this run, for example
+  // after a gateway restart. Nothing is left to stop or observe, so the run
+  // ends failed instead of holding for a proof that can no longer arrive.
+  const providerRunMissingResult = (): AdapterExecutionResult => ({
+    exitCode: 1,
+    signal: null,
+    timedOut: false,
+    errorCode: "hermes_gateway_provider_run_missing",
+    errorMessage: "Hermes no longer has this run (run_not_found on stop and status); its outcome is unknown.",
+    provider: "hermes_gateway",
+    resultJson: {
+      run_id: runId,
+      status: "run_not_found",
+      providerRunMissing: true,
+      last_event: state.lastEventName,
+    },
+    sessionParams: {
+      hermesRunId: runId,
+      strategy,
+    },
+    sessionDisplayId: sessionKey ? redactText(sessionKey) : null,
+  });
+
   try {
     // Arm cancellation, detachment and the absolute deadline before any callback
     // can stall persistence of an already accepted job. Never observe before
@@ -1158,8 +1197,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     controller.abort();
     if (typeof outcome === "object" && "bindingError" in outcome) {
       if (ctx.signal?.aborted) {
-        await requestStop();
-        return cancelledResult(await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS }));
+        const stopped = await stopAndReadFinalStatus(STOP_GRACE_MS);
+        return stopped.runMissing ? providerRunMissingResult() : cancelledResult(stopped.finalStatus);
       }
       return {
         ...errorResult(outcome.bindingError, redactText),
@@ -1170,13 +1209,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     if (outcome === "detached" || ctx.observerDetachSignal?.aborted) {
       if (!ctx.signal?.aborted) return detachedResult();
-      await requestStop();
-      return cancelledResult(await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS }));
+      const stopped = await stopAndReadFinalStatus(STOP_GRACE_MS);
+      return stopped.runMissing ? providerRunMissingResult() : cancelledResult(stopped.finalStatus);
     }
 
     if (outcome === "timeout") {
-      await requestStop();
-      const finalStatus = await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS });
+      const { finalStatus, runMissing } = await stopAndReadFinalStatus(STOP_GRACE_MS);
+      if (runMissing) return providerRunMissingResult();
       // The operator may have cancelled just before the timeout won the race.
       if (ctx.signal?.aborted) return cancelledResult(finalStatus);
       return {
@@ -1201,9 +1240,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
 
     if (outcome === "cancelled_timeout") {
-      await requestStop();
-      const finalStatus = await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId, deadlineMs: 1_000 });
-      return cancelledResult(finalStatus);
+      const stopped = await stopAndReadFinalStatus(1_000);
+      return stopped.runMissing ? providerRunMissingResult() : cancelledResult(stopped.finalStatus);
     }
 
     if (ctx.signal?.aborted) await requestStop();

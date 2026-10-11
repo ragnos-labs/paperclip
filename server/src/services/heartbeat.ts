@@ -19997,6 +19997,8 @@ export function heartbeatService(
   }
 
   function hasConfirmedRemoteTerminal(result: AdapterExecutionResult) {
+    // The provider reports no such run: nothing remains to stop or observe.
+    if (result.resultJson?.providerRunMissing === true) return true;
     const status = readNonEmptyString(result.resultJson?.status);
     if (!status || !["completed", "succeeded", "done", "failed", "error", "cancelled", "canceled"].includes(status)) return false;
     return !["cancelled", "canceled"].includes(status) ||

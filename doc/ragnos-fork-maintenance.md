@@ -45,6 +45,12 @@ sequence and hash without truncation. Shutdown and ownership loss detach; board
 cancellation requires native stop and terminal proof. Duplicate accepted-binding
 callbacks preserve the original identity and deadline.
 
+A held run ends without a database edit when Hermes reports `run_not_found` for
+both its stop and status requests, for example after a gateway restart. The run
+finishes failed with `hermes_gateway_provider_run_missing` and the agent is
+released. While Hermes still knows the run and has not confirmed termination,
+the run stays held.
+
 ## Validation and release
 
 Use the supported Node engine and `pnpm install --frozen-lockfile`. Embedded
