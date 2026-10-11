@@ -157,6 +157,18 @@ status requests also respect their shorter cleanup deadlines. A missing run ID,
 lost create response, or unconfirmed stop remains unconfirmed. The adapter does
 not replay the create request or certify safe recovery from those outcomes.
 
+One outcome ends the run instead of holding it. When Hermes answers HTTP 404
+with `error.code: run_not_found` to both the stop request and the status
+request, it holds neither a worker handle nor a status record for the run. This
+happens after a gateway restart, or once a finished run's status record expires.
+Nothing is left to stop or observe, so the adapter returns a failed result with
+`errorCode: hermes_gateway_provider_run_missing` and
+`resultJson.providerRunMissing: true`, and Paperclip finishes the heartbeat run
+as failed and releases its agent. The result carries no cancellation
+acknowledgement, and the outcome of any work Hermes did before losing the run is
+unknown. A `run_not_found` from only one of the two requests, a 404 without that
+code, and a run Hermes still reports as active all stay unconfirmed and held.
+
 Create requests reject redirects. A direct structured `ECONNREFUSED` with
 `syscall: connect` on that original request proves Hermes work did not start.
 Only this failure supplies bootstrap recovery evidence for Paperclip's existing

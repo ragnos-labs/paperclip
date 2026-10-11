@@ -201,6 +201,48 @@ describe("accepted Hermes observation ownership", () => {
     expect(readLegacyRemoteRunBinding(await saved(fixture.run.id))).toEqual(binding);
   });
 
+  it("ends an accepted job that Hermes no longer has and stops observing it", async () => {
+    const fixture = await acceptedWithLog();
+    adapterExecute.mockResolvedValue({ exitCode: 1, signal: null, timedOut: false, provider: "hermes_gateway",
+      errorCode: "hermes_gateway_provider_run_missing", errorMessage: "Hermes no longer has this run",
+      resultJson: { run_id: binding.providerRunId, status: "run_not_found", providerRunMissing: true } });
+    const service = heartbeatService(db);
+    await service.reapOrphanedRuns({ staleThresholdMs: 0 }); await service.drainActiveRunExecutions();
+    const terminal = await saved(fixture.run.id);
+    expect(terminal).toMatchObject({ status: "failed", errorCode: "hermes_gateway_provider_run_missing",
+      externalRunId: binding.providerRunId });
+    expect(terminal.finishedAt).not.toBeNull();
+    expect(readLegacyRemoteRunBinding(terminal)).toEqual(binding);
+    const [task] = await db.select().from(issues).where(eq(issues.id, fixture.issueId));
+    expect(task.executionRunId).toBeNull(); expect(task.checkoutRunId).toBeNull();
+    await service.reapOrphanedRuns({ staleThresholdMs: 0 }); await service.drainActiveRunExecutions();
+    expect(adapterExecute).toHaveBeenCalledTimes(1);
+  });
+  it("keeps holding an accepted job that timed out while Hermes has not confirmed the stop", async () => {
+    const fixture = await acceptedWithLog();
+    adapterExecute.mockResolvedValue({ exitCode: 1, signal: null, timedOut: true, provider: "hermes_gateway",
+      errorCode: "hermes_gateway_timeout", resultJson: { run_id: binding.providerRunId, status: "stopping" } });
+    const service = heartbeatService(db);
+    await service.reapOrphanedRuns({ staleThresholdMs: 0 }); await service.drainActiveRunExecutions();
+    expect(await saved(fixture.run.id)).toMatchObject({ status: "running", finishedAt: null,
+      externalRunId: binding.providerRunId, errorCode: "hermes_gateway_observation_held" });
+    expect(readLegacyRemoteRunBinding(await saved(fixture.run.id))).toEqual(binding);
+    const [task] = await db.select().from(issues).where(eq(issues.id, fixture.issueId));
+    expect(task.executionRunId).toBe(fixture.run.id);
+  });
+  it("ends an accepted job as cancelled when Hermes confirms the stop", async () => {
+    const fixture = await acceptedWithLog();
+    adapterExecute.mockResolvedValue({ exitCode: 1, signal: "SIGTERM", timedOut: false, provider: "hermes_gateway",
+      errorCode: "hermes_gateway_cancelled", errorMessage: "Hermes gateway run was cancelled.",
+      resultJson: { run_id: binding.providerRunId, status: "cancelled", executionCancellation: {
+        state: "acknowledged", acknowledgedAt: new Date().toISOString(), proof: "hermes_gateway_terminal_cancelled" } } });
+    const service = heartbeatService(db);
+    await service.reapOrphanedRuns({ staleThresholdMs: 0 }); await service.drainActiveRunExecutions();
+    expect(await saved(fixture.run.id)).toMatchObject({ status: "cancelled", errorCode: "hermes_gateway_cancelled" });
+    const [task] = await db.select().from(issues).where(eq(issues.id, fixture.issueId));
+    expect(task.executionRunId).toBeNull();
+  });
+
   it("holds a lost accepted binding without a replay or an observer claim", async () => {
     const run = await seed();
     await db.update(heartbeatRuns).set({ executionStage: "dispatching", errorCode: "hermes_gateway_observation_held" }).where(eq(heartbeatRuns.id, run.id));
