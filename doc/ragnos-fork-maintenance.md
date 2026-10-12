@@ -5,6 +5,10 @@ The maintenance line starts at upstream `v2026.1001.0`, commit
 Hermes cancellation, positive connection-refusal retry and accepted-job
 observation patch set remain on their existing fork branches.
 
+The operator surface also uses the bounded [company SSE invalidation feed](company-live-events.md).
+It reuses native company access and the existing event publisher without
+changing the WebSocket API, task records or database schema.
+
 ## Patch sources
 
 Fork PR [23](https://github.com/ragnos-labs/paperclip/pull/23) supplies cancellation
