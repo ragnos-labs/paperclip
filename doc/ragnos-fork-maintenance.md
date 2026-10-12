@@ -97,7 +97,9 @@ renaming the workspace or expanding the baseline.
 ### Default self-hosted release
 
 Use a clean isolated checkout of the exact merged `codex/paperclip-stable` head,
-with Node 24, pnpm 9.15.4, the package-owned Rust toolchain, Chrome and `jq`. Run as an
+with Node 24, pnpm 9.15.4, the package-owned Rust toolchain, Chrome, `jq`, `lsof`
+and OpenSSH. Port-owner tests require `lsof`; Railway key tests require
+`/usr/bin/ssh-keygen`. Run as an
 unprivileged build user: embedded PostgreSQL cannot start as root. Keep production
 credentials, database URLs and the live Paperclip home out of the validation
 environment. The browser suite creates its own throwaway instance and port.
@@ -157,8 +159,10 @@ revision/version labels to the new release. Preserve the base image's entrypoint
 command, runtime environment and global tools. This avoids rerunning the
 production stage's global CLI `@latest` installs.
 
-Use this option only while the production runtime, OS/tool requirements and
-entrypoint contract are unchanged; otherwise use the standard production target.
+Use this option while the production runtime and entrypoint contract are
+unchanged. Install a demonstrated missing OS dependency from the source
+Dockerfile's apt set in the assembly recipe, preserving the installed global
+CLI versions. Other runtime changes use the standard production target.
 The complete replacement `/app` must come from the new compiled source, not an
 overlay that leaves deleted files behind. All native PostgreSQL, typecheck, test,
 browser and security/advisory checks above still apply to that source. Runtime
