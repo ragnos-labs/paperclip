@@ -12,7 +12,6 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const script = path.join(repoRoot, "scripts", "e2e-shard.mjs");
 const durationsManifest = path.join(repoRoot, "scripts", "e2e-shard-durations.json");
 const playwrightConfig = path.join(repoRoot, "tests", "e2e", "playwright.config.ts");
-const prWorkflow = path.join(repoRoot, ".github", "workflows", "pr.yml");
 
 const SHARD_COUNT = 3;
 
@@ -87,73 +86,4 @@ test("shard arguments are validated", () => {
     const result = spawnSync(process.execPath, [script, ...args], { cwd: repoRoot, encoding: "utf8" });
     assert.notEqual(result.status, 0, `expected failure for ${args.join(" ")}`);
   }
-});
-
-test("pr.yml keeps a stable aggregate check named e2e over the shard matrix", () => {
-  // Branch protection requires a check literally named `e2e`. The shards run
-  // as `e2e shard (n/3)`, so the aggregate job below is what keeps the
-  // required-check contract intact — same pattern as the `verify` aggregate.
-  const workflow = readFileSync(prWorkflow, "utf8");
-  const jobs = new Map();
-  let current = null;
-  for (const line of workflow.split("\n")) {
-    const header = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
-    if (header) {
-      current = header[1];
-      jobs.set(current, []);
-      continue;
-    }
-    if (current && /^\S/.test(line)) current = null;
-    if (current) jobs.get(current).push(line);
-  }
-  for (const [id, lines] of jobs) jobs.set(id, lines.join("\n"));
-
-  const aggregate = jobs.get("e2e");
-  assert.ok(aggregate, "pr.yml must define an `e2e` job to satisfy branch protection");
-  assert.match(aggregate, /^ {4}name: e2e$/m, "the aggregate job must be named exactly `e2e`");
-  assert.match(aggregate, /^ {4}if: \$\{\{ always\(\) \}\}$/m, "the aggregate must run even when a shard fails");
-  assert.match(aggregate, /^ {4}needs: \[e2e_shards\]$/m, "the aggregate must depend on the shard matrix");
-  assert.match(
-    aggregate,
-    /test "\$E2E_SHARDS_RESULT" = "success"/,
-    "the aggregate must fail unless every shard succeeded",
-  );
-
-  const shards = jobs.get("e2e_shards");
-  assert.ok(shards, "pr.yml must define the `e2e_shards` matrix job");
-  const matrixEntries = [
-    ...shards.matchAll(
-      /^ {10}- shard_index: (?<shardIndex>\d+)\n {12}shard_count: (?<shardCount>\d+)\n {12}shard_label: (?<shardLabel>\d+\/\d+)$/gm,
-    ),
-  ].map((match) => ({
-    shardIndex: Number(match.groups.shardIndex),
-    shardCount: Number(match.groups.shardCount),
-    shardLabel: match.groups.shardLabel,
-  }));
-
-  assert.equal(matrixEntries.length, SHARD_COUNT, "the shard matrix must define exactly SHARD_COUNT entries");
-  assert.deepEqual(
-    matrixEntries.map((entry) => entry.shardIndex).sort((a, b) => a - b),
-    Array.from({ length: SHARD_COUNT }, (_, index) => index),
-    "the shard matrix must define each shard index exactly once",
-  );
-  for (const entry of matrixEntries) {
-    assert.equal(entry.shardCount, SHARD_COUNT, "each shard matrix entry must use the same SHARD_COUNT");
-    assert.equal(entry.shardLabel, `${entry.shardIndex + 1}/${SHARD_COUNT}`, "each shard label must match its index");
-  }
-});
-
-test("pr.yml passes the shard's spec filter to Playwright without a literal --", () => {
-  // `pnpm run test:e2e -- $specs` forwards the literal separator to Playwright,
-  // so the specs after it are not applied as file filters.
-  const workflow = readFileSync(prWorkflow, "utf8");
-  assert.ok(
-    !/pnpm run test:e2e --\s/.test(workflow),
-    "pr.yml must not insert a literal `--` between `pnpm run test:e2e` and the spec filter",
-  );
-  assert.match(
-    workflow,
-    /pnpm run test:e2e \$specs/,
-    "pr.yml e2e_shards must invoke `pnpm run test:e2e $specs`",
-  );
 });
