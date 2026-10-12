@@ -97,7 +97,7 @@ renaming the workspace or expanding the baseline.
 ### Default self-hosted release
 
 Use a clean isolated checkout of the exact merged `codex/paperclip-stable` head,
-with Node 24, pnpm 9.15.4, the package-owned Rust toolchain and Chrome. Run as an
+with Node 24, pnpm 9.15.4, the package-owned Rust toolchain, Chrome and `jq`. Run as an
 unprivileged build user: embedded PostgreSQL cannot start as root. Keep production
 credentials, database URLs and the live Paperclip home out of the validation
 environment. The browser suite creates its own throwaway instance and port.
