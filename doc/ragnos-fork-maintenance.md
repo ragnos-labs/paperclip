@@ -63,9 +63,11 @@ When local dependency lifecycle scripts are disabled, run the installed native
 package's reviewed `scripts/hydrate-symlinks.js` before integration tests; do not
 change the global package-script policy.
 
-`RAGnos Fork CI` runs typecheck, tests, build, browser validation and the fork
-security script checks on every pull request and on every push to
-`codex/paperclip-stable`. Secret, supply-chain, build-script and sensitive-path
+The default operator release path runs validation and builds on the existing
+AMD64 VPS. GitHub Actions stays disabled; a local release does not require a
+GitHub check status. The optional `RAGnos Fork CI` workflow runs the same
+typecheck, tests, build, browser validation and fork security script checks when
+explicitly used. Secret, supply-chain, build-script and sensitive-path
 findings block. Workflow changes and process-spawning tests are printed for the
 change author and do not block. The production dependency audit checks the
 current lockfile against the unchanged advisory baseline from the original
@@ -92,7 +94,74 @@ no registry `cli` package is installed. Keep this report visible, with the
 existing audit checks and advisory baseline unchanged. Do not suppress it by
 renaming the workspace or expanding the baseline.
 
-To release, dispatch `RAGnos Paperclip Fork Release` with the current
+### Default self-hosted release
+
+Use a clean isolated checkout of the exact merged `codex/paperclip-stable` head,
+with Node 24, pnpm 9.15.4, the package-owned Rust toolchain and Chrome. Run as an
+unprivileged build user: embedded PostgreSQL cannot start as root. Keep production
+credentials, database URLs and the live Paperclip home out of the validation
+environment. The browser suite creates its own throwaway instance and port.
+Do not interpret a native PostgreSQL startup/loader failure as a passing test.
+
+From that checkout, run the existing checks without altering their selection:
+
+```sh
+test -z "$(git status --porcelain)"
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/codex/paperclip-stable)"
+test "$(node -p 'process.versions.node.split(".")[0]')" = 24
+test "$(pnpm --version)" = 9.15.4
+pnpm install --frozen-lockfile
+node --test .github/scripts/tests/ragnos-fork-security-gate.test.mjs .github/scripts/tests/ragnos-fork-release-source.test.mjs .github/scripts/tests/registry-reference-guard.test.mjs
+GITHUB_EVENT_NAME=push GITHUB_REPOSITORY=ragnos-labs/paperclip GITHUB_SHA="$(git rev-parse HEAD)" node .github/scripts/ragnos-fork-security-gate.mjs
+pnpm -r typecheck
+pnpm test:run
+pnpm build
+pnpm --filter @paperclipai/paperclip-runner build:binary
+PAPERCLIP_E2E_SKIP_LLM=true PAPERCLIP_PLAYWRIGHT_CHANNEL=chrome pnpm test:e2e
+git diff --check
+```
+
+The security command's existing push mode scans the exact source against the
+original upstream baseline and runs the unchanged production advisory check.
+It needs no GitHub API token. Audit unavailability, new advisories, increased
+severity or blocking source findings fail the release. Retain bounded check logs
+in existing private operator custody; repair failures before building the release.
+
+Build only `linux/amd64` from the same merged source with the existing Dockerfile's
+`production` target. Set `PAPERCLIP_BUILD_COMMIT` to that full source SHA and
+`PAPERCLIP_BUILD_VERSION` to the next operator release, for example
+`ragnos/v0.1.4`; do not change upstream package version `0.3.1`. A local tag is
+only a convenient name. Select the resulting image by its immutable digest (the
+local Docker image ID for a loaded image, or the manifest digest for an OCI or
+registry delivery), and retain the previous image for rollback.
+
+For the next local release, the existing build command is:
+
+```sh
+docker buildx build --platform linux/amd64 --target production --load \
+  --build-arg PAPERCLIP_BUILD_COMMIT="$(git rev-parse HEAD)" \
+  --build-arg PAPERCLIP_BUILD_VERSION=ragnos/v0.1.4 \
+  --label org.opencontainers.image.revision="$(git rev-parse HEAD)" \
+  --tag paperclip:ragnos-0.1.4 .
+docker image inspect paperclip:ragnos-0.1.4 --format '{{.Id}}'
+```
+
+The existing Dockerfile caches dependency and native runner layers separately
+from ordinary server/UI source. Reuse those layers and the existing Cargo target
+cache when their inputs are unchanged. No supported prebuilt-binary bypass exists
+in the native build/test path: server preparation and native integration tests
+call Cargo's freshness check. Copying only an old binary into a new checkout must
+not substitute for that check or drop integration tests. A cold cache may compile
+Rust; it is not a reason to bypass validation.
+
+CompanyOS owns the existing backup, digest selection and affected-service swap.
+Verify the backup, replace only Paperclip, check health and the authenticated user
+path, and roll back to the retained old digest if either fails. This local path
+adds no standing runner, daemon, GitHub settings, npm publication or extra gate.
+
+### Optional GitHub release
+
+If explicitly selected instead, dispatch `RAGnos Paperclip Fork Release` with the current
 `codex/paperclip-stable` head and a new version. The workflow checks that the
 commit is the branch head with green `RAGnos Fork CI`, builds one `linux/amd64`
 image with the layer cache, pushes it to `ghcr.io/ragnos-labs/paperclip`, tags
