@@ -261,6 +261,7 @@ function runVitest(args, label) {
   const env = {
     ...process.env,
     NODE_ENV: "test",
+    TZ: "UTC",
     PAPERCLIP_HOME: path.join(testRoot, "h"),
     PAPERCLIP_INSTANCE_ID: `vt-${process.pid}-${invocationIndex}`,
     TMPDIR: path.join(testRoot, "t"),
