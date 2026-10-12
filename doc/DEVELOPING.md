@@ -17,24 +17,19 @@ Current implementation status:
 
 ## Dependency Lockfile Policy
 
-GitHub Actions owns `pnpm-lock.yaml`.
+Dependency changes own their `pnpm-lock.yaml` update. Commit the lockfile with
+intentional manifest changes, and use `pnpm install --frozen-lockfile` for
+validation and builds. No hosted job regenerates or commits it.
 
-- Do not commit `pnpm-lock.yaml` in pull requests.
-- Pull request CI validates dependency resolution when manifests change.
-- Pushes to `master` regenerate `pnpm-lock.yaml` with `pnpm install --lockfile-only --no-frozen-lockfile`, commit it back if needed, and then run verification with `--frozen-lockfile`.
+## Internal delivery
 
-## Release Publication Hold
+Custom GitHub Actions are retired. Use `pnpm check` once for final local
+validation, with focused checks while editing. Use `pnpm check:dependencies`
+for production dependency changes. Browser suites remain opt-in.
 
-Source merges do not publish container images or npm packages. The Docker and
-Release workflows are manual verification-only workflows. They build or preview
-the requested source without registry login, package-write permission, tag
-creation, release creation, or publication.
-
-The separate RAGnos alpha path publishes only the RAGnos backend OCI image and
-GitHub prerelease. It uses a protected environment, exact-source fence,
-immutable receipt, and recovery controls. It does not publish npm packages and
-does not change the upstream Paperclip release channels. See
-[`RAGNOS-ALPHA-RELEASE.md`](RAGNOS-ALPHA-RELEASE.md).
+Source merges do not publish or deploy. Internal container builds and deployment
+use the local [image delivery procedure](RAGNOS-ALPHA-RELEASE.md). Existing
+release assets, data backups and rollback paths remain intact.
 
 The alpha image also contains a separate, non-production company work
 projection canary. The normal server does not import or enable it. See
@@ -101,15 +96,9 @@ Known limitation: Storybook visual baselines are Linux/Ubuntu-only. The manifest
 pins the capture environment to `ubuntu-24.04` and the Playwright suite uses
 pixel-exact comparison, so local runs on macOS, Windows, or other non-matching
 platforms can report false-positive diffs from font rasterization and subpixel
-rendering. Use the `Storybook Visual` GitHub Actions workflow on `ubuntu-latest`
-as the source of truth, or run locally in a matching Linux environment before
-accepting or updating baselines.
-
-PR visual checks are opt-in while the suite stabilizes. Add the
-`storybook-visual` label to a PR, or run the `Storybook Visual` GitHub Actions
-workflow manually, to produce downloadable Playwright report/test-result
-artifacts. Normal PR visual runs use read-only repository permissions and do not
-upload or mutate baseline objects.
+rendering. Run locally in a matching Linux environment before accepting or
+updating baselines. Visual checks are opt-in for UI changes; use the existing
+local commands above.
 
 ## UI Fonts And Screenshots
 
