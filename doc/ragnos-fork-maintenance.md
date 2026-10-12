@@ -127,8 +127,8 @@ It needs no GitHub API token. Audit unavailability, new advisories, increased
 severity or blocking source findings fail the release. Retain bounded check logs
 in existing private operator custody; repair failures before building the release.
 
-Build only `linux/amd64` from the same merged source with the existing Dockerfile's
-`production` target. Set `PAPERCLIP_BUILD_COMMIT` to that full source SHA and
+Build only `linux/amd64` from the same merged source. The existing Dockerfile's
+`production` target remains the standard option. Set `PAPERCLIP_BUILD_COMMIT` to that full source SHA and
 `PAPERCLIP_BUILD_VERSION` to the next operator release, for example
 `ragnos/v0.1.4`; do not change upstream package version `0.3.1`. A local tag is
 only a convenient name. Select the resulting image by its immutable digest (the
@@ -145,6 +145,24 @@ docker buildx build --platform linux/amd64 --target production --load \
   --tag paperclip:ragnos-0.1.4 .
 docker image inspect paperclip:ragnos-0.1.4 --format '{{.Id}}'
 ```
+
+To preserve installed global CLI versions, the operator may instead build the
+existing Dockerfile's `build` target with the same exact source commit argument,
+then use that compiled image and the installed production image as digest-pinned
+inputs to a small local assembly recipe. Start the final stage from the installed
+production image, remove its old `/app`, and `COPY --chown=node:node` the complete
+`/app` from the compiled build stage. The build target already removes Rust target
+directories. Set `PAPERCLIP_BUILD_VERSION`, `PAPERCLIP_BUILD_COMMIT` and the image's
+revision/version labels to the new release. Preserve the base image's entrypoint,
+command, runtime environment and global tools. This avoids rerunning the
+production stage's global CLI `@latest` installs.
+
+Use this option only while the production runtime, OS/tool requirements and
+entrypoint contract are unchanged; otherwise use the standard production target.
+The complete replacement `/app` must come from the new compiled source, not an
+overlay that leaves deleted files behind. All native PostgreSQL, typecheck, test,
+browser and security/advisory checks above still apply to that source. Runtime
+reuse does not authorize reuse of an old application or unvalidated native binary.
 
 The existing Dockerfile caches dependency and native runner layers separately
 from ordinary server/UI source. Reuse those layers and the existing Cargo target
