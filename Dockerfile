@@ -144,6 +144,20 @@ RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 RUN rm -rf packages/paperclip-runner/runner/target
 
+FROM build AS validation
+# Tests need the full workspace and the same orphan reaper as production.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends jq lsof openssh-client \
+  && pnpm install --frozen-lockfile \
+  && pnpm exec playwright install --with-deps chrome \
+  && rm -rf /var/lib/apt/lists/* \
+  && mkdir -p /paperclip \
+  && chown -R node:node /app /paperclip /usr/local/cargo /usr/local/rustup
+ENV HOME=/paperclip
+USER node
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["bash"]
+
 FROM base AS production
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -159,7 +173,7 @@ WORKDIR /app
 RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
   && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest @moonshot-ai/kimi-code@latest \
   && apt-get update \
-  && apt-get install -y --no-install-recommends openssh-client jq \
+  && apt-get install -y --no-install-recommends openssh-client jq lsof \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /paperclip \
   && chown node:node /paperclip

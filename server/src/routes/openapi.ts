@@ -1322,6 +1322,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "PUT /api/projects/{id}/repositories",
   "DELETE /api/issues/{id}/documents/{key}",
   "GET /api/companies/{companyId}/operator-overview",
+  "GET /api/companies/{companyId}/events/sse",
   "GET /api/companies/{companyId}/decisions",
   "GET /api/cloud/stacks",
   "GET /api/companies",
@@ -5362,6 +5363,21 @@ registry.registerPath({
     }),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/events/sse",
+  tags: ["dashboard"],
+  summary: "Subscribe to company observation invalidations",
+  description: "Requires board access to this company. Sends bounded event identifiers and timestamps without source bodies. Recover missed events through fresh reads. Streams lease for 60 seconds and allow four connections per operator and company.",
+  request: { params: z.object({ companyId: z.string().uuid() }) },
+  responses: {
+    200: { description: "Server-sent event stream (text/event-stream)" },
+    401: r.unauthorized,
+    403: r.forbidden,
+    429: { description: "Too many company event streams" },
+  },
 });
 
 // ─── Dashboard ───────────────────────────────────────────────────────────────
