@@ -105,6 +105,16 @@ credentials, database URLs and the live Paperclip home out of the validation
 environment. The browser suite creates its own throwaway instance and port.
 Do not interpret a native PostgreSQL startup/loader failure as a passing test.
 
+The Dockerfile's `validation` target supplies that environment, including the
+full frozen workspace install and Chrome. It runs as `node` under Tini so
+orphaned process fixtures are reaped just as they are in production. Build it
+with `docker build --target validation --build-arg PAPERCLIP_BUILD_COMMIT=...`.
+Run the checks below with the tracked source and Git history available at
+`/app`; the release build context excludes Git history. Do not override its
+entrypoint with a sleeping shell or mount production configuration. The existing
+test runner owns fixture isolation and serialized suites; reuse it rather than
+changing timeouts or omitting tests to compensate for the environment.
+
 From that checkout, run the existing checks without altering their selection:
 
 ```sh
