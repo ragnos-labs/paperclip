@@ -616,4 +616,48 @@ describe("native status authority", () => {
     ]);
   });
 
+  it("routes human review and approval requests to the internal build reviewer", () => {
+    const request = (kind: "review" | "approval" | "credential", summary: string) => ({
+      kind, summary, ownerClass: "human" as const, targetAgentId: null,
+      sourceIndex: 0, sourceKind: kind, legacy: false,
+    });
+    const decision = arbitrate({
+      assessment: assessment({
+        reportedDisposition: "needs_review",
+        attentionRequests: [
+          request("review", "Accept results"),
+          request("approval", "Approve publication"),
+          request("credential", "Add the API key"),
+        ],
+      }),
+      reviewOwnerUserId: "hunter",
+      internalBuildReviewerAgentId: "internal-reviewer",
+    });
+    expect(decision.toStatus).toBe("in_review");
+    expect(decision.effects).toEqual([
+      expect.objectContaining({ kind: "bind_reviewer", ownerUserId: null, ownerAgentId: "internal-reviewer", internalBuildReview: true }),
+      expect.objectContaining({ kind: "bind_reviewer", ownerUserId: null, ownerAgentId: "internal-reviewer", internalBuildReview: true }),
+      expect.objectContaining({ kind: "bind_reviewer", ownerUserId: "hunter", ownerAgentId: null }),
+    ]);
+    expect(decision.effects[2]).not.toHaveProperty("internalBuildReview");
+  });
+
+  it("keeps the human review owner when the worker is the internal build reviewer", () => {
+    const decision = arbitrate({
+      agentId: "internal-reviewer",
+      assessment: assessment({
+        reportedDisposition: "needs_review",
+        attentionRequests: [{
+          kind: "review", summary: "Accept results", ownerClass: "human", targetAgentId: null,
+          sourceIndex: 0, sourceKind: "review", legacy: false,
+        }],
+      }),
+      reviewOwnerUserId: "hunter",
+      internalBuildReviewerAgentId: "internal-reviewer",
+    });
+    expect(decision.effects).toEqual([
+      expect.objectContaining({ kind: "bind_reviewer", ownerUserId: "hunter", ownerAgentId: null }),
+    ]);
+  });
+
 });

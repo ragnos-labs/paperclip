@@ -1,3 +1,4 @@
+import { resolveInternalBuildReviewerAgentId } from "./internal-build-review.js";
 import { dismissAutomaticCompletionReviews, decisionHasRetiredAutomaticReview } from "./automatic-completion-reviews.js";
 import { logger } from "../../middleware/logger.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -797,6 +798,7 @@ export async function reconcileNativeFinalizations(
               completionClaimPolicyAccepted: contractRow.risk === "low" && contractRow.completionAuthority === "agent_claim_policy",
               hasUnresolvedIssueBlockers: (readiness?.unresolvedBlockerCount ?? 0) > 0,
               reviewOwnerUserId: currentIssue.responsibleUserId ?? currentIssue.createdByUserId,
+              internalBuildReviewerAgentId: await resolveInternalBuildReviewerAgentId(db, row.companyId),
               priorIssueStatus: row.issueStatus as NativeAuthoritativeIssueStatus, agentId: row.agentId,
             })
           : resolveNativeReconciliationStatus({

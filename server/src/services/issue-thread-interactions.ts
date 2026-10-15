@@ -94,6 +94,10 @@ import {
   type ActivityPublication,
 } from "./activity-log.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
+import {
+  createInternalBuildSignoffApproval,
+  isInternalBuildReviewInteraction,
+} from "./native-runtime/internal-build-review.js";
 import { getNativeReviewAssignment } from "./native-runtime/native-review-participant.js";
 import {
   assertIssueReviewVerdictActorAllowed,
@@ -2250,6 +2254,21 @@ export function issueThreadInteractionService(
             assigneeUserId: completedIssue.assigneeUserId ?? null,
             status: completedIssue.status,
           };
+          // Internal build verification completes the sprint's proof; the
+          // human review owner still gets the real sign-off, which cannot be a
+          // card on the now-closed issue.
+          if (
+            args.actor.agentId &&
+            args.actor.agentId === lockedCurrent.addresseeAgentId &&
+            isInternalBuildReviewInteraction(lockedCurrent)
+          ) {
+            await createInternalBuildSignoffApproval(tx as unknown as Db, {
+              companyId: issueContext.companyId,
+              issueId: issueContext.id,
+              reviewInteractionId: lockedCurrent.id,
+              reviewerAgentId: args.actor.agentId,
+            });
+          }
         }
       } else if (
         shouldReturnAcceptedConfirmationToCreatorAgent({

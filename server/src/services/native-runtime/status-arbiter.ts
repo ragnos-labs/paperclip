@@ -25,6 +25,8 @@ export type NativeStatusEffect =
       detailsMarkdown?: string | null;
       ownerUserId?: string | null;
       ownerAgentId?: string | null;
+      /** Internal build verification by the configured reviewer agent. */
+      internalBuildReview?: boolean;
     }
   | { kind: "notify_owner"; agentId: string; reason: string }
   | {
@@ -111,6 +113,11 @@ export function arbitrateNativeStatus(input: {
   boardResponseWaitAuthorized?: boolean;
   boardResponseWaitOrigin?: boolean;
   reviewOwnerUserId?: string | null;
+  /**
+   * Invokable Internal Build Reviewer agent for this company, when configured.
+   * Human review and approval requests go to it instead of the review owner.
+   */
+  internalBuildReviewerAgentId?: string | null;
   /** Review decisions own task state; a reviewer's finish report cannot override them. */
   nativeReviewOutcome?: "resolved" | "pending" | "stale";
   agentId: string;
@@ -311,14 +318,32 @@ export function arbitrateNativeStatus(input: {
       toStatus: "in_review",
       reasonCode: "actionable_attention_pending",
       unblockDescriptor: null,
-      effects: input.assessment.attentionRequests.map((request, index) => ({
-        kind: "bind_reviewer",
-        requestKey: `attention-${index}`,
-        prompt: request.summary.slice(0, 1_000),
-        detailsMarkdown: input.assessment.summary,
-        ownerUserId: request.ownerClass === "agent" ? null : (input.reviewOwnerUserId ?? null),
-        ownerAgentId: request.ownerClass === "agent" ? request.targetAgentId : null,
-      })),
+      effects: input.assessment.attentionRequests.map((request, index) => {
+        const internalBuildReview =
+          !!input.internalBuildReviewerAgentId &&
+          input.internalBuildReviewerAgentId !== input.agentId &&
+          request.ownerClass !== "agent" &&
+          (request.kind === "review" || request.kind === "approval");
+        if (internalBuildReview) {
+          return {
+            kind: "bind_reviewer" as const,
+            requestKey: `attention-${index}`,
+            prompt: request.summary.slice(0, 1_000),
+            detailsMarkdown: input.assessment.summary,
+            ownerUserId: null,
+            ownerAgentId: input.internalBuildReviewerAgentId,
+            internalBuildReview: true,
+          };
+        }
+        return {
+          kind: "bind_reviewer" as const,
+          requestKey: `attention-${index}`,
+          prompt: request.summary.slice(0, 1_000),
+          detailsMarkdown: input.assessment.summary,
+          ownerUserId: request.ownerClass === "agent" ? null : (input.reviewOwnerUserId ?? null),
+          ownerAgentId: request.ownerClass === "agent" ? request.targetAgentId : null,
+        };
+      }),
     };
   }
   if (
