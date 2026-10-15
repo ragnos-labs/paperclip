@@ -144,6 +144,24 @@ Unknown field names are logged and ignored (mixed-version fleet safe).
 Malformed JSON or an invalid value for a known field refuses startup — policy
 configuration fails closed.
 
+### Internal build review
+
+`PAPERCLIP_INTERNAL_BUILD_REVIEWER_AGENT_ID` (default unset) names an agent
+that reviews native task results for internal builds. Set it only on an
+internal instance, to an invokable agent in the company (for example one named
+"Internal Build Reviewer"); an agent from another company, or one that cannot
+run, is ignored.
+
+When set, a native result's human `review` or `approval` request goes to that
+agent instead of the task's responsible user. Its acceptance completes the
+task as internal build verification, not human acceptance. The responsible
+user (or creator) then gets one pending `request_board_approval` linked to the
+task, titled "Sign off internal build: ...". Approving records the sign-off.
+Rejecting it reopens the task to `todo` and wakes the assignee with the note.
+Other human requests (`human_input`, `credential`, `external_action`) still go
+to the human, and a task the reviewer worked on itself keeps its human owner.
+Unset the variable to return to human review.
+
 ## Secrets
 
 | Variable | Default | Description |

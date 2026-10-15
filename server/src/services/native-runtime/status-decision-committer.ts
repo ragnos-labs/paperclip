@@ -1,3 +1,7 @@
+import {
+  INTERNAL_BUILD_REVIEW_LABEL,
+  INTERNAL_BUILD_REVIEW_PROMPT_PREFIX,
+} from "./internal-build-review.js";
 import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { CreateIssueThreadInteraction } from "@paperclipai/shared";
@@ -576,6 +580,9 @@ async function materializeDecisionEffect(input: {
   }
   if (effect.kind === "bind_reviewer") {
     failAt("interaction_materialization", input.failpoint);
+    const reviewPrompt = effect.internalBuildReview
+      ? `${INTERNAL_BUILD_REVIEW_PROMPT_PREFIX}${effect.prompt}`.slice(0, 1_000)
+      : effect.prompt;
     const reviewInput: Extract<
       CreateIssueThreadInteraction,
       { kind: "request_confirmation" }
@@ -587,12 +594,11 @@ async function materializeDecisionEffect(input: {
       addresseeAgentId: effect.ownerAgentId ?? null,
       addresseeUserId: effect.ownerUserId,
       title: "Review requested",
-      summary:
-        effect.prompt,
+      summary: reviewPrompt,
       continuationPolicy: "wake_assignee",
       payload: {
         version: 1,
-        prompt: effect.prompt,
+        prompt: reviewPrompt,
         detailsMarkdown: effect.detailsMarkdown ?? null,
         acceptLabel: "Approve completion",
         rejectLabel: "Continue work",
@@ -603,7 +609,9 @@ async function materializeDecisionEffect(input: {
           type: "custom",
           key: "native_completion_review",
           revisionId: input.decisionId,
-          label: "Completion decision",
+          label: effect.internalBuildReview
+            ? INTERNAL_BUILD_REVIEW_LABEL
+            : "Completion decision",
         },
       },
     };

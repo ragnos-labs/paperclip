@@ -22,6 +22,7 @@ import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo, 
 import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { issueService } from "../services/issues.js";
+import { isInternalBuildSignoffPayload } from "../services/native-runtime/internal-build-review.js";
 import { REVIEW_PATH_RECOVERY_INSTRUCTION } from "../services/recovery/review-path-recovery.js";
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
@@ -54,6 +55,47 @@ export function approvalRoutes(
   const issuesSvc = issueService(db);
   const secretsSvc = secretService(db);
   const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
+
+  /** A rejected internal build sign-off reopens each closed task for revision. */
+  async function reopenRejectedInternalBuildSignoff(input: {
+    approvalId: string;
+    decisionNote: string | null;
+    linkedIssues: Awaited<ReturnType<typeof issueApprovalsSvc.listIssuesForApproval>>;
+    rejectedByUserId: string;
+  }) {
+    for (const issue of input.linkedIssues) {
+      if (issue.status !== "done") continue;
+      await issuesSvc.update(issue.id, {
+        status: "todo",
+        actorUserId: input.rejectedByUserId,
+      });
+      if (!issue.assigneeAgentId) continue;
+      const context = {
+        approvalId: input.approvalId,
+        approvalStatus: "rejected",
+        decisionNote: input.decisionNote,
+        issueId: issue.id,
+        taskId: issue.id,
+        wakeReason: "internal_build_signoff_rejected",
+      };
+      try {
+        await heartbeat.wakeup(issue.assigneeAgentId, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "issue_status_changed",
+          payload: context,
+          requestedByActorType: "user",
+          requestedByActorId: input.rejectedByUserId,
+          contextSnapshot: { source: "approval.rejected", ...context },
+        });
+      } catch (err) {
+        logger.warn(
+          { err, approvalId: input.approvalId, issueId: issue.id },
+          "failed to wake assignee after internal build sign-off rejection",
+        );
+      }
+    }
+  }
 
   async function lostReviewPathIssueIds(
     companyId: string,
@@ -421,6 +463,14 @@ export function approvalRoutes(
         entityId: approval.id,
         details: { type: approval.type },
       });
+      if (isInternalBuildSignoffPayload(approval.payload)) {
+        await reopenRejectedInternalBuildSignoff({
+          approvalId: approval.id,
+          decisionNote: approval.decisionNote ?? null,
+          linkedIssues,
+          rejectedByUserId: req.actor.userId ?? "board",
+        });
+      }
       await queueAdditionalApprovalReviewPathWakes({
         approvalId: approval.id,
         approvalStatus: approval.status,

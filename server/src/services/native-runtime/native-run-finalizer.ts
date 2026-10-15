@@ -1,3 +1,4 @@
+import { resolveInternalBuildReviewerAgentId } from "./internal-build-review.js";
 import { dismissAutomaticCompletionReviews } from "./automatic-completion-reviews.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-review-participant.js";
 import { conversationNativeDecision, isConversation } from "../agent-conversations.js";
@@ -1205,6 +1206,10 @@ export async function finalizeNativeRun(input: {
         authoritativeIssue.responsibleUserId ??
         authoritativeIssue.createdByUserId ??
         null,
+      internalBuildReviewerAgentId: await resolveInternalBuildReviewerAgentId(
+        input.db,
+        run.companyId,
+      ),
       agentId: run.agentId,
       priorIssueStatus: authoritativeStatus(authoritativeIssue.status),
     });
