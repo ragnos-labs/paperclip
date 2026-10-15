@@ -19,16 +19,20 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "../../__tests__/helpers/embedded-postgres.js";
+import { approvalService } from "../approvals.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import {
   INTERNAL_BUILD_REVIEWER_ENV,
   INTERNAL_BUILD_REVIEW_LABEL,
   INTERNAL_BUILD_SIGNOFF_KIND,
   createInternalBuildSignoffApproval,
+  reopenTasksForRejectedSignoff,
   isInternalBuildReviewInteraction,
   readInternalBuildReviewerAgentId,
   resolveInternalBuildReviewerAgentId,
 } from "./internal-build-review.js";
+
+const completionReviewTarget = "native_completion_review";
 
 describe("internal build reviewer configuration", () => {
   it("reads only a UUID agent id", () => {
@@ -122,7 +126,7 @@ describeEmbeddedPostgres("internal build review sign-off", () => {
       payload: {
         version: 1,
         prompt: "Internal build verification, not human acceptance. Accept results",
-        target: { type: "custom", key: "native_completion_review", revisionId: decisionId, label: INTERNAL_BUILD_REVIEW_LABEL },
+        target: { type: "custom", key: completionReviewTarget, revisionId: decisionId, label: INTERNAL_BUILD_REVIEW_LABEL },
       },
     });
     return { companyId, workerId, reviewerId, issueId, reviewRunId, interactionId };
@@ -194,5 +198,48 @@ describeEmbeddedPostgres("internal build review sign-off", () => {
     const other = await seedInternalReview();
     process.env[INTERNAL_BUILD_REVIEWER_ENV] = other.reviewerId;
     expect(await resolveInternalBuildReviewerAgentId(db, seed.companyId)).toBeNull();
+  });
+  it("reopens the task when the human rejects the sign-off", async () => {
+    const seed = await seedInternalReview();
+    const approvalId = await createInternalBuildSignoffApproval(db, {
+      companyId: seed.companyId, issueId: seed.issueId,
+      reviewInteractionId: seed.interactionId, reviewerAgentId: seed.reviewerId,
+    });
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, seed.issueId));
+    const wakes: Array<[string, Record<string, unknown>]> = [];
+    const reopened = await reopenTasksForRejectedSignoff(db, {
+      approvalId: approvalId!, companyId: seed.companyId,
+      decisionNote: "Missing the Q3 numbers", rejectedByUserId: "hunter",
+    }, async (agentId, context) => { wakes.push([agentId, context]); });
+    expect(reopened).toEqual([seed.issueId]);
+    const [issue] = await db.select().from(issues).where(eq(issues.id, seed.issueId));
+    expect(issue.status).toBe("todo");
+    expect(wakes).toEqual([[seed.workerId, expect.objectContaining({
+      issueId: seed.issueId, decisionNote: "Missing the Q3 numbers", wakeReason: "internal_build_signoff_rejected",
+    })]]);
+  });
+
+  it("rejecting a sign-off through the approval service reopens the task; other approvals do not", async () => {
+    const seed = await seedInternalReview();
+    const approvalId = await createInternalBuildSignoffApproval(db, {
+      companyId: seed.companyId, issueId: seed.issueId,
+      reviewInteractionId: seed.interactionId, reviewerAgentId: seed.reviewerId,
+    });
+    await db.update(issues).set({ status: "done", assigneeAgentId: null }).where(eq(issues.id, seed.issueId));
+    const { applied } = await approvalService(db).reject(approvalId!, "hunter", "Redo it");
+    expect(applied).toBe(true);
+    const [reopened] = await db.select().from(issues).where(eq(issues.id, seed.issueId));
+    expect(reopened.status).toBe("todo");
+
+    const other = await seedInternalReview();
+    const [ordinary] = await db.insert(approvals).values({
+      companyId: other.companyId, type: "request_board_approval", status: "pending",
+      payload: { title: "Approve hosting spend" },
+    }).returning();
+    await db.insert(issueApprovals).values({ companyId: other.companyId, issueId: other.issueId, approvalId: ordinary.id });
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, other.issueId));
+    await approvalService(db).reject(ordinary.id, "hunter", "not now");
+    const [untouched] = await db.select().from(issues).where(eq(issues.id, other.issueId));
+    expect(untouched.status).toBe("done");
   });
 });
