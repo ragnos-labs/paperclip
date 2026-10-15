@@ -242,4 +242,80 @@ describeEmbeddedPostgres("internal build review sign-off", () => {
     const [untouched] = await db.select().from(issues).where(eq(issues.id, other.issueId));
     expect(untouched.status).toBe("done");
   });
+  async function seedLegacyReview() {
+    const companyId = randomUUID();
+    const workerId = randomUUID();
+    const reviewerId = randomUUID();
+    const issueId = randomUUID();
+    const workerRunId = randomUUID();
+    const reviewRunId = randomUUID();
+    const interactionId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Legacy internal review",
+      issuePrefix: `L${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+    });
+    await db.insert(agents).values([
+      { id: workerId, companyId, name: "Communications Writer", adapterType: "hermes_gateway", status: "idle" },
+      { id: reviewerId, companyId, name: "Quality Reviewer", adapterType: "hermes_gateway", status: "running" },
+    ]);
+    await db.insert(heartbeatRuns).values([
+      { id: workerRunId, companyId, agentId: workerId, status: "succeeded" },
+      { id: reviewRunId, companyId, agentId: reviewerId, status: "running", contextSnapshot: { issueId } },
+    ]);
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "Write the note", status: "in_review",
+      assigneeAgentId: workerId, responsibleUserId: "hunter",
+    });
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId, companyId, issueId, kind: "request_confirmation", status: "pending",
+      continuationPolicy: "none", requestedResolverPolicy: "anyone", effectiveResolverPolicy: "anyone",
+      resolverPolicyProvenance: "explicit", sourceRunId: workerRunId, createdByAgentId: workerId,
+      addresseeAgentId: reviewerId,
+      payload: {
+        version: 1, prompt: "Internal build verification, not human acceptance. Review the note.",
+        target: { type: "custom", key: completionReviewTarget, revisionId: randomUUID(), label: INTERNAL_BUILD_REVIEW_LABEL },
+      },
+    });
+    return { companyId, workerId, reviewerId, issueId, reviewRunId, interactionId };
+  }
+
+  async function issueRef(issueId: string) {
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    return { id: issue.id, companyId: issue.companyId, projectId: issue.projectId, goalId: issue.goalId, status: issue.status };
+  }
+
+  it("lets the configured reviewer accept a gateway run's internal review and opens the sign-off", async () => {
+    const seed = await seedLegacyReview();
+    process.env[INTERNAL_BUILD_REVIEWER_ENV] = seed.reviewerId;
+    await issueThreadInteractionService(db).acceptInteraction(
+      await issueRef(seed.issueId), seed.interactionId, {},
+      { agentId: seed.reviewerId, runId: seed.reviewRunId },
+    );
+    const [issue] = await db.select().from(issues).where(eq(issues.id, seed.issueId));
+    expect(issue.status).toBe("done");
+    const links = await db.select().from(issueApprovals).where(eq(issueApprovals.issueId, seed.issueId));
+    expect(links).toHaveLength(1);
+  });
+
+  it("lets the configured reviewer reject a gateway run's internal review", async () => {
+    const seed = await seedLegacyReview();
+    process.env[INTERNAL_BUILD_REVIEWER_ENV] = seed.reviewerId;
+    await issueThreadInteractionService(db).rejectInteraction(
+      await issueRef(seed.issueId), seed.interactionId, { reason: "Name the Q3 numbers" },
+      { agentId: seed.reviewerId, runId: seed.reviewRunId },
+    );
+    const [issue] = await db.select().from(issues).where(eq(issues.id, seed.issueId));
+    expect(issue.status).toBe("todo");
+  });
+
+  it("refuses the gateway review when the reviewer is not configured", async () => {
+    const seed = await seedLegacyReview();
+    delete process.env[INTERNAL_BUILD_REVIEWER_ENV];
+    await expect(issueThreadInteractionService(db).acceptInteraction(
+      await issueRef(seed.issueId), seed.interactionId, {},
+      { agentId: seed.reviewerId, runId: seed.reviewRunId },
+    )).rejects.toThrow(/no longer current or assigned/);
+    const [issue] = await db.select().from(issues).where(eq(issues.id, seed.issueId));
+    expect(issue.status).toBe("in_review");
+  });
 });
