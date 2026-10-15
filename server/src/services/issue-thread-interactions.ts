@@ -97,6 +97,7 @@ import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import {
   createInternalBuildSignoffApproval,
   isInternalBuildReviewInteraction,
+  resolveInternalBuildReviewerAgentId,
 } from "./native-runtime/internal-build-review.js";
 import { getNativeReviewAssignment } from "./native-runtime/native-review-participant.js";
 import {
@@ -472,6 +473,19 @@ type IssueResolutionContext = {
   createdByUserId: string | null;
 };
 
+async function isInternalBuildReviewerDecision(
+  tx: Db,
+  companyId: string,
+  interaction: IssueThreadInteractionRow,
+  actor: InteractionActor,
+) {
+  return !!actor.agentId && !!actor.runId
+    && interaction.addresseeAgentId === actor.agentId
+    && !!interaction.createdByAgentId && interaction.createdByAgentId !== actor.agentId
+    && isInternalBuildReviewInteraction(interaction)
+    && await resolveInternalBuildReviewerAgentId(tx, companyId) === actor.agentId;
+}
+
 async function assertRequestConfirmationResolutionAllowedUnderLock(
   tx: Db,
   issue: IssueResolutionContext,
@@ -490,7 +504,11 @@ async function assertRequestConfirmationResolutionAllowedUnderLock(
     (await isIssueReviewVerdictInteraction(tx, { issue, interaction }));
 
   assertInteractionResolutionAllowed(interaction, actor);
-  if (actor.agentId && isNativeCompletionReview(interaction)) {
+  // A gateway (legacy) run's internal build review has no native review
+  // assignment; the configured reviewer decides the card addressed to it.
+  const internalBuildReviewerDecision = !!actor.agentId && isNativeCompletionReview(interaction)
+    && await isInternalBuildReviewerDecision(tx, issue.companyId, interaction, actor);
+  if (actor.agentId && isNativeCompletionReview(interaction) && !internalBuildReviewerDecision) {
     const target = (interaction.payload as { target?: { revisionId?: string } }).target;
     if (!actor.runId || !await getNativeReviewAssignment(tx, {
       companyId: issue.companyId, issueId: issue.id, agentId: actor.agentId,
