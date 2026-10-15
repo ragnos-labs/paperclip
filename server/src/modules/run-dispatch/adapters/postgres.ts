@@ -1,6 +1,7 @@
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { getNativeReviewAssignment } from "../../../services/native-runtime/native-review-participant.js";
+import { isPendingInternalBuildReviewWake } from "../../../services/native-runtime/internal-build-review.js";
 import { and, asc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -511,7 +512,9 @@ export function createPostgresRunDispatchAdapter(
     const isInteractionWake = allowsIssueInteractionWake(
       context,
       ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
-    );
+    ) || (issue !== null && await isPendingInternalBuildReviewWake(dbOrTx, {
+      companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: context,
+    }));
     const resumeIntent = context.resumeIntent === true || context.followUpRequested === true;
     const wakeReason = readNonEmptyString(context.wakeReason);
     const retryReason =

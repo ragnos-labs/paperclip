@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, approvals, issueApprovals, issues } from "@paperclipai/db";
+import { agents, approvals, issueApprovals, issues, issueThreadInteractions } from "@paperclipai/db";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 
 /**
@@ -58,6 +58,42 @@ export function isInternalBuildReviewInteraction(
   if (!reviewerAgentId || interaction.addresseeAgentId !== reviewerAgentId) return false;
   const payload = interaction.payload as { target?: { label?: unknown } } | null;
   return payload?.target?.label === INTERNAL_BUILD_REVIEW_LABEL;
+}
+
+/**
+ * True for the wake that asks the configured reviewer to decide a pending
+ * internal build review on another agent's task. Dispatch otherwise cancels a
+ * queued run for an agent that is not the task's assignee.
+ */
+export async function isPendingInternalBuildReviewWake(
+  db: Db,
+  input: { companyId: string; issueId: string; agentId: string; contextSnapshot: unknown },
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  const context = (input.contextSnapshot ?? {}) as Record<string, unknown>;
+  const interactionId = context.interactionId;
+  if (context.wakeReason !== "interaction_pending" || typeof interactionId !== "string"
+      || !UUID.test(interactionId)) return false;
+  if (await resolveInternalBuildReviewerAgentId(db, input.companyId, env) !== input.agentId) return false;
+  const row = await db
+    .select({
+      status: issueThreadInteractions.status,
+      addresseeAgentId: issueThreadInteractions.addresseeAgentId,
+      createdByAgentId: issueThreadInteractions.createdByAgentId,
+      payload: issueThreadInteractions.payload,
+    })
+    .from(issueThreadInteractions)
+    .where(and(
+      eq(issueThreadInteractions.id, interactionId),
+      eq(issueThreadInteractions.companyId, input.companyId),
+      eq(issueThreadInteractions.issueId, input.issueId),
+    ))
+    .then((rows) => rows[0] ?? null);
+  const target = (row?.payload as { target?: { key?: unknown } } | null)?.target;
+  return !!row && row.status === "pending" && row.addresseeAgentId === input.agentId
+    && !!row.createdByAgentId && row.createdByAgentId !== input.agentId
+    && target?.key === "native_completion_review"
+    && isInternalBuildReviewInteraction(row, env);
 }
 
 export function isInternalBuildSignoffPayload(payload: unknown): boolean {
