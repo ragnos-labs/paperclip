@@ -24,6 +24,7 @@ const apiPrefixes: Record<string, string> = {
   "ai-connections.ts": "/api",
   "attention.ts": "/api",
   "approvals.ts": "/api",
+  "internal-build-reviews.ts": "/api",
   "assets.ts": "/api",
   "auth.ts": "/api/auth",
   "board-chat.ts": "/api",
@@ -97,6 +98,11 @@ const explicitOpenApiOperationCoverageExclusions = new Set([
   // board API document, while this exact exclusion keeps route coverage honest.
   "POST /api/chat-webhooks/agentmail/{publicId}",
   "POST /api/chat-webhooks/{publicId}/{provider}",
+  // The internal build reviewer's agent-only route (the fork's sprint review path).
+  // Only the configured reviewer agent may call it; it is not a board API.
+  "GET /api/internal-build-reviews",
+  "GET /api/internal-build-reviews/{interactionId}",
+  "POST /api/internal-build-reviews/{interactionId}/{decision}",
 ]);
 
 // The set of contract-first routes whose OpenAPI document leads the mounted
