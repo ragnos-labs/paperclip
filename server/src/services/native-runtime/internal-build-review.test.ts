@@ -28,6 +28,7 @@ import {
   createInternalBuildSignoffApproval,
   reopenTasksForRejectedSignoff,
   isInternalBuildReviewInteraction,
+  isPendingInternalBuildReviewWake,
   readInternalBuildReviewerAgentId,
   resolveInternalBuildReviewerAgentId,
 } from "./internal-build-review.js";
@@ -317,5 +318,24 @@ describeEmbeddedPostgres("internal build review sign-off", () => {
     )).rejects.toThrow(/no longer current or assigned/);
     const [issue] = await db.select().from(issues).where(eq(issues.id, seed.issueId));
     expect(issue.status).toBe("in_review");
+  });
+  it("keeps only the configured reviewer's pending internal review wake on another agent's task", async () => {
+    const seed = await seedLegacyReview();
+    process.env[INTERNAL_BUILD_REVIEWER_ENV] = seed.reviewerId;
+    const wake = (agentId: string, overrides: Record<string, unknown> = {}) => isPendingInternalBuildReviewWake(db, {
+      companyId: seed.companyId, issueId: seed.issueId, agentId,
+      contextSnapshot: { wakeReason: "interaction_pending", interactionId: seed.interactionId, ...overrides },
+    });
+    expect(await wake(seed.reviewerId)).toBe(true);
+    expect(await wake(seed.workerId)).toBe(false);
+    expect(await wake(seed.reviewerId, { wakeReason: "issue_commented" })).toBe(false);
+    expect(await wake(seed.reviewerId, { interactionId: randomUUID() })).toBe(false);
+    await db.update(issueThreadInteractions).set({ status: "accepted" })
+      .where(eq(issueThreadInteractions.id, seed.interactionId));
+    expect(await wake(seed.reviewerId)).toBe(false);
+    delete process.env[INTERNAL_BUILD_REVIEWER_ENV];
+    await db.update(issueThreadInteractions).set({ status: "pending" })
+      .where(eq(issueThreadInteractions.id, seed.interactionId));
+    expect(await wake(seed.reviewerId)).toBe(false);
   });
 });
