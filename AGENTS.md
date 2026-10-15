@@ -179,6 +179,10 @@ pnpm build
 
 If anything cannot be run, explicitly report what was not run and why.
 
+In the RAGnos fork, the release checks in `doc/ragnos-fork-maintenance.md` take
+precedence: focused tests, the security gate and typecheck per change; the full
+suite and browser suite only when Hunter asks or before an upstream integration.
+
 ## 8. API and Auth Expectations
 
 - Base path: `/api`
