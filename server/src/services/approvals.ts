@@ -8,6 +8,10 @@ import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import {
+  isInternalBuildSignoffPayload,
+  reopenTasksForRejectedSignoff,
+} from "./native-runtime/internal-build-review.js";
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
@@ -226,6 +230,14 @@ export function approvalService(db: Db) {
         if (payloadAgentId) {
           await agentsSvc.terminate(payloadAgentId);
         }
+      }
+      if (applied && isInternalBuildSignoffPayload(updated.payload)) {
+        await reopenTasksForRejectedSignoff(db, {
+          approvalId: updated.id,
+          companyId: updated.companyId,
+          decisionNote: updated.decisionNote ?? null,
+          rejectedByUserId: decidedByUserId,
+        });
       }
 
       return { approval: updated, applied };

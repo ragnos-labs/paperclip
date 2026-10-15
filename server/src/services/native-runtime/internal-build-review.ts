@@ -64,6 +64,72 @@ export function isInternalBuildSignoffPayload(payload: unknown): boolean {
   return (payload as { kind?: unknown } | null)?.kind === INTERNAL_BUILD_SIGNOFF_KIND;
 }
 
+type IssueWake = (agentId: string, context: Record<string, unknown>) => Promise<unknown>;
+
+async function wakeIssueAssignee(db: Db, agentId: string, context: Record<string, unknown>) {
+  // Imported on use: the heartbeat service depends on much of the service graph.
+  const { heartbeatService } = await import("../heartbeat.js");
+  return heartbeatService(db).wakeup(agentId, {
+    source: "automation",
+    triggerDetail: "system",
+    reason: "issue_status_changed",
+    payload: context,
+    requestedByActorType: "user",
+    requestedByActorId: String(context.rejectedByUserId),
+    contextSnapshot: { source: "approval.rejected", ...context },
+  });
+}
+
+/**
+ * A rejected internal build sign-off reopens each linked closed task to `todo`
+ * and wakes its assignee with the rejection note. Returns the reopened ids.
+ */
+export async function reopenTasksForRejectedSignoff(
+  db: Db,
+  input: {
+    approvalId: string;
+    companyId: string;
+    decisionNote: string | null;
+    rejectedByUserId: string;
+  },
+  wake: IssueWake = (agentId, context) => wakeIssueAssignee(db, agentId, context),
+): Promise<string[]> {
+  const { issueService } = await import("../issues.js");
+  const linked = await db
+    .select({ id: issues.id, status: issues.status, assigneeAgentId: issues.assigneeAgentId })
+    .from(issueApprovals)
+    .innerJoin(issues, eq(issueApprovals.issueId, issues.id))
+    .where(and(
+      eq(issueApprovals.approvalId, input.approvalId),
+      eq(issueApprovals.companyId, input.companyId),
+    ));
+  const reopened: string[] = [];
+  for (const issue of linked) {
+    if (issue.status !== "done") continue;
+    await issueService(db).update(issue.id, {
+      status: "todo",
+      actorUserId: input.rejectedByUserId,
+    });
+    reopened.push(issue.id);
+    if (!issue.assigneeAgentId) continue;
+    const context = {
+      approvalId: input.approvalId,
+      approvalStatus: "rejected",
+      decisionNote: input.decisionNote,
+      rejectedByUserId: input.rejectedByUserId,
+      issueId: issue.id,
+      taskId: issue.id,
+      wakeReason: "internal_build_signoff_rejected",
+    };
+    try {
+      await wake(issue.assigneeAgentId, context);
+    } catch {
+      // The reopened task stays visible to its assignee's next pickup.
+    }
+  }
+  return reopened;
+}
+
 /**
  * Creates the human sign-off approval for an internally accepted review, at
  * most once per review interaction. Returns the approval id, or null when the
