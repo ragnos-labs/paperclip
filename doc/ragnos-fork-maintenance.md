@@ -96,40 +96,29 @@ renaming the workspace or expanding the baseline.
 
 ### Default self-hosted release
 
-Use a clean isolated checkout of the exact merged `codex/paperclip-stable` head,
-with Node 24, pnpm 9.15.4, the package-owned Rust toolchain, Chrome, `jq`, `lsof`
-and OpenSSH. Port-owner tests require `lsof`; Railway key tests require
-`/usr/bin/ssh-keygen`. Run as an
-unprivileged build user: embedded PostgreSQL cannot start as root. Keep production
-credentials, database URLs and the live Paperclip home out of the validation
-environment. The browser suite creates its own throwaway instance and port.
-Do not interpret a native PostgreSQL startup/loader failure as a passing test.
+A release takes minutes, not hours. The full suite (about 2,000 test files,
+three hours or more on the AMD64 host) and the browser suite (about 40 minutes)
+run only when Hunter asks for them or before an upstream integration lands; a
+failure there is repaired before the next release. Every release runs the lean
+checks below on the exact merged `codex/paperclip-stable` head.
 
-The Dockerfile's `validation` target supplies that environment, including the
-full frozen workspace install and Chrome. It runs as `node` under Tini so
-orphaned process fixtures are reaped just as they are in production. Build it
-with `docker build --target validation --build-arg PAPERCLIP_BUILD_COMMIT=...`.
-Run the checks below with the tracked source and Git history available at
-`/app`; the release build context excludes Git history. Do not override its
-entrypoint with a sleeping shell or mount production configuration. The existing
-test runner owns fixture isolation and serialized suites; reuse it rather than
-changing timeouts or omitting tests to compensate for the environment.
-
-From that checkout, run the existing checks without altering their selection:
+Run them on a development machine or on the host from a clean checkout of that
+head, with Node 24 or later and pnpm 9.15.4. Embedded PostgreSQL tests in the
+focused set are mandatory and never skip a native-loader error; run the native
+package's `scripts/hydrate-symlinks.js` first when lifecycle scripts are off.
+Keep production credentials, database URLs and the live Paperclip home out of
+the checks.
 
 ```sh
 test -z "$(git status --porcelain)"
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/codex/paperclip-stable)"
-test "$(node -p 'process.versions.node.split(".")[0]')" = 24
-test "$(pnpm --version)" = 9.15.4
 pnpm install --frozen-lockfile
-node --test .github/scripts/tests/ragnos-fork-security-gate.test.mjs .github/scripts/tests/ragnos-fork-release-source.test.mjs .github/scripts/tests/registry-reference-guard.test.mjs
 GITHUB_EVENT_NAME=push GITHUB_REPOSITORY=ragnos-labs/paperclip GITHUB_SHA="$(git rev-parse HEAD)" node .github/scripts/ragnos-fork-security-gate.mjs
-pnpm -r typecheck
-pnpm test:run
-pnpm build
-pnpm --filter @paperclipai/paperclip-runner build:binary
-PAPERCLIP_E2E_SKIP_LLM=true PAPERCLIP_PLAYWRIGHT_CHANNEL=chrome pnpm test:e2e
+(cd server && pnpm typecheck)
+# Focused tests: every test file the release changes, plus the suites that own
+# the changed modules (for example src/services/native-runtime for runtime
+# changes, src/modules/run-dispatch for dispatch, openapi-routes for new routes).
+(cd server && npx vitest run <changed and owning test paths>)
 git diff --check
 ```
 
@@ -138,6 +127,16 @@ original upstream baseline and runs the unchanged production advisory check.
 It needs no GitHub API token. Audit unavailability, new advisories, increased
 severity or blocking source findings fail the release. Retain bounded check logs
 in existing private operator custody; repair failures before building the release.
+
+The full check list, when requested, is the lean list plus
+`pnpm -r typecheck`, `pnpm test:run`, `pnpm build`,
+`pnpm --filter @paperclipai/paperclip-runner build:binary` and
+`PAPERCLIP_E2E_SKIP_LLM=true PAPERCLIP_PLAYWRIGHT_CHANNEL=chrome pnpm test:e2e`.
+Run it in the Dockerfile's `validation` target (Node 24, Chrome, `jq`, `lsof`,
+OpenSSH; as the unprivileged `node` user under Tini) with the full checkout
+mounted at `/app`, because the release build context omits Git history and
+some tracked test files. The existing test runner owns fixture isolation and
+serialized suites; do not change timeouts or drop tests to fit the environment.
 
 Build only `linux/amd64` from the same merged source. The existing Dockerfile's
 `production` target remains the standard option. Set `PAPERCLIP_BUILD_COMMIT` to that full source SHA and
