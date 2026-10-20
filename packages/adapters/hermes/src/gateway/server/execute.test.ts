@@ -1580,10 +1580,19 @@ describe("mapFinalResultForTest", () => {
     expect(result.exitCode).toBe(1);
   });
 
+  it("preserves operator cancellation even when the worker reaches its turn limit", () => {
+    const result = mapFinalResultForTest({
+      terminal: { runId: "stopped-run", status: "failed", payload: exhaustedPayload },
+      outputChunks: [], sessionKey: "issue-key", strategy: "issue", cancellationRequested: true,
+    });
+    expect(result.errorCode).toBe("hermes_gateway_run_failed");
+    expect(result.resultJson?.stopReason).toBeUndefined();
+  });
+
   it.each([
     { turn_exit_reason: "error_near_max_iterations(provider error)" },
     { turn_exit_reason: "max_iterations_reached" },
-    { turn_exit_reason: null }, { failed: true }, { error: "provider failed" }, { completed: true }, { partial: true },
+    { turn_exit_reason: null }, { failed: true }, { error: "provider failed" }, { error: { message: "provider failed" } }, { completed: true }, { partial: true },
     { interrupted: true }, { interrupted: undefined },
   ])("does not auto-continue ambiguous or interrupted terminal results: %j", (override) => {
     const result = mapFinalResultForTest({

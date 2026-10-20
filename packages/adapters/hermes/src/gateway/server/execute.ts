@@ -710,7 +710,7 @@ export function mapFinalResultForTest(input: {
   // worker has returned. Continue the saved issue session through Paperclip's
   // bounded turn-budget scheduler; arbitrary failures still require recovery.
   const exhausted = !input.cancellationRequested && input.terminal.status === "failed" &&
-    payload.failed !== true && !nonEmpty(payload.error) &&
+    payload.failed !== true && payload.error == null &&
     payload.completed === false && payload.partial === false &&
     payload.interrupted === false &&
     typeof payload.turn_exit_reason === "string" &&
