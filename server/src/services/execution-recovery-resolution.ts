@@ -3,7 +3,7 @@ import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker } 
 import { persistActivity } from "./activity-log.js";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { logger } from "../middleware/logger.js";
-import { and, eq, inArray, isNull, not, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, not, or, sql } from "drizzle-orm";
 import {
   chatActions,
   environmentLeases,
@@ -21,6 +21,42 @@ import {
 } from "@paperclipai/shared";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
+import { LEGACY_RECOVERY_CAUSE } from "./legacy-execution-recovery.js";
+
+type RecoveryAction = typeof issueRecoveryActions.$inferSelect;
+
+async function legacyReconciliationSiblings(db: Db, action: RecoveryAction, runId: string) {
+  if (action.cause !== LEGACY_RECOVERY_CAUSE || action.kind !== "active_run_watchdog" || !action.returnOwnerAgentId) return [action];
+  return db.select().from(issueRecoveryActions).where(and(
+    eq(issueRecoveryActions.companyId, action.companyId),
+    eq(issueRecoveryActions.sourceIssueId, action.sourceIssueId),
+    eq(issueRecoveryActions.cause, LEGACY_RECOVERY_CAUSE),
+    eq(issueRecoveryActions.kind, "active_run_watchdog"),
+    eq(issueRecoveryActions.returnOwnerAgentId, action.returnOwnerAgentId),
+    inArray(issueRecoveryActions.status, ["active", "escalated", "resolved"]),
+    sql`${issueRecoveryActions.evidence}->>'runId' = ${runId}`,
+  )).orderBy(
+    sql`case ${issueRecoveryActions.evidence}->>'continuationDelivery' when 'delivered' then 0 when 'delegated' then 1 else 2 end`,
+    asc(issueRecoveryActions.createdAt), asc(issueRecoveryActions.id),
+  ).for("update");
+}
+
+function reconciliationDeliveryOwner(siblings: RecoveryAction[], fallback: RecoveryAction, incoming?: ExecutionReconciliation) {
+  const owner = siblings.find((sibling) => sibling.evidence.executionReconciliation &&
+    ["delivered", "delegated"].includes(String(sibling.evidence.continuationDelivery))) ??
+    siblings.find((sibling) => sibling.evidence.executionReconciliation && sibling.evidence.continuationDelivery === "pending" &&
+      sibling.evidence.continuationDeliveryActionId === sibling.id) ??
+    siblings.find((sibling) => sibling.evidence.executionReconciliation &&
+      sibling.evidence.continuationDelivery === "pending") ?? fallback;
+  const decisions = siblings.map((sibling) => sibling.evidence.executionReconciliation as ExecutionReconciliation | undefined)
+    .filter((decision) => decision !== undefined);
+  if (incoming) decisions.push(incoming);
+  if (decisions.some((decision) => decision.runId !== decisions[0]!.runId ||
+    decision.providerStopped !== decisions[0]!.providerStopped || decision.actionOutcome !== decisions[0]!.actionOutcome)) {
+    throw conflict("The recovery records disagree about the stopped execution's outcomes.");
+  }
+  return owner;
+}
 
 /** An operator records observed outcomes; this is not permission to blindly retry. */
 export async function validateExecutionReconciliation(input: {
@@ -138,60 +174,78 @@ export async function markExecutionReconciliation(
   actorId: string,
   deliveryOwner?: { kind: "chat_failed_run_retry"; actionId: string },
 ) {
-  if (deliveryOwner) {
-    const [retry] = await db
-      .select()
-      .from(chatActions)
+  return db.transaction(async (tx) => {
+    // The API already holds this lock; direct callers must serialize siblings too.
+    await tx.select({ id: issues.id }).from(issues).where(and(
+      eq(issues.companyId, action.companyId), eq(issues.id, action.sourceIssueId),
+    )).for("update");
+    if (deliveryOwner) {
+      const [retry] = await tx
+        .select()
+        .from(chatActions)
+        .where(
+          and(
+            eq(chatActions.companyId, action.companyId),
+            eq(chatActions.id, deliveryOwner.actionId),
+          ),
+        );
+      if (
+        deliveryOwner.kind !== "chat_failed_run_retry" ||
+        !retry ||
+        retry.kind !== "failed_run_retry" ||
+        !["issued", "processing", "processed"].includes(retry.status) ||
+        retry.payload.version !== 1 ||
+        retry.payload.failedRunId !== decision.runId ||
+        retry.payload.issueId !== action.sourceIssueId
+      ) {
+        throw conflict("The authorized chat retry owner is no longer valid.");
+      }
+    }
+    await tx
+      .update(nativeRunFinalizations)
+      .set({
+        failureDetail: sql`coalesce(${nativeRunFinalizations.failureDetail}, '{}'::jsonb) || ${JSON.stringify({ replacementDenied: "operator_reconciled" })}::jsonb`,
+      })
       .where(
         and(
-          eq(chatActions.companyId, action.companyId),
-          eq(chatActions.id, deliveryOwner.actionId),
+          eq(nativeRunFinalizations.companyId, action.companyId),
+          eq(nativeRunFinalizations.runId, decision.runId),
         ),
       );
-    if (
-      deliveryOwner.kind !== "chat_failed_run_retry" ||
-      !retry ||
-      retry.kind !== "failed_run_retry" ||
-      !["issued", "processing", "processed"].includes(retry.status) ||
-      retry.payload.version !== 1 ||
-      retry.payload.failedRunId !== decision.runId ||
-      retry.payload.issueId !== action.sourceIssueId
-    ) {
-      throw conflict("The authorized chat retry owner is no longer valid.");
+    const [current] = await tx.select().from(issueRecoveryActions).where(and(
+      eq(issueRecoveryActions.companyId, action.companyId), eq(issueRecoveryActions.id, action.id),
+      eq(issueRecoveryActions.sourceIssueId, action.sourceIssueId),
+    )).for("update");
+    if (!current) throw conflict("The recovery action no longer exists.");
+    const siblings = await legacyReconciliationSiblings(tx as unknown as Db, current, decision.runId);
+    const owner = reconciliationDeliveryOwner(siblings, current, decision);
+    const reconciliation = owner.evidence.executionReconciliation ?? {
+      ...decision, actorId, recordedAt: new Date().toISOString(),
+    };
+    for (const sibling of siblings) {
+      await tx
+        .update(issueRecoveryActions)
+        .set({
+          evidence: {
+            ...sibling.evidence,
+            ...(sibling.evidence.automaticRecovery
+              ? { reconciledAutomaticRecovery: sibling.evidence.automaticRecovery } : {}),
+            automaticRecovery: undefined,
+            executionReconciliation: sibling.evidence.executionReconciliation ?? reconciliation,
+            ...(siblings.length > 1 ? { continuationDeliveryActionId: owner.id } : {}),
+            continuationDelivery: sibling.id !== owner.id ? "coalesced"
+              : owner.evidence.continuationDelivery ?? (deliveryOwner ? "delegated" : "pending"),
+            ...(deliveryOwner && sibling.id === owner.id ? { continuationDeliveryOwner: deliveryOwner } : {}),
+          },
+        })
+        .where(
+          and(
+            eq(issueRecoveryActions.companyId, action.companyId),
+            eq(issueRecoveryActions.id, sibling.id),
+          ),
+        );
     }
-  }
-  await db
-    .update(nativeRunFinalizations)
-    .set({
-      failureDetail: sql`coalesce(${nativeRunFinalizations.failureDetail}, '{}'::jsonb) || ${JSON.stringify({ replacementDenied: "operator_reconciled" })}::jsonb`,
-    })
-    .where(
-      and(
-        eq(nativeRunFinalizations.companyId, action.companyId),
-        eq(nativeRunFinalizations.runId, decision.runId),
-      ),
-    );
-  await db
-    .update(issueRecoveryActions)
-    .set({
-      evidence: {
-        ...action.evidence,
-        automaticRecovery: undefined,
-        executionReconciliation: {
-          ...decision,
-          actorId,
-          recordedAt: new Date().toISOString(),
-        },
-        continuationDelivery: deliveryOwner ? "delegated" : "pending",
-        ...(deliveryOwner ? { continuationDeliveryOwner: deliveryOwner } : {}),
-      },
-    })
-    .where(
-      and(
-        eq(issueRecoveryActions.companyId, action.companyId),
-        eq(issueRecoveryActions.id, action.id),
-      ),
-    );
+  });
 }
 
 export async function deliverReconciledExecutions(
@@ -208,8 +262,30 @@ export async function deliverReconciledExecutions(
       ),
     )
     .limit(25);
-  for (const action of pending) {
+  for (const candidate of pending) {
     try {
+      // Older installations may already have two pending records. Elect under
+      // the task lock before wake admission so both sweeps use one durable key.
+      const action = await db.transaction(async (tx) => {
+        await tx.select({ id: issues.id }).from(issues).where(and(
+          eq(issues.companyId, candidate.companyId), eq(issues.id, candidate.sourceIssueId),
+        )).for("update");
+        const [current] = await tx.select().from(issueRecoveryActions).where(and(
+          eq(issueRecoveryActions.companyId, candidate.companyId), eq(issueRecoveryActions.id, candidate.id),
+        )).for("update");
+        const runId = (current?.evidence.executionReconciliation as ExecutionReconciliation | undefined)?.runId;
+        if (!current || !runId || current.evidence.continuationDelivery !== "pending") return null;
+        const siblings = await legacyReconciliationSiblings(tx as unknown as Db, current, runId);
+        const owner = reconciliationDeliveryOwner(siblings, current);
+        for (const sibling of siblings) {
+          if (sibling.evidence.continuationDelivery !== "pending" || siblings.length === 1) continue;
+          await tx.update(issueRecoveryActions).set({ evidence: {
+            ...sibling.evidence, continuationDelivery: sibling.id === owner.id ? "pending" : "coalesced", continuationDeliveryActionId: owner.id,
+          } }).where(eq(issueRecoveryActions.id, sibling.id));
+        }
+        return owner.evidence.continuationDelivery === "pending" ? owner : null;
+      });
+      if (!action) continue;
       const decision = action.evidence.executionReconciliation as
         ExecutionReconciliation | undefined;
       if (!decision || !action.returnOwnerAgentId) continue;
@@ -289,7 +365,7 @@ export async function deliverReconciledExecutions(
         });
     } catch {
       logger.warn(
-        { recoveryActionId: action.id },
+        { recoveryActionId: candidate.id },
         "Reconciled execution continuation remains pending for retry",
       );
     }

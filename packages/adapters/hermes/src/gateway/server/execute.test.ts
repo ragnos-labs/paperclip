@@ -1560,6 +1560,40 @@ describe("testEnvironment", () => {
 });
 
 describe("mapFinalResultForTest", () => {
+  const exhaustedPayload = {
+    status: "failed", completed: false, partial: false, interrupted: false,
+    turn_exit_reason: "max_iterations_reached(20/20)",
+    session_id: "issue-session", output: "Retained draft, child and artifact are ready for final review.",
+  };
+
+  it("preserves a structured turn limit and the saved session for bounded continuation", () => {
+    const result = mapFinalResultForTest({
+      terminal: { runId: "retained-run", status: "failed", payload: exhaustedPayload },
+      outputChunks: [], sessionKey: "issue-key", strategy: "issue",
+    });
+    expect(result.errorCode).toBe("max_turns_exhausted");
+    expect(result.resultJson).toMatchObject({
+      stopReason: "max_turns_exhausted", turn_exit_reason: "max_iterations_reached(20/20)",
+      run_id: "retained-run", output: exhaustedPayload.output,
+    });
+    expect(result.sessionParams).toMatchObject({ hermesSessionId: "issue-session", strategy: "issue" });
+    expect(result.exitCode).toBe(1);
+  });
+
+  it.each([
+    { turn_exit_reason: "error_near_max_iterations(provider error)" },
+    { turn_exit_reason: "max_iterations_reached" },
+    { turn_exit_reason: null }, { failed: true }, { error: "provider failed" }, { completed: true }, { partial: true },
+    { interrupted: true }, { interrupted: undefined },
+  ])("does not auto-continue ambiguous or interrupted terminal results: %j", (override) => {
+    const result = mapFinalResultForTest({
+      terminal: { runId: "failed-run", status: "failed", payload: { ...exhaustedPayload, ...override } },
+      outputChunks: [], sessionKey: "issue-key", strategy: "issue",
+    });
+    expect(result.errorCode).toBe("hermes_gateway_run_failed");
+    expect(result.resultJson?.stopReason).toBeUndefined();
+  });
+
   it("maps failed statuses into adapter errors", () => {
     const result = mapFinalResultForTest({
       terminal: {

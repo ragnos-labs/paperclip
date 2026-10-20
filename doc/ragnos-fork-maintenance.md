@@ -36,6 +36,12 @@ No optional Hermes endpoint or unsupported reservation-stop protocol is admitted
 
 ## Recovery contract
 
+A stopped Hermes run with the exact structured iteration-budget reason and
+explicit incomplete, non-partial, non-interrupted flags uses the existing bounded
+max-turn continuation policy. It retains the saved issue session and prior work.
+Other failures, uncertain outcomes and operator cancellation keep their existing
+recovery rules. This does not increase the turn budget or continuation allowance.
+
 Accepted work resumes observation of the same run UUID, native job, company,
 transport fingerprint, task lock and original deadline. Recovery is GET-only.
 Dispatch suppression is checked after accepted observation admission. Paused or
@@ -54,6 +60,14 @@ both its stop and status requests, for example after a gateway restart. The run
 finishes failed with `hermes_gateway_provider_run_missing` and the agent is
 released. While Hermes still knows the run and has not confirmed termination,
 the run stays held.
+
+A closed legacy execution recovery record keeps its no-replay hold when a
+terminal sweep revisits the failed run. Verified reconciliation covers duplicate
+legacy records for the same company, task, run and return owner, preserving their
+evidence and electing one existing action ID for continuation delivery. Repeated
+or concurrent delivery reuses that ID, including after its continuation finishes.
+Different recovery causes, owners, runs and conflicting recorded outcomes retain
+their holds.
 
 ## Validation and release
 

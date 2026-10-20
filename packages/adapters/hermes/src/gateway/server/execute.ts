@@ -706,7 +706,18 @@ export function mapFinalResultForTest(input: {
   );
   const sessionId = extractSessionId(payload) ?? input.sessionKey;
   const sessionDisplayId = sessionId ? redactText(sessionId) : null;
-  const mapped = terminalResultCode(input.terminal.status);
+  // Stock Hermes publishes this structured terminal reason only after its
+  // worker has returned. Continue the saved issue session through Paperclip's
+  // bounded turn-budget scheduler; arbitrary failures still require recovery.
+  const exhausted = !input.cancellationRequested && input.terminal.status === "failed" &&
+    payload.failed !== true && !nonEmpty(payload.error) &&
+    payload.completed === false && payload.partial === false &&
+    payload.interrupted === false &&
+    typeof payload.turn_exit_reason === "string" &&
+    /^max_iterations_reached\([1-9]\d*\/[1-9]\d*\)$/.test(payload.turn_exit_reason);
+  const mapped = exhausted
+    ? { exitCode: 1, signal: null, errorCode: "max_turns_exhausted" }
+    : terminalResultCode(input.terminal.status);
   const proof = input.terminal.status === "completed" && !input.cancellationRequested
     ? null : cancellationProof(input.terminal.status, payload);
   const usage = parseUsage(payload);
@@ -737,6 +748,7 @@ export function mapFinalResultForTest(input: {
       status: input.terminal.status,
       session_id: sessionDisplayId,
       last_event: input.terminal.eventName ?? null,
+      ...(exhausted ? { stopReason: "max_turns_exhausted", turn_exit_reason: payload.turn_exit_reason } : {}),
       output: output ?? "",
       usage: usage ?? null,
       cost_usd: costUsd,
