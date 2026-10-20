@@ -99,6 +99,9 @@ scoped overrides: Cursor SDK 1.0.36 removes old Undici/Busboy; Svix 1.99.1 remov
 UUID 10; Mermaid uses KaTeX 0.18.2; Typography uses selector-parser 7.1.6;
 body-parser uses 2.3.0; MCP SDK uses its patched 1.31.0 release. Drizzle's unused
 legacy loader dependency is removed through pnpm's scoped removal override.
+The Hono 4 override selects 4.13.11 for the upstream
+[static-path middleware correction](https://github.com/honojs/hono/security/advisories/GHSA-5r4p-p66f-jhc7).
+Keep the dependency audit baseline unchanged.
 The actual TypeScript configuration and migration generation paths are tested.
 
 The production audit reports no critical, high or moderate findings. Its one low
