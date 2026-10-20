@@ -14,6 +14,7 @@ import {
   environmentLeases,
   environments,
   heartbeatRuns,
+  heartbeatRunEvents,
   issueComments,
   issueInboxArchives,
   issueRecoveryActions,
@@ -24,10 +25,13 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { buildPaperclipWakePayload, heartbeatService } from "../services/heartbeat.js";
-import { deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
+import { deliverReconciledExecutions, markExecutionReconciliation, settleUnrecoverableExecutions } from "../services/execution-recovery-resolution.js";
+import { LEGACY_RECOVERY_CAUSE, terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
+import { getExecutionBlocker } from "../services/execution-blocker.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { noticeMetadataReferencesRecoveryAction } from "../services/recovery/successful-run-handoff.js";
@@ -131,17 +135,21 @@ if (!embeddedPostgresSupport.supported) {
 describeEmbeddedPostgres("issue recovery actions", () => {
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let db: ReturnType<typeof createDb>;
+  let heartbeat: ReturnType<typeof heartbeatService>;
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-recovery-actions-");
     db = createDb(tempDb.connectionString);
+    heartbeat = heartbeatService(db, { runtimeEnv: {} });
   }, 30_000);
 
   afterEach(async () => {
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
     await db.delete(issueRecoveryActions);
     await db.delete(issueComments);
     await db.delete(environmentLeases);
     await db.delete(activityLog);
+    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(environments);
@@ -1725,9 +1733,138 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       ...fixture,
       previousRunId,
       action: action!,
-      heartbeat: heartbeatService(db, { runtimeEnv: {} }),
+      heartbeat,
     };
   }
+
+  it("keeps one closed legacy hold when terminal sweeps revisit the same failed run", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    await terminalizeLegacyExecution({ db, run: run!, status: "failed" });
+    await settleUnrecoverableExecutions(db);
+    const [original] = await db.select().from(issueRecoveryActions);
+    expect(original).toMatchObject({ status: "resolved", outcome: "blocked" });
+    await Promise.all([
+      terminalizeLegacyExecution({ db, run: run!, status: "failed" }),
+      terminalizeLegacyExecution({ db, run: run!, status: "failed" }),
+    ]);
+    await settleUnrecoverableExecutions(db);
+    expect(await db.select().from(issueRecoveryActions)).toEqual([original]);
+    expect(await getExecutionBlocker(db, companyId, sourceIssueId)).toMatchObject({ runId, recoveryActionId: original!.id });
+  });
+
+  it("reconciles legacy siblings once while preserving other runs, owners and recovery causes", async () => {
+    const { action, companyId, sourceIssueId, managerId, previousRunId } = await seedReconciledDelivery();
+    const evidence = { runId: previousRunId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } };
+    await db.update(issueRecoveryActions).set({ cause: LEGACY_RECOVERY_CAUSE, evidence }).where(eq(issueRecoveryActions.id, action.id));
+    const [sibling, otherRun, otherCause, otherOwner] = await db.insert(issueRecoveryActions).values([
+      { ...action, id: randomUUID(), cause: LEGACY_RECOVERY_CAUSE, evidence },
+      { ...action, id: randomUUID(), cause: LEGACY_RECOVERY_CAUSE, evidence: { ...evidence, runId: randomUUID() } },
+      { ...action, id: randomUUID(), evidence },
+      { ...action, id: randomUUID(), cause: LEGACY_RECOVERY_CAUSE, returnOwnerAgentId: managerId, evidence },
+    ]).returning();
+    const decision = { runId: previousRunId, providerStopped: true as const, actionOutcome: "not_performed" as const, outcomeEvidence: "Provider receipts establish that no action was submitted." };
+    await Promise.all([
+      markExecutionReconciliation(db, action, decision, "operator"),
+      markExecutionReconciliation(db, sibling!, decision, "operator"),
+    ]);
+    const records = await db.select().from(issueRecoveryActions);
+    const reconciled = records.filter((record) => [action.id, sibling!.id].includes(record.id));
+    expect(reconciled.filter((record) => record.evidence.continuationDelivery === "pending")).toHaveLength(1);
+    const owner = reconciled.find((record) => record.evidence.continuationDelivery === "pending")!;
+    expect(reconciled.map((record) => record.evidence.continuationDeliveryActionId)).toEqual([owner.id, owner.id]);
+    for (const record of reconciled) {
+      expect(record.evidence).not.toHaveProperty("automaticRecovery");
+      expect(record.evidence).toMatchObject({ reconciledAutomaticRecovery: evidence.automaticRecovery, executionReconciliation: decision });
+    }
+    for (const untouched of [otherRun!, otherCause!, otherOwner!]) {
+      expect(records.find((record) => record.id === untouched.id)).toEqual(untouched);
+    }
+  });
+
+  it.each(["resolved", "active"] as const)("clears duplicate legacy holds through one supported reconciliation request (selected: %s)", async (selectedStatus) => {
+    const { action, companyId, sourceIssueId, previousRunId } = await seedReconciledDelivery();
+    const evidence = { runId: previousRunId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } };
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    await db.update(issueRecoveryActions).set({ cause: LEGACY_RECOVERY_CAUSE, evidence, status: selectedStatus,
+      outcome: selectedStatus === "resolved" ? "blocked" : null }).where(eq(issueRecoveryActions.id, action.id));
+    await db.insert(issueRecoveryActions).values({ ...action, id: randomUUID(), cause: LEGACY_RECOVERY_CAUSE, evidence, outcome: "blocked" });
+    const body = { actionId: action.id, outcome: "restored", sourceIssueStatus: "todo",
+      executionReconciliation: { runId: previousRunId, providerStopped: true, actionOutcome: "not_performed", outcomeEvidence: "Provider receipts establish that no action was submitted." } };
+    const app = createApp();
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(await getExecutionBlocker(db, companyId, sourceIssueId)).toBeNull();
+    const recorded = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, sourceIssueId));
+    expect(recorded.filter((record) => record.evidence.continuationDelivery === "pending")).toHaveLength(1);
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, sourceIssueId))).toEqual(recorded);
+  });
+
+  it("uses one continuation for historical legacy siblings across parallel and repeated delivery", async () => {
+    const { action, heartbeat, companyId, sourceIssueId } = await seedReconciledDelivery();
+    await db.update(issueRecoveryActions).set({ cause: LEGACY_RECOVERY_CAUSE }).where(eq(issueRecoveryActions.id, action.id));
+    const [sibling] = await db.insert(issueRecoveryActions).values({
+      ...action, id: randomUUID(), cause: LEGACY_RECOVERY_CAUSE,
+    }).returning();
+    await Promise.all([
+      deliverReconciledExecutions(db, heartbeat.wakeup),
+      deliverReconciledExecutions(db, heartbeat.wakeup),
+    ]);
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    expect(wakes).toHaveLength(1);
+    const records = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, sourceIssueId));
+    const owner = records.find((record) => record.evidence.continuationDelivery === "delivered")!;
+    expect(wakes[0]!.idempotencyKey).toBe(`execution-reconciliation:${owner.id}`);
+    expect(records.find((record) => record.id !== owner.id)!.evidence).toMatchObject({ continuationDelivery: "coalesced", continuationDeliveryActionId: owner.id });
+    // A late sibling must adopt the delivered identity, even if its timestamp is older.
+    await db.insert(issueRecoveryActions).values({ ...sibling!, id: randomUUID(), createdAt: new Date(0) });
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(1);
+  });
+
+  it("holds conflicting legacy sibling outcomes without delivering either continuation", async () => {
+    const { action, heartbeat } = await seedReconciledDelivery();
+    await db.update(issueRecoveryActions).set({ cause: LEGACY_RECOVERY_CAUSE }).where(eq(issueRecoveryActions.id, action.id));
+    await db.insert(issueRecoveryActions).values({ ...action, id: randomUUID(), cause: LEGACY_RECOVERY_CAUSE,
+      evidence: { ...action.evidence, executionReconciliation: {
+        ...(action.evidence.executionReconciliation as object), actionOutcome: "completed",
+      } },
+    });
+    const wake = vi.fn(heartbeat.wakeup);
+    await deliverReconciledExecutions(db, wake);
+    expect(wake).not.toHaveBeenCalled();
+    expect((await db.select().from(issueRecoveryActions)).every((record) => record.evidence.continuationDelivery === "pending")).toBe(true);
+  });
+
+  it("retains the elected legacy owner when an older pending sibling appears before wake acknowledgement", async () => {
+    const { action, heartbeat, companyId } = await seedReconciledDelivery();
+    await db.update(issueRecoveryActions).set({ cause: LEGACY_RECOVERY_CAUSE }).where(eq(issueRecoveryActions.id, action.id));
+    await db.insert(issueRecoveryActions).values({ ...action, id: randomUUID(), cause: LEGACY_RECOVERY_CAUSE });
+    let ownerId: string | undefined;
+    await deliverReconciledExecutions(db, async (...args) => {
+      const run = await heartbeat.wakeup(...args);
+      ownerId = run!.contextSnapshot!.recoveryActionId as string;
+      throw new Error("fixture lost wake acknowledgement");
+    });
+    await db.insert(issueRecoveryActions).values({ ...action, id: randomUUID(), cause: LEGACY_RECOVERY_CAUSE, createdAt: new Date(0) });
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]!.idempotencyKey).toBe(`execution-reconciliation:${ownerId}`);
+  });
+
+  it("rejects a changed reconciliation outcome without replacing the recorded decision", async () => {
+    const { action, previousRunId } = await seedReconciledDelivery();
+    await expect(markExecutionReconciliation(db, action, {
+      runId: previousRunId, providerStopped: true, actionOutcome: "completed",
+      outcomeEvidence: "A later request claims a different outcome.",
+    }, "operator")).rejects.toThrow(/disagree/);
+    const [recorded] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(recorded).toEqual(action);
+  });
 
   it("delivers a reconciled execution once across concurrent sweeps without a deferred duplicate", async () => {
     const { action, heartbeat } = await seedReconciledDelivery();

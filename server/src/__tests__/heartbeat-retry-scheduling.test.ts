@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { mapFinalResultForTest } from "../../../packages/adapters/hermes/src/gateway/server/execute.js";
+import { legacyExecutionNeedsReconciliation } from "../services/legacy-execution-recovery.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -629,6 +631,34 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       .where(eq(heartbeatRuns.id, scheduled.run.id))
       .then((rows) => rows[0] ?? null);
     expect(promotedRun?.status).toBe("queued");
+  });
+
+  it("continues a stopped Hermes turn-limit result without an operator reconciliation hold", async () => {
+    const { runId, now } = await seedMaxTurnFixture();
+    const adapterResult = mapFinalResultForTest({
+      terminal: { runId: "retained-hermes-run", status: "failed", payload: {
+        status: "failed", completed: false, partial: false, interrupted: false,
+        turn_exit_reason: "max_iterations_reached(20/20)",
+        session_id: "saved-issue-session", output: "Draft and child already retained; finish review.",
+      } },
+      outputChunks: [], sessionKey: "saved-issue-session", strategy: "issue",
+    });
+    await db.update(heartbeatRuns).set({
+      errorCode: adapterResult.errorCode, resultJson: adapterResult.resultJson,
+    }).where(eq(heartbeatRuns.id, runId));
+    const [stopped] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(legacyExecutionNeedsReconciliation(stopped)).toBe(false);
+    const attempts = await Promise.all([0, 1].map(() => heartbeat.scheduleBoundedRetry(runId, {
+      now, retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
+      wakeReason: MAX_TURN_CONTINUATION_WAKE_REASON, maxAttempts: 2, delayMs: 1_000,
+    })));
+    expect(attempts.every(result => result.outcome === "scheduled")).toBe(true);
+    const continuations = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId));
+    expect(continuations).toHaveLength(1);
+    expect(continuations[0]).toMatchObject({ status: "scheduled_retry", scheduledRetryAttempt: 1,
+      scheduledRetryReason: MAX_TURN_CONTINUATION_RETRY_REASON });
+    expect(continuations[0].contextSnapshot?.forceFreshSession).not.toBe(true);
+    expect(adapterResult.sessionParams?.hermesSessionId).toBe("saved-issue-session");
   });
 
   it("schedules max-turn continuations with distinct retry metadata", async () => {

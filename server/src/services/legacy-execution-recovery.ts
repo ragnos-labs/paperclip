@@ -1,7 +1,7 @@
 import { normalizeMaxTurnStopReason } from "./heartbeat-stop-metadata.js";
 import { hasConversationContinuationPolicy } from "./conversation-continuation.js";
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { heartbeatRuns, issueRecoveryActions, issues, type Db } from "@paperclipai/db";
 import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
@@ -118,16 +118,20 @@ export async function terminalizeLegacyExecution(input: {
       (task.assigneeAgentId === run.agentId || isCurrentReviewer) &&
       !["done", "cancelled"].includes(task.status)
     ) {
-      // Periodic stranded-work checks may revisit this terminal run before its
-      // reconciled continuation is dispatched. Preserve the recorded decision.
-      const [reconciled] = await tx.select({ id: issueRecoveryActions.id })
+      // A closed no-replay hold is also a durable disposition. Recreating it on
+      // every stranded-work sweep would require reconciling the same run twice.
+      const [recorded] = await tx.select({ id: issueRecoveryActions.id })
         .from(issueRecoveryActions).where(and(
           eq(issueRecoveryActions.companyId, run.companyId),
           eq(issueRecoveryActions.sourceIssueId, task.id),
-          eq(issueRecoveryActions.status, "resolved"),
-          sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId' = ${run.id}`,
+          inArray(issueRecoveryActions.status, ["resolved", "cancelled"]),
+          or(
+            sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId' = ${run.id}`,
+            and(eq(issueRecoveryActions.cause, LEGACY_RECOVERY_CAUSE),
+              sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`),
+          ),
         )).limit(1);
-      if (reconciled) return updated;
+      if (recorded) return updated;
       await issueRecoveryActionService(tx as unknown as Db).upsertSourceScoped({
         companyId: run.companyId,
         sourceIssueId: task.id,
