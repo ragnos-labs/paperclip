@@ -1,3 +1,4 @@
+import { externalEvidenceWakeGate, queueExternalEvidenceSignal } from "./external-evidence-wakes.js";
 import { documentService } from "./documents.js";
 import { parseTaskSearch, taskSearchCtes, taskSearchScore } from "./task-search.js";
 import { createdFromIssueCondition } from "./issue-creation-origin.js";
@@ -8988,9 +8989,12 @@ export function issueService(db: Db) {
         );
       if (candidates.length === 0) return [];
 
+      const externalHolds = await Promise.all(candidates.map(candidate => externalEvidenceWakeGate(db, {
+        companyId: blockerIssue.companyId, issueId: candidate.id, agentId: candidate.assigneeAgentId ?? undefined,
+      })));
       const wakeableCandidates = candidates.filter(
-        (candidate) =>
-          candidate.assigneeAgentId &&
+        (candidate, index) =>
+          candidate.assigneeAgentId && !externalHolds[index].held &&
           !["backlog", "done", "cancelled"].includes(candidate.status),
       );
       if (wakeableCandidates.length === 0) return [];
@@ -9043,6 +9047,9 @@ export function issueService(db: Db) {
       if (!parent || parent.conversationAgentId || !parent.assigneeAgentId || ["backlog", "done", "cancelled"].includes(parent.status)) {
         return null;
       }
+
+      if ((await externalEvidenceWakeGate(db, { companyId: parent.companyId,
+        issueId: parent.id, agentId: parent.assigneeAgentId })).held) return null;
 
       const children = await db
         .select({
@@ -10962,6 +10969,12 @@ export function issueService(db: Db) {
             await finalizeStatusCardsForStalledGeneration(tx, updated);
           }
         }
+        if (actorUserId && !actorAgentId && existing.status !== updated.status
+          && ["done", "cancelled"].includes(updated.status)) {
+          await queueExternalEvidenceSignal(tx as unknown as Db, { companyId: updated.companyId,
+            sourceIssueId: updated.id, actorUserId, kind: updated.status === "done" ? "resolved" : "cancelled",
+            eventId: `status:${updated.id}:${updated.statusVersion}` });
+        }
         if (nextLabelIds !== undefined) {
           await syncIssueLabels(
             updated.id,
@@ -12601,6 +12614,13 @@ export function issueService(db: Db) {
         }
       }
 
+      if (actor.userId && !actor.agentId && !actor.runId && !actor.onBehalfOfUserId) {
+        const [source] = await dbOrTx.select({ status: issues.status }).from(issues).where(eq(issues.id, issueId));
+        if (source && !["done", "cancelled"].includes(source.status)) {
+          await queueExternalEvidenceSignal(dbOrTx as Db, { companyId: issue.companyId, sourceIssueId: issueId,
+            actorUserId: actor.userId, kind: "evidence_supplied", eventId: comment.id, commentId: comment.id });
+        }
+      }
       return redactIssueComment(comment, currentUserRedactionOptions.enabled);
     },
 

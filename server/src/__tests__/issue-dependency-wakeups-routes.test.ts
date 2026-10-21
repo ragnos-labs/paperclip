@@ -16,6 +16,12 @@ import {
 // yet still below the 30s hook timeout.
 vi.setConfig({ testTimeout: 30000 });
 
+const mockEvidenceSignal = vi.hoisted(() => vi.fn());
+vi.mock("../services/external-evidence-wakes.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/external-evidence-wakes.js")>("../services/external-evidence-wakes.js");
+  return { ...actual, queueExternalEvidenceSignal: mockEvidenceSignal };
+});
+
 const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
 const mockFindExistingIssueBlockersResolvedWakeForReadyState = vi.hoisted(() => vi.fn(async () => null));
 const mockIssueService = vi.hoisted(() => ({
@@ -117,7 +123,7 @@ vi.mock("../services/issue-dependency-wakeups.js", async () => {
   };
 });
 
-async function createApp() {
+async function createApp(actorOverride: Record<string, unknown> = {}) {
   const emptyRows: unknown[] = [];
   const whereResult = {
     limit: vi.fn(async () => emptyRows),
@@ -145,6 +151,7 @@ async function createApp() {
       companyIds: ["company-1"],
       source: "local_implicit",
       isInstanceAdmin: false,
+      ...actorOverride,
     };
     next();
   });
@@ -160,6 +167,7 @@ describe("issue dependency wakeups in issue routes", () => {
     vi.doUnmock("../routes/authz.js");
     vi.doUnmock("../middleware/index.js");
     vi.clearAllMocks();
+    mockEvidenceSignal.mockReset().mockResolvedValue(null);
     mockFindExistingIssueBlockersResolvedWakeForReadyState.mockResolvedValue(null);
     mockIssueService.getAncestors.mockResolvedValue([]);
     mockIssueService.getByIdForUpdate.mockImplementation(async () => mockIssueService.getById());
@@ -681,4 +689,26 @@ describe("issue dependency wakeups in issue routes", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(mockWakeup).not.toHaveBeenCalled();
   });
+  it("admits only exact board evidence event bodies and reports no health certification", async () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    mockIssueService.getById.mockResolvedValue({ id, companyId: "company-1" });
+    mockEvidenceSignal.mockResolvedValue({ id: "intent-1", status: "queued", payload: { issueId: "parent-1" } });
+    const response = await request(await createApp()).post(`/api/issues/${id}/evidence-events`)
+      .send({ eventId: "22222222-2222-4222-8222-222222222222", kind: "resolved" });
+    expect(response.status).toBe(202);
+    expect(response.body).toMatchObject({ id: "intent-1", issueId: "parent-1", evidenceVerified: false });
+    expect(mockEvidenceSignal).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      companyId: "company-1", sourceIssueId: id, actorUserId: "local-board", kind: "resolved" }));
+  });
+
+  it("rejects agent evidence authority and arbitrary verification fields without recording a signal", async () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const body = { eventId: "22222222-2222-4222-8222-222222222222", kind: "resolved" };
+    const denied = await request(await createApp({ type: "agent", agentId: "agent-1" }))
+      .post(`/api/issues/${id}/evidence-events`).send(body);
+    expect(denied.status).toBe(403); expect(mockEvidenceSignal).not.toHaveBeenCalled();
+    const invalid = await request(await createApp()).post(`/api/issues/${id}/evidence-events`).send({ ...body, evidenceVerified: true });
+    expect(invalid.status).toBe(400); expect(mockEvidenceSignal).not.toHaveBeenCalled();
+  });
+
 });

@@ -1,3 +1,4 @@
+import { externalEvidenceWakeGate } from "../external-evidence-wakes.js";
 import { hasLiveLegacyController } from "../legacy-controller-lease.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { isWaitingConversation, settleConversationTurn, deliverConversationComments } from "../agent-conversations.js";
@@ -1109,6 +1110,7 @@ export function recoveryService(
   }
 
   async function hasPendingWakeInteraction(companyId: string, issueId: string) {
+    if ((await externalEvidenceWakeGate(db, { companyId, issueId })).held) return true;
     if (await hasPendingHumanConfirmation(db, companyId, issueId)) return true;
     return db
       .select({ id: issueThreadInteractions.id })

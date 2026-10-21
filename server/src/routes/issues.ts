@@ -1,3 +1,4 @@
+import { queueExternalEvidenceSignal } from "../services/external-evidence-wakes.js";
 import { queuedInteractionId, readQueuedInteractionResponse, hasQueuedInteractionResponse } from "../services/queued-interaction-response.js";
 import { deliverConversationComments, isConversation } from "../services/agent-conversations.js";
 import { issueRecoveryActionReadModel } from "../services/issue-recovery-actions.js";
@@ -59,6 +60,7 @@ import {
 } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
+  externalEvidenceEventSchema,
   acceptIssueThreadInteractionSchema,
   attachmentArtifactWorkProductMetadataSchema,
   cancelIssueThreadInteractionSchema,
@@ -8387,6 +8389,25 @@ export function issueRoutes(
     assertCompanyAccess(req, companyId);
     const result = await svc.listLabels(companyId);
     res.json(result);
+  });
+
+  // Explicit external lifecycle linkage; agents cannot mint evidence or replacement authority.
+  router.post("/issues/:id/evidence-events", validate(externalEvidenceEventSchema), async (req, res) => {
+    if (req.actor.type !== "board") throw forbidden("Only authenticated board evidence events are admitted");
+    const source = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!source) return;
+    const actor = getActorInfo(req);
+    if (actor.actorType !== "user") throw forbidden("Authenticated member evidence required");
+    const intent = await db.transaction(async tx => {
+      const receipt = await queueExternalEvidenceSignal(tx as unknown as Db, { companyId: source.companyId,
+        sourceIssueId: source.id, actorUserId: actor.actorId, ...req.body });
+      if (!receipt) throw unprocessable("Exact owner-request event and current target required");
+      await logActivity(tx as unknown as Db, { companyId: source.companyId, actorType: "user", actorId: actor.actorId,
+        action: "issue.external_evidence_event", entityType: "issue", entityId: source.id,
+        details: { eventId: req.body.eventId, kind: req.body.kind, wakeIntentId: receipt.id, evidenceVerified: false } });
+      return receipt;
+    });
+    res.status(202).json({ id: intent.id, issueId: intent.payload?.issueId, status: intent.status, evidenceVerified: false });
   });
 
   router.post(
