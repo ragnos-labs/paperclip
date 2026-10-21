@@ -97,12 +97,25 @@ work. A manual or comment wake does not resolve a confirmation.
 The inherited dependency chains are repaired with supported parent updates and
 scoped overrides: Cursor SDK 1.0.36 removes old Undici/Busboy; Svix 1.99.1 removes
 UUID 10; Mermaid uses KaTeX 0.18.2; Typography uses selector-parser 7.1.6;
-body-parser uses 2.3.0; MCP SDK uses its patched 1.31.0 release. Drizzle's unused
+body-parser uses 2.3.0; MCP SDK uses 1.32.0. The compatible library refresh selects
+follow-redirects 1.16.1, Vite 8.2.4, Runner's separate Vite 6.4.4 line, and aligned
+Vitest/mocker 4.1.12. The narrow Vitest-to-Vite override keeps its broad supported
+range on the selected 8.2.4 release instead of introducing another minor line.
+Drizzle's unused
 legacy loader dependency is removed through pnpm's scoped removal override.
 The Hono 4 override selects 4.13.11 for the upstream
 [static-path middleware correction](https://github.com/honojs/hono/security/advisories/GHSA-5r4p-p66f-jhc7).
 Keep the dependency audit baseline unchanged.
 The actual TypeScript configuration and migration generation paths are tested.
+
+SDK version selection alone does not enable its optional HTTP protections.
+The existing MCP constructors and authentication/resource settings are unchanged.
+For exposed HTTP MCP servers, the validation advisory requires an appropriately
+chosen `maxToolInputElements` and request-body bound; SDK bearer authentication
+requires both `expectedResource` and the verifier's `AuthInfo.resource` contract
+to enforce audience. Assess actual entrypoints and obtain the separate scoped
+configuration approval before changing either. A clean package audit does not
+prove these application-level mitigations or deployed reachability.
 
 The production audit reports no critical, high or moderate findings. Its one low
 `cli@0.3.1` report has no dependency paths and refers to the unrelated npm `cli`

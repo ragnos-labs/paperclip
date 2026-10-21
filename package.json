@@ -94,7 +94,7 @@
     "cross-env": "^10.1.0",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   },
   "engines": {
     "node": ">=24.11.0"
@@ -142,7 +142,8 @@
       "@tailwindcss/typography@0.5>postcss-selector-parser": "7.1.6",
       "drizzle-kit@0.31.10>@esbuild-kit/esm-loader": "-",
       "body-parser@2": "2.3.0",
-      "@modelcontextprotocol/sdk@1": "1.31.0"
+      "@modelcontextprotocol/sdk@1": "1.32.0",
+      "vitest@4.1.12>vite": "8.2.4"
     }
   }
 }
