@@ -9,6 +9,9 @@ import { startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded
 import { queueExternalEvidenceSignal, externalEvidenceWakeGate, classifyEvidenceHold,
   existingNativeIntentDispatch, nativeEvidenceDispatchActor, retryUnadmittedEvidenceIntent, EXTERNAL_EVIDENCE_WAKE } from "./external-evidence-wakes.js";
 
+// Public native creation namespace, not a credential.
+const OWNER_REQUEST_PREFIX = "companyos-owner-request:";
+
 // Mandatory native PostgreSQL; a loader/bind/migration failure is a test failure, never a skip.
 describe("external evidence event admission and durable native wake intent", () => {
   let native: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -24,7 +27,7 @@ describe("external evidence event admission and durable native wake intent", () 
       blockedTransitionAt: new Date(Date.now() - 10000), unblockDescriptor: { owner: { agentId: chief }, action: "Await exact external evidence" } });
     await db.insert(issues).values({ id: source, companyId: company, title: "Synthetic owner request", parentId: parent,
       status: "blocked", createdByAgentId: chief, unblockDescriptor: { owner: "board", action: "Supply exact evidence" } });
-    await db.insert(issueCreateIdempotencyKeys).values({ companyId: company, issueId: source, idempotencyKey: "companyos-owner-request:" + source });
+    await db.insert(issueCreateIdempotencyKeys).values({ companyId: company, issueId: source, idempotencyKey: OWNER_REQUEST_PREFIX + source });
     const comment = randomUUID();
     await db.insert(issueComments).values({ id: comment, companyId: company, issueId: source, authorUserId: user,
       authorType: "user", body: "Timestamped synthetic health receipt; cause remains unknown." });
@@ -72,7 +75,7 @@ describe("external evidence event admission and durable native wake intent", () 
       if (kind === "replaced") {
         await db.insert(issues).values({ id: replacement, companyId: f.company, parentId: f.parent, createdByAgentId: f.chief,
           title: "Replacement evidence request", status: "blocked", unblockDescriptor: { owner: "board", action: "Provide new evidence" } });
-        await db.insert(issueCreateIdempotencyKeys).values({ companyId: f.company, issueId: replacement, idempotencyKey: "companyos-owner-request:" + replacement });
+        await db.insert(issueCreateIdempotencyKeys).values({ companyId: f.company, issueId: replacement, idempotencyKey: OWNER_REQUEST_PREFIX + replacement });
       }
       await db.update(issues).set({ status: kind === "resolved" ? "done" : "cancelled", unblockDescriptor: null }).where(eq(issues.id, f.source));
       const intent = await queue(f, { kind, ...(kind === "replaced" ? { replacementIssueId: replacement } : {}) });
@@ -90,7 +93,7 @@ describe("external evidence event admission and durable native wake intent", () 
     expect((await externalEvidenceWakeGate(db, { companyId: f.company, issueId: f.parent })).held).toBe(true);
     await db.insert(issues).values({ id: replacement, companyId: f.company, parentId: f.parent, createdByAgentId: f.chief,
       title: "Exact replacement", status: "blocked", unblockDescriptor: { owner: "board", action: "Supply new evidence" } });
-    await db.insert(issueCreateIdempotencyKeys).values({ companyId: f.company, issueId: replacement, idempotencyKey: "companyos-owner-request:" + replacement });
+    await db.insert(issueCreateIdempotencyKeys).values({ companyId: f.company, issueId: replacement, idempotencyKey: OWNER_REQUEST_PREFIX + replacement });
     await queue(f, { kind: "replaced", replacementIssueId: replacement });
     expect((await externalEvidenceWakeGate(db, { companyId: f.company, issueId: f.parent })).held).toBe(true);
     await db.update(issues).set({ status: "done", unblockDescriptor: null }).where(eq(issues.id, replacement));
