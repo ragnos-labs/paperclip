@@ -15236,4 +15236,66 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     if (kind === "unknown_attempt") expect(retained.payload?.evidenceDispatchAttempt).toBe(-1);
   });
 
+  it.each([
+    { refusal: "attempt_cap", count: 1, limit: 1 },
+    { refusal: "independent_run", count: 1, limit: 1 },
+    { refusal: "attempt_cap", count: 100, limit: undefined },
+  ])("external evidence refused retry $refusal rotates $count intents across concurrent sweeps and restart", async ({ refusal, count, limit }) => {
+    const held = await seedExternalEvidenceFixture();
+    const retained: { id: string; receipt: typeof agentWakeupRequests.$inferSelect; proof?: typeof heartbeatRuns.$inferSelect;
+      payload: Record<string, unknown>; requestedAt: Date; key: string | null }[] = [];
+    for (let n = 0; n < count; n++) {
+      const commentId = randomUUID();
+      await db.insert(issueComments).values({ id: commentId, companyId: held.companyId, issueId: held.sourceId,
+        authorUserId: "responsible-user", body: `Retained refused evidence ${n}` });
+      const intent = await db.transaction(tx => queueExternalEvidenceSignal(tx as unknown as ReturnType<typeof createDb>, {
+        companyId: held.companyId, sourceIssueId: held.sourceId, actorUserId: "responsible-user",
+        kind: "evidence_supplied", commentId, eventId: commentId }));
+      const attempt = refusal === "attempt_cap" ? 1024 : 0;
+      const payload = { ...intent!.payload, evidenceDispatchAttempt: attempt };
+      await db.update(agentWakeupRequests).set({ payload, updatedAt: new Date(0) }).where(eq(agentWakeupRequests.id, intent!.id));
+      const [receipt] = await db.insert(agentWakeupRequests).values({ companyId: held.companyId, agentId: held.agentId,
+        source: "automation", reason: EXTERNAL_EVIDENCE_WAKE, status: "failed", requestedByActorType: "system",
+        requestedByActorId: `native-status-wake-dispatch:${intent!.id}${attempt ? `:${attempt}` : ""}`,
+        payload: { issueId: held.issueId }, finishedAt: new Date() }).returning();
+      let proof: typeof heartbeatRuns.$inferSelect | undefined;
+      if (refusal === "independent_run") {
+        [proof] = await db.insert(heartbeatRuns).values({ companyId: held.companyId, agentId: held.agentId, status: "succeeded",
+          invocationSource: "automation", responsibleUserId: "responsible-user", wakeupRequestId: receipt.id,
+          finishedAt: new Date(), contextSnapshot: { issueId: held.issueId } }).returning();
+      }
+      retained.push({ id: intent!.id, receipt, proof, payload, requestedAt: intent!.requestedAt, key: intent!.idempotencyKey });
+    }
+    const ready = await seedExternalEvidenceFixture();
+    await db.transaction(tx => queueExternalEvidenceSignal(tx as unknown as ReturnType<typeof createDb>, {
+      companyId: ready.companyId, sourceIssueId: ready.sourceId, actorUserId: "responsible-user",
+      kind: "evidence_supplied", commentId: ready.commentId, eventId: ready.commentId }));
+    const input = limit === undefined ? {} : { limit };
+    await Promise.all([heartbeatService(db).dispatchPendingNativeStatusWakeups(input),
+      heartbeatService(db).dispatchPendingNativeStatusWakeups(input)]);
+    const restarted = heartbeatService(db);
+    await restarted.dispatchPendingNativeStatusWakeups(input);
+    await restarted.drainActiveRunExecutions();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, ready.companyId))).toHaveLength(1);
+    await heartbeatService(db).dispatchPendingNativeStatusWakeups(input);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, ready.companyId))).toHaveLength(1);
+    const heldRows = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, held.companyId));
+    expect(heldRows).toHaveLength(count * 2); // Original intents and exact terminal receipts only.
+    for (const original of retained) {
+      const intent = heldRows.find(r => r.id === original.id)!;
+      expect(intent.status).toBe("queued"); expect(intent.runId).toBeNull();
+      expect(intent.updatedAt.getTime()).toBeGreaterThan(0);
+      expect(intent.payload).toEqual(original.payload); expect(intent.idempotencyKey).toBe(original.key);
+      expect(intent.requestedAt).toEqual(original.requestedAt);
+      const receipt = heldRows.find(r => r.id === original.receipt.id)!;
+      expect(receipt).toEqual(original.receipt);
+      if (refusal === "independent_run") {
+        const proofs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, receipt.id));
+        expect(proofs).toEqual([original.proof]);
+      }
+    }
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, held.companyId)))
+      .toHaveLength(refusal === "independent_run" ? count : 0);
+  }, 45000);
+
 });

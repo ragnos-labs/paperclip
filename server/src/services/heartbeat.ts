@@ -28739,7 +28739,22 @@ export function heartbeatService(
 
       if (existingDispatch && candidate.reason === EXTERNAL_EVIDENCE_WAKE && !existingDispatch.runId
         && ["skipped", "failed", "cancelled"].includes(existingDispatch.status)) {
-        await retryUnadmittedEvidenceIntent(db, candidate.id, dispatchActorId);
+        if (!await retryUnadmittedEvidenceIntent(db, candidate.id, dispatchActorId)) {
+          // A cap or possible-admission proof forbids another effect, not fair
+          // inspection of later work. Rotate only the same still-pending intent;
+          // a concurrent payload/attempt change or run linkage wins this guard.
+          await db.update(agentWakeupRequests).set({
+            updatedAt: sql`greatest(${agentWakeupRequests.updatedAt}, clock_timestamp())`,
+          }).where(and(
+            eq(agentWakeupRequests.id, candidate.id), eq(agentWakeupRequests.companyId, candidate.companyId),
+            eq(agentWakeupRequests.agentId, candidate.agentId), eq(agentWakeupRequests.reason, EXTERNAL_EVIDENCE_WAKE),
+            eq(agentWakeupRequests.requestedByActorType, "system"),
+            eq(agentWakeupRequests.requestedByActorId, "native-status-committer"),
+            isNull(agentWakeupRequests.runId), inArray(agentWakeupRequests.status, ["queued", "claimed"]),
+            candidate.payload === null ? isNull(agentWakeupRequests.payload)
+              : sql`${agentWakeupRequests.payload} = ${JSON.stringify(candidate.payload)}::jsonb`,
+          ));
+        }
         deferred += 1;
         continue;
       }
