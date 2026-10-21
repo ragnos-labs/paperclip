@@ -278,6 +278,11 @@ verification or human acceptance. The payload explicitly reports
 Parent-row transactions serialize event claims and actual dispatch admission.
 The existing wake table retains intents, dispatch receipts, run linkage and
 uncertainty across restart. A native policy hold retains the intent. An admission
+retry uses durable least-recently-updated ordering with stable tie breakers;
+unexpired claims do not occupy a retry batch. Held or unknown intents rotate
+without cancellation, so an older held company cannot permanently monopolize
+the bounded global sweep. Original requested times and eligibility are retained.
+An admission
 attempt may advance only after a durable terminal receipt and independent run
 lookup prove that no run was admitted; old attempt actors are fenced. An admitted
 run, deferred/unknown effect, provider failure or completed run is never replayed

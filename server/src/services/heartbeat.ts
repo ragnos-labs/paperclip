@@ -28687,11 +28687,21 @@ export function heartbeatService(
             : undefined,
           eq(agentWakeupRequests.requestedByActorType, "system"),
           eq(agentWakeupRequests.requestedByActorId, "native-status-committer"),
-          inArray(agentWakeupRequests.status, ["queued", "claimed"]),
+          or(
+            eq(agentWakeupRequests.status, "queued"),
+            and(eq(agentWakeupRequests.status, "claimed"), or(
+              isNull(agentWakeupRequests.claimedAt),
+              lte(agentWakeupRequests.claimedAt, new Date(now.getTime() - staleClaimMs)),
+            )),
+          ),
           isNull(agentWakeupRequests.runId),
         ),
       )
-      .orderBy(asc(agentWakeupRequests.requestedAt))
+      // updatedAt is the durable retry cursor: a held or uncertain attempt
+      // advances it without changing requestedAt, eligibility or its receipt.
+      // Restarted/global sweeps therefore rotate past held companies instead
+      // of repeatedly filling the bounded batch with their oldest events.
+      .orderBy(asc(agentWakeupRequests.updatedAt), asc(agentWakeupRequests.requestedAt), asc(agentWakeupRequests.id))
       .limit(Math.max(1, Math.min(input.limit ?? 100, 500)));
 
     let dispatched = 0;
@@ -28704,7 +28714,15 @@ export function heartbeatService(
 
     for (const candidate of candidates) {
       const dispatchActorId = nativeEvidenceDispatchActor(candidate);
-      if (!dispatchActorId) { deferred += 1; continue; }
+      if (!dispatchActorId) {
+        // Unknown intent data stays held, but cannot monopolize a retry slot.
+        await db.update(agentWakeupRequests).set({ updatedAt: now }).where(and(
+          eq(agentWakeupRequests.id, candidate.id), isNull(agentWakeupRequests.runId),
+          inArray(agentWakeupRequests.status, ["queued", "claimed"]),
+        ));
+        deferred += 1;
+        continue;
+      }
       const existingDispatch = await db
         .select()
         .from(agentWakeupRequests)
