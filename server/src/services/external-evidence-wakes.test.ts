@@ -8,6 +8,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { createDb, companies, agents, issues, companyMemberships, issueComments, issueCreateIdempotencyKeys,
   agentWakeupRequests, heartbeatRuns, issueRecoveryActions, issueRelations, issueThreadInteractions, issueApprovals, approvals, environmentLeases, authUsers, type Db } from "@paperclipai/db";
 import { prepareConversationTurn } from "./agent-conversations.js";
+import { getExecutionBlocker } from "./execution-blocker.js";
 import { issueService } from "./issues.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { externalEvidenceEventSchema } from "@paperclipai/shared";
@@ -156,6 +157,57 @@ describe("external evidence event admission and durable native wake intent", () 
     // this same millisecond must still block the genuinely fresh comment.
     await db.update(issueRecoveryActions).set({ createdAt: sql`'2026-10-22T13:00:00.000950Z'::timestamptz` }).where(eq(issueRecoveryActions.id, f.recovery.id));
     expect((await externalEvidenceWakeGate(db, f.input)).held).toBe(true);
+  });
+  it.each(["equal", "missing", "foreign"] as const)("native boundary cutoff preserves strict ordering for %s boundary", async kind => {
+    const f = await conversationDelivery(); const boundaryId = await committedBoundary(f);
+    if (kind === "equal") {
+      await db.update(issueRecoveryActions).set({ createdAt: sql`(select ${issueComments.createdAt} from ${issueComments} where ${issueComments.id} = ${boundaryId})` }).where(eq(issueRecoveryActions.id, f.recovery.id));
+      expect(await getExecutionBlocker(db, f.company, f.parent)).toBeNull();
+    } else {
+      const captured = kind === "missing" ? randomUUID() : await committedBoundary(await conversationDelivery());
+      await db.update(issues).set({ conversationBoundaryCommentId: captured }).where(eq(issues.id, f.parent));
+      expect(await getExecutionBlocker(db, f.company, f.parent)).toMatchObject({ recoveryActionId: f.recovery.id });
+    }
+  });
+  it("retains the native hold when its captured boundary disappears before comparison", async () => {
+    const f = await conversationDelivery(); const boundaryId = await committedBoundary(f);
+    let deleted = false;
+    // Timing seam only: every SELECT is real PostgreSQL and no hold predicate
+    // or result is mocked. Delete after the captured-ID query resolves, before
+    // getExecutionBlocker receives it and issues its actual comparison query.
+    const pauseAfterSelect = (statement: object): object => {
+      let proxy: object;
+      proxy = new Proxy(statement, { get(target, key) {
+        if (key === "then") return (resolve: (rows: unknown) => unknown, reject: (error: unknown) => unknown) => {
+          const selected = Reflect.apply(Reflect.get(target, "then", target), target, [(rows: unknown) => rows]) as Promise<unknown>;
+          return selected.then(async rows => {
+            if (!deleted) { await db.delete(issueComments).where(eq(issueComments.id, boundaryId)); deleted = true; }
+            return rows;
+          }).then(resolve, reject);
+        };
+        const value = Reflect.get(target, key, target);
+        return typeof value === "function" ? (...args: unknown[]) => {
+          const result = Reflect.apply(value, target, args);
+          return result === target ? proxy : result;
+        } : value;
+      } });
+      return proxy;
+    };
+    const racingDb = new Proxy(db, { get(target, key, receiver) {
+      if (key !== "select") return Reflect.get(target, key, receiver);
+      return (...args: unknown[]) => {
+        const fields = args[0] as Record<string, unknown> | undefined;
+        const builder = Reflect.apply(target.select, target, args);
+        const from = builder.from.bind(builder);
+        builder.from = (table: unknown) => {
+          const statement = from(table);
+          return table === issueComments && fields?.id === issueComments.id ? pauseAfterSelect(statement) : statement;
+        };
+        return builder;
+      };
+    } });
+    expect(await getExecutionBlocker(racingDb, f.company, f.parent)).toMatchObject({ recoveryActionId: f.recovery.id });
+    expect(deleted).toBe(true);
   });
   async function dispatchFixture(f: Awaited<ReturnType<typeof conversationDelivery>>) {
     const cwd = mkdtempSync(join(tmpdir(), "fleet-boundary-provider-")); const marker = join(cwd, "provider.txt");
