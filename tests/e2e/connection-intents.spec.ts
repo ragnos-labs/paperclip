@@ -160,23 +160,39 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+type InitialAssignmentRun = {
+  id: string; status: string;
+  contextSnapshot?: { issueId?: unknown; wakeReason?: unknown; wakeSource?: unknown } | null;
+};
+
+function selectInitialAssignment(runs: InitialAssignmentRun[], issueId: string, pinnedId: string | null) {
+  const matches = runs.filter(run => run.contextSnapshot?.issueId === issueId
+    && run.contextSnapshot.wakeReason === "issue_assigned"
+    && run.contextSnapshot.wakeSource === "assignment");
+  if (matches.length !== 1 || pinnedId !== null && matches[0].id !== pinnedId) return null;
+  return matches[0];
+}
+
 async function waitForAgentRun(
   request: APIRequestContext,
   companyId: string,
   agentId: string,
+  issueId: string,
 ) {
-  let terminalRun: { id: string; status: string } | null = null;
+  let terminalRun: InitialAssignmentRun | null = null;
+  let initialRunId: string | null = null;
   await expect
     .poll(
       async () => {
-        const runs = await json<Array<{ id: string; status: string }>>(
+        const runs = await json<InitialAssignmentRun[]>(
           await request.get(
             `/api/companies/${companyId}/heartbeat-runs?agentId=${agentId}&limit=10`,
           ),
         );
-        terminalRun =
-          runs.find((run) => !["queued", "running"].includes(run.status)) ??
-          null;
+        // A secondary status-only retry may be cancelled by a real human hold.
+        // Assert the unique causal assignment, never any successful run.
+        terminalRun = selectInitialAssignment(runs, issueId, initialRunId);
+        initialRunId ??= terminalRun?.id ?? null;
         return terminalRun?.status ?? null;
       },
       { timeout: 45_000 },
@@ -296,7 +312,7 @@ test("store setup and task connection intent share one fake provider through con
     // Assigning an in-progress task is the production wake path. Waiting for
     // that run avoids creating a second artificial request from an explicit
     // heartbeat invocation.
-    const firstRun = await waitForAgentRun(request, seed.companyId, scout.id);
+    const firstRun = await waitForAgentRun(request, seed.companyId, scout.id, issue.id);
 
     const taskUrl = `/${seed.prefix}/issues/${issue.identifier}`;
     await page.goto(taskUrl);
