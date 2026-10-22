@@ -256,7 +256,12 @@ export async function externalEvidenceWakeGate(db: Db, input: {
     && (state.data.currentStageType === "review" || state.data.currentStageType === "approval")
     && state.data.currentStageId !== null
     && state.data.currentParticipant?.type === "agent"
-    && parent.assigneeAgentId === state.data.currentParticipant.agentId
+    // Review recovery may retain the source worker as assignee while the
+    // explicit review participant owns its decision/escalation. Preserve that
+    // installed contract; the newly supported agent approval still requires
+    // the participant to be the current task assignee.
+    && (state.data.currentStageType === "review"
+      || parent.assigneeAgentId === state.data.currentParticipant.agentId)
     && (!input.agentId || state.data.currentParticipant.agentId === input.agentId);
   const classification = classifyEvidenceHold(admittedReview || nativeAgentStage ? { ...parent, executionState: null } : parent);
   const nativeConversationHandoff = await nativeConversationExecutionHandoff(db, parent, input);

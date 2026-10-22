@@ -585,6 +585,24 @@ describe("external evidence event admission and durable native wake intent", () 
     expect((await externalEvidenceWakeGate(db, { companyId: f.company, issueId: f.parent })).held).toBe(true);
   });
 
+  it("preserves review recovery analysis when the source worker differs from its explicit reviewer", async () => {
+    const f = await fixture(), reviewer = randomUUID();
+    await db.insert(agents).values({ id: reviewer, companyId: f.company, name: "Reviewer", role: "qa", adapterType: "process", status: "paused" });
+    await db.update(issues).set({ status: "in_review", unblockDescriptor: null, executionState: {
+      status: "pending", currentStageId: randomUUID(), currentStageIndex: 0, currentStageType: "review",
+      currentParticipant: { type: "agent", agentId: reviewer, userId: null },
+      returnAssignee: { type: "agent", agentId: f.chief, userId: null }, completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null,
+    } }).where(eq(issues.id, f.parent));
+    const input = { companyId: f.company, issueId: f.parent };
+    expect((await externalEvidenceWakeGate(db, input)).held).toBe(true); // Separate owner evidence still blocks.
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, f.source));
+    expect((await externalEvidenceWakeGate(db, input)).held).toBe(false); // Analysis may reach the native recovery owner.
+    expect((await externalEvidenceWakeGate(db, { ...input, agentId: reviewer })).held).toBe(false);
+    expect((await externalEvidenceWakeGate(db, { ...input, agentId: f.chief })).held).toBe(true);
+    const [parent] = await db.select().from(issues).where(eq(issues.id, f.parent));
+    expect(parent.assigneeAgentId).toBe(f.chief); // Gate grants no checkout/reassignment or provider admission.
+  });
+
   it("admits only the current explicit agent approval stage while retaining unresolved owner evidence", async () => {
     const f = await fixture();
     const executionState = { status: "pending" as const, currentStageId: randomUUID(), currentStageIndex: 0,
