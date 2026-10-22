@@ -180,7 +180,7 @@ export async function externalEvidenceWakeGate(db: Db, input: {
     // Unknown board holds remain here, and queued dispatch never opts out.
     input.deferNativeExecutionHolds ? not(or(
       executionBlockerPredicate(), conversationRecoveryActionPredicate(),
-    )!) : undefined))).limit(1);
+    )!) : undefined)).limit(1);
   const [interaction] = await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
     eq(issueThreadInteractions.companyId, input.companyId), eq(issueThreadInteractions.issueId, parent.id),
     eq(issueThreadInteractions.status, "pending"), eq(issueThreadInteractions.effectiveResolverPolicy, "human_only"))).limit(1);
