@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import { createDb, companies, agents, issues, companyMemberships, issueComments, issueCreateIdempotencyKeys,
   agentWakeupRequests, heartbeatRuns, issueRecoveryActions, issueRelations, issueThreadInteractions, issueApprovals, approvals, environmentLeases, authUsers, type Db } from "@paperclipai/db";
-import { prepareConversationTurn } from "./agent-conversations.js";
+import { deliverConversationComments, prepareConversationTurn } from "./agent-conversations.js";
 import { getExecutionBlocker } from "./execution-blocker.js";
 import { issueService } from "./issues.js";
 import { instanceSettingsService } from "./instance-settings.js";
@@ -70,6 +70,53 @@ describe("external evidence event admission and durable native wake intent", () 
     const input = { companyId: f.company, issueId: f.parent, agentId: f.chief, runId, receiptId };
     return { ...f, commentId, runId, receiptId, recovery, run, input };
   }
+  it.each(["ordinary", "reset"] as const)("native producer persists matching immediate %s delivery and starts once", async kind => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, f.source));
+    const [parent] = await db.update(issues).set({ status: "in_review", unblockDescriptor: null,
+      conversationAgentId: f.chief, conversationUserId: f.user, conversationState: "active" })
+      .where(eq(issues.id, f.parent)).returning();
+    const commentId = randomUUID();
+    await db.insert(issueComments).values({ id: commentId, companyId: f.company, issueId: f.parent,
+      authorType: "user", authorUserId: f.user, clientRequestId: randomUUID(),
+      body: kind === "reset" ? "/new" : "Genuine first turn" });
+    const cwd = mkdtempSync(join(tmpdir(), "fleet-producer-provider-")), marker = join(cwd, "provider.txt");
+    await db.update(agents).set({ status: "idle", adapterType: "process", adapterConfig: {
+      command: process.execPath, cwd,
+      args: ["-e", `require('node:fs').appendFileSync(${JSON.stringify(marker)}, process.env.PAPERCLIP_RUN_ID+'\\n')`],
+    }, runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: true } } }).where(eq(agents.id, f.chief));
+    const service = heartbeatService(db);
+    try {
+      // Use the real public native producer and admission, not seeded receipts.
+      await deliverConversationComments(db, parent, service.wakeup);
+      const receipts = await db.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, f.company), eq(agentWakeupRequests.idempotencyKey, `conversation-comment:${commentId}`)));
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0].payload?._paperclipWakeContext).toMatchObject({
+        issueId: f.parent, commentId, wakeCommentId: commentId, wakeCommentIds: [commentId], source: "issue.comment" });
+      let run: typeof heartbeatRuns.$inferSelect | undefined;
+      for (let i = 0; i < 200; i++) {
+        [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, receipts[0].runId!));
+        if (run.status !== "queued" && run.status !== "running") break;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      expect(run?.status).toBe("succeeded");
+      if (kind === "ordinary") expect(readFileSync(marker, "utf8")).toBe(run!.id + "\n");
+      else expect(existsSync(marker)).toBe(false); // Native /new is a reset, not a provider turn.
+      await deliverConversationComments(db, parent, service.wakeup);
+      if (kind === "ordinary") expect(readFileSync(marker, "utf8")).toBe(run!.id + "\n");
+      else expect(existsSync(marker)).toBe(false);
+      await heartbeatService(createDb(native.connectionString)).resumeQueuedRuns();
+      if (kind === "ordinary") expect(readFileSync(marker, "utf8")).toBe(run!.id + "\n");
+      else expect(existsSync(marker)).toBe(false);
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.company))).toHaveLength(1);
+      expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, f.company),
+        eq(agentWakeupRequests.idempotencyKey, `conversation-comment:${commentId}`)))).toHaveLength(1);
+      const [current] = await db.select().from(issues).where(eq(issues.id, f.parent));
+      expect(current.conversationSessionGeneration).toBe(kind === "reset" ? 1 : 0);
+      expect(current.conversationBoundaryCommentId).toBe(kind === "reset" ? commentId : null);
+    } finally { await db.update(agents).set({ status: "paused" }).where(eq(agents.id, f.chief)); }
+  }, 15000);
   async function committedBoundary(f: Awaited<ReturnType<typeof conversationDelivery>>, store: Db = db) {
     const id = randomUUID();
     await store.insert(issueComments).values({ id, companyId: f.company, issueId: f.parent,
