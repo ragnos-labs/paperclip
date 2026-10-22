@@ -1109,8 +1109,13 @@ export function recoveryService(
     return Boolean(run || deferredWake || nativeRecovery);
   }
 
-  async function hasPendingWakeInteraction(companyId: string, issueId: string) {
-    if ((await externalEvidenceWakeGate(db, { companyId, issueId })).held) return true;
+  async function hasPendingWakeInteraction(
+    companyId: string,
+    issueId: string,
+    options?: { deferNativeExecutionHolds?: boolean },
+  ) {
+    if ((await externalEvidenceWakeGate(db, { companyId, issueId,
+      deferNativeExecutionHolds: options?.deferNativeExecutionHolds === true })).held) return true;
     if (await hasPendingHumanConfirmation(db, companyId, issueId)) return true;
     return db
       .select({ id: issueThreadInteractions.id })
@@ -5392,7 +5397,10 @@ export function recoveryService(
           continue;
         }
 
-        if (await hasPendingWakeInteraction(companyId, candidate.id)) {
+        // This only selects a dependency-wake candidate. The injected native
+        // enqueueWakeup still owns admission and durable execution-wait receipts.
+        // Other recovery lanes retain the default all-holds protection.
+        if (await hasPendingWakeInteraction(companyId, candidate.id, { deferNativeExecutionHolds: true })) {
           result.interactionSkipped += 1;
           continue;
         }

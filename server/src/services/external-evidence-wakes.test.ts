@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import { createDb, companies, agents, issues, companyMemberships, issueComments, issueCreateIdempotencyKeys,
-  agentWakeupRequests, issueRecoveryActions, type Db } from "@paperclipai/db";
+  agentWakeupRequests, issueRecoveryActions, issueRelations, type Db } from "@paperclipai/db";
 import { issueService } from "./issues.js";
 import { externalEvidenceEventSchema } from "@paperclipai/shared";
 import { startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
@@ -79,6 +79,35 @@ describe("external evidence event admission and durable native wake intent", () 
         // Fresh evidence cannot override the installed execution hold at queued dispatch.
         expect((await externalEvidenceWakeGate(db, { ...input, intentId: intent!.id })).held).toBe(true);
       }
+    },
+  );
+  it.each(["external", "human", "unknown", "cancelled_request"] as const)(
+    "dependency backstop preserves a coexisting %s hold without enqueueing work", async (hold) => {
+      const f = await fixture(), blocker = randomUUID();
+      await db.insert(issues).values({ id: blocker, companyId: f.company,
+        title: "Synthetic completed production dependency", status: "done" });
+      await db.insert(issueRelations).values({ companyId: f.company, type: "blocks",
+        issueId: blocker, relatedIssueId: f.parent });
+      await db.insert(issueRecoveryActions).values({ companyId: f.company, sourceIssueId: f.parent,
+        kind: "active_run_watchdog", ownerType: "board", returnOwnerAgentId: f.chief,
+        cause: "legacy_execution_requires_reconciliation", status: "active", evidence: {},
+        fingerprint: randomUUID(), nextAction: "Reconcile this exact stopped execution." });
+      if (hold === "human") await db.update(issues).set({ unblockDescriptor: { owner: "board", action: "Human approval remains required" } }).where(eq(issues.id, f.parent));
+      if (hold === "unknown") await db.update(issues).set({ unblockDescriptor: { kind: "unknown_synthetic_hold", action: "Preserve unsupported hold" } }).where(eq(issues.id, f.parent));
+      if (hold === "cancelled_request") {
+        await db.update(issues).set({ unblockDescriptor: null }).where(eq(issues.id, f.parent));
+        await db.update(issues).set({ status: "cancelled" }).where(eq(issues.id, f.source));
+      }
+      let enqueueAttempts = 0;
+      const { recoveryService } = await import("./recovery/service.js");
+      const result = await recoveryService(db, { enqueueWakeup: async () => {
+        enqueueAttempts += 1; return null;
+      } }).reconcileResolvedDependencyWakeBackstop({ companyId: f.company });
+      expect(result).toMatchObject({ checked: 1, interactionSkipped: 1, healed: 0 });
+      expect(enqueueAttempts).toBe(0);
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.company))).toHaveLength(0);
+      const [parent] = await db.select().from(issues).where(eq(issues.id, f.parent));
+      expect(parent.status).toBe("blocked");
     },
   );
   it("holds telemetry and production completion, while fresh exact evidence admits reconsideration without health certification", async () => {
