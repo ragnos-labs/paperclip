@@ -152,6 +152,10 @@ describe("external evidence event admission and durable native wake intent", () 
     expect(await externalEvidenceWakeGate(db, f.input)).toMatchObject({ held: true, reason: "superseded_conversation_delivery" });
     await db.update(issueComments).set({ createdAt: sql`'2026-10-22T13:00:00.001000Z'::timestamptz` }).where(eq(issueComments.id, id));
     expect((await externalEvidenceWakeGate(db, f.input)).held).toBe(false);
+    // The native action ordering needs the same precision: a newer hold in
+    // this same millisecond must still block the genuinely fresh comment.
+    await db.update(issueRecoveryActions).set({ createdAt: sql`'2026-10-22T13:00:00.000950Z'::timestamptz` }).where(eq(issueRecoveryActions.id, f.recovery.id));
+    expect((await externalEvidenceWakeGate(db, f.input)).held).toBe(true);
   });
   async function dispatchFixture(f: Awaited<ReturnType<typeof conversationDelivery>>) {
     const cwd = mkdtempSync(join(tmpdir(), "fleet-boundary-provider-")); const marker = join(cwd, "provider.txt");
