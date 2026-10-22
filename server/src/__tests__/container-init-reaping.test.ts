@@ -43,6 +43,39 @@ function entrypoints(source: string): string[] {
   return [...source.matchAll(/^ENTRYPOINT .*$/gm)].map((m) => m[0]);
 }
 
+/** Read one exact, unique named stage; ambiguous or unknown targets fail. */
+function stageSource(source: string, stageName: string): string {
+  const froms = [...source.matchAll(/^[ \t]*FROM[ \t]+[^\r\n]+$/gim)];
+  const matching = froms.map((match, index) => {
+    const tokens = match[0].trim().split(/\s+/);
+    const alias = tokens.at(-2)?.toUpperCase() === "AS" ? tokens.at(-1) : undefined;
+    return { index, alias };
+  }).filter(({ alias }) => alias?.toLowerCase() === stageName.toLowerCase());
+  expect(matching, `Dockerfile must declare one unique '${stageName}' stage`).toHaveLength(1);
+  const selected = matching[0]!;
+  expect(selected.alias, "runtime stage aliases use their declared literal names").toBe(stageName);
+  return source.slice(froms[selected.index].index ?? 0, froms[selected.index + 1]?.index ?? source.length);
+}
+
+function finalStageUser(stage: string): string | null {
+  const users = [...stage.matchAll(/^[ \t]*USER[ \t]+([^\r\n]+)$/gim)];
+  return users.at(-1)?.[1].trim() ?? null;
+}
+
+function expectRuntimeInitContract(source: string): void {
+  const expected = [
+    ["validation", 'ENTRYPOINT ["/usr/bin/tini", "--"]'],
+    ["production", 'ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]'],
+  ] as const;
+  // Account for every explicit entrypoint; unknown stages cannot evade this guard.
+  expect(entrypoints(source)).toEqual(expected.map(([, line]) => line));
+  for (const [stageName, line] of expected) {
+    expect(entrypoints(stageSource(source, stageName))).toEqual([line]);
+  }
+  expect(finalStageUser(stageSource(source, "validation")),
+    "validation's final effective USER must be the intended unprivileged node").toBe("node");
+}
+
 /**
  * The packages every `apt-get install` line in the named stage asks for. Read
  * from the install lines themselves rather than by searching the whole file, so
@@ -50,10 +83,7 @@ function entrypoints(source: string): string[] {
  * installing it.
  */
 function aptPackages(source: string, stageName: string): string[] {
-  const froms = [...source.matchAll(/^FROM .*$/gm)];
-  const startIdx = froms.findIndex((m) => new RegExp(`\\bAS ${stageName}\\b`).test(m[0]));
-  expect(startIdx, `Dockerfile must declare a '${stageName}' stage`).toBeGreaterThanOrEqual(0);
-  const stage = source.slice(froms[startIdx].index ?? 0, froms[startIdx + 1]?.index ?? source.length);
+  const stage = stageSource(source, stageName);
   return [...stage.matchAll(/apt-get install[^\n]*/g)].flatMap((m) =>
     m[0]
       .replace(/apt-get install/, "")
@@ -71,26 +101,60 @@ describe("server image init", () => {
   });
 
   it("makes tini PID 1 ahead of the entrypoint", () => {
-    const lines = entrypoints(dockerfile);
-    expect(lines.length, "Dockerfile must declare an ENTRYPOINT").toBeGreaterThan(0);
-    for (const line of lines) {
-      expect(
-        line,
-        "node must not inherit PID 1: wrap the entrypoint in tini so adopted orphans are reaped",
-      ).toBe('ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]');
-    }
+    expectRuntimeInitContract(dockerfile);
   });
 
   it("keeps the entrypoint in the exec chain so UID remapping and gosu still run", () => {
     // tini must wrap docker-entrypoint.sh, not replace it -- the entrypoint is
     // what remaps the node UID/GID and repairs volume ownership before exec'ing.
-    for (const line of entrypoints(dockerfile)) {
+    for (const line of entrypoints(stageSource(dockerfile, "production"))) {
       expect(line).toContain("docker-entrypoint.sh");
     }
   });
 
   it("keeps the agent-runtime image's init, which the server image mirrors", () => {
     expect(entrypoints(agentRuntimeBase)).toContain('ENTRYPOINT ["/usr/bin/tini", "--"]');
+  });
+});
+
+describe("server image init guard negative controls", () => {
+  const productionFrom = "FROM base AS production";
+  const productionEntry = 'ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]';
+  const validationEntry = 'ENTRYPOINT ["/usr/bin/tini", "--"]';
+
+  it("rejects the production-check decoy even when global entrypoints look valid", () => {
+    const drift = dockerfile.replace(productionEntry, "# production entrypoint removed")
+      .replace(productionFrom, `FROM base AS production-check\n${productionEntry}\n\n${productionFrom}`);
+    expect(drift).not.toBe(dockerfile);
+    expect(entrypoints(drift)).toEqual(entrypoints(dockerfile));
+    expect(() => expectRuntimeInitContract(drift)).toThrow();
+  });
+
+  it.each([
+    ["missing exact production alias", () => dockerfile.replace(productionFrom, "FROM base AS production-retired")],
+    ["duplicate exact production alias", () => `${dockerfile}\nFROM base AS production\n`],
+    ["duplicate case-variant production alias", () => `${dockerfile}\nFROM base AS Production\n`],
+    ["validation node followed by root", () => dockerfile.replace(`USER node\n${validationEntry}`, `USER node\nUSER root\n${validationEntry}`)],
+    ["missing validation USER", () => dockerfile.replace(`USER node\n${validationEntry}`, validationEntry)],
+    ["production without its remapping wrapper", () => dockerfile.replace(productionEntry, validationEntry)],
+    ["bare node in validation", () => dockerfile.replace(validationEntry, 'ENTRYPOINT ["node"]')],
+    ["unaccounted explicit entrypoint", () => `${dockerfile}\nFROM base AS extra-runtime\n${validationEntry}\n`],
+  ] as const)("rejects %s", (_name, mutate) => {
+    const drift = mutate();
+    expect(drift).not.toBe(dockerfile);
+    expect(() => expectRuntimeInitContract(drift)).toThrow();
+  });
+
+  it("accepts an intermediate root followed by final node in validation", () => {
+    const source = dockerfile.replace(`USER node\n${validationEntry}`, `USER root\nUSER node\n${validationEntry}`);
+    expect(source).not.toBe(dockerfile);
+    expect(() => expectRuntimeInitContract(source)).not.toThrow();
+  });
+
+  it("reads an exact stage alias after a platform option", () => {
+    const source = dockerfile.replace(productionFrom, "FROM --platform=linux/amd64 base AS production");
+    expect(source).not.toBe(dockerfile);
+    expect(() => expectRuntimeInitContract(source)).not.toThrow();
   });
 });
 

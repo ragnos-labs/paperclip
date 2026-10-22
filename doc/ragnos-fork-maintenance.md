@@ -97,12 +97,25 @@ work. A manual or comment wake does not resolve a confirmation.
 The inherited dependency chains are repaired with supported parent updates and
 scoped overrides: Cursor SDK 1.0.36 removes old Undici/Busboy; Svix 1.99.1 removes
 UUID 10; Mermaid uses KaTeX 0.18.2; Typography uses selector-parser 7.1.6;
-body-parser uses 2.3.0; MCP SDK uses its patched 1.31.0 release. Drizzle's unused
+body-parser uses 2.3.0; MCP SDK uses 1.32.0. The compatible library refresh selects
+follow-redirects 1.16.1, Vite 8.2.4, Runner's separate Vite 6.4.4 line, and aligned
+Vitest/mocker 4.1.12. The narrow Vitest-to-Vite override keeps its broad supported
+range on the selected 8.2.4 release instead of introducing another minor line.
+Drizzle's unused
 legacy loader dependency is removed through pnpm's scoped removal override.
 The Hono 4 override selects 4.13.11 for the upstream
 [static-path middleware correction](https://github.com/honojs/hono/security/advisories/GHSA-5r4p-p66f-jhc7).
 Keep the dependency audit baseline unchanged.
 The actual TypeScript configuration and migration generation paths are tested.
+
+SDK version selection alone does not enable its optional HTTP protections.
+The existing MCP constructors and authentication/resource settings are unchanged.
+For exposed HTTP MCP servers, the validation advisory requires an appropriately
+chosen `maxToolInputElements` and request-body bound; SDK bearer authentication
+requires both `expectedResource` and the verifier's `AuthInfo.resource` contract
+to enforce audience. Assess actual entrypoints and obtain the separate scoped
+configuration approval before changing either. A clean package audit does not
+prove these application-level mitigations or deployed reachability.
 
 The production audit reports no critical, high or moderate findings. Its one low
 `cli@0.3.1` report has no dependency paths and refers to the unrelated npm `cli`
@@ -247,3 +260,49 @@ SHA. Download `paperclip-private-image` with `gh run download` and transfer it
 to private host custody. Import the OCI archive into Docker's containerd image
 store, selecting `linux/amd64`, and verify the selected digest before replacement.
 This exports the published bytes; it creates no release and rebuilds no image.
+
+
+## External evidence and production wakes
+
+Task-scoped dependency, parent-completion, recovery, admission and queued-dispatch
+checks preserve distinct native external-evidence, human, review and unknown
+holds. Completed production children and recovered aggregate telemetry do not
+clear them. A native review assignment still needs its existing exact assignment
+proof; this change does not grant an agent review or owner-request privileges.
+
+An authenticated human comment on an exact `companyos-owner-request:` child, or
+an authenticated terminal disposition of that request, records a reconsideration
+intent in the existing native status outbox in the same source transaction.
+`POST /api/issues/:id/evidence-events` is a board/member-only explicit path for
+those events and exact replacement linkage. It accepts the shared strict schema:
+`eventId`, one of `evidence_supplied`, `resolved`, `cancelled`, `replaced`, an exact
+`commentId` only for supplied evidence, and an exact `replacementIssueId` only for
+replacement. Current source company, parent/creator, native creation provenance,
+active membership and comment authorship/revision are checked. A title is never
+identity or authority. Changed caller correlation IDs do not create a second
+intent for the same native source event/revision.
+
+Cancellation alone stays unresolved. An explicit replacement preserves the old
+request and holds until the exact replacement chain reaches Done; conflicting,
+cyclic or unknown lineage stays held. Neither Done nor any event sets health
+verification or human acceptance. The payload explicitly reports
+`evidenceVerified: false`; the owner must review actual operational evidence.
+
+Parent-row transactions serialize event claims and actual dispatch admission.
+The existing wake table retains intents, dispatch receipts, run linkage and
+uncertainty across restart. A native policy hold retains the intent. An admission
+retry uses durable least-recently-updated ordering with stable tie breakers;
+unexpired claims do not occupy a retry batch. Held or unknown intents rotate
+without cancellation, so an older held company cannot permanently monopolize
+the bounded global sweep. Original requested times and eligibility are retained.
+An admission
+attempt may advance only after a durable terminal receipt and independent run
+lookup prove that no run was admitted; old attempt actors are fenced. An admitted
+run, deferred/unknown effect, provider failure or completed run is never replayed
+through that zero-admission path. This is durable intent/admission idempotency,
+not exactly-once model execution or a power-loss certification.
+
+Source tests use disposable native PostgreSQL and mocked adapters. Installation,
+activation, a real incident result and human acceptance remain separate. The
+paired CompanyOS/Hermes helper snapshots and the later finite runtime assignment
+must be selected independently; no queue migration or blanket closure is implied.

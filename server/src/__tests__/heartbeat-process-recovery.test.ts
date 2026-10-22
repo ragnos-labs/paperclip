@@ -1,3 +1,4 @@
+import { queueExternalEvidenceSignal, EXTERNAL_EVIDENCE_WAKE } from "../services/external-evidence-wakes.js";
 import * as controllerLeases from "../services/legacy-controller-lease.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { randomUUID } from "node:crypto";
@@ -54,6 +55,8 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  companyMemberships,
+  issueCreateIdempotencyKeys,
   issueApprovals,
   issueDocuments,
   issuePlanDecompositions,
@@ -636,6 +639,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       await db.delete(documents);
       await db.delete(companySecretBindings);
       await db.delete(companySecrets);
+      await db.delete(companyMemberships);
       try {
         await db.delete(companies);
         break;
@@ -15055,4 +15059,243 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .where(eq(heartbeatRuns.id, runId));
     expect(runs).toHaveLength(1);
   });
+  async function seedExternalEvidenceFixture() {
+    const f = await seedAssignedTodoNoRunFixture({ agentStatus: "idle" });
+    const sourceId = randomUUID(), commentId = randomUUID();
+    await db.update(issues).set({ status: "blocked", unblockDescriptor: { owner: { agentId: f.agentId },
+      action: "Await external owner evidence" }, blockedTransitionAt: new Date(Date.now() - 10000) }).where(eq(issues.id, f.issueId));
+    await db.insert(companyMemberships).values({ companyId: f.companyId, principalType: "user", principalId: "responsible-user", status: "active" });
+    await db.insert(issues).values({ id: sourceId, companyId: f.companyId, parentId: f.issueId, createdByAgentId: f.agentId,
+      title: "Synthetic owner evidence request", status: "blocked", unblockDescriptor: { owner: "board", action: "Supply current evidence" } });
+    await db.insert(issueCreateIdempotencyKeys).values({ companyId: f.companyId, issueId: sourceId, idempotencyKey: `companyos-owner-request:${sourceId}` });
+    await db.insert(issueComments).values({ id: commentId, companyId: f.companyId, issueId: sourceId,
+      authorUserId: "responsible-user", body: "New synthetic evidence; health is not automatically verified." });
+    return { ...f, sourceId, commentId };
+  }
+
+  it("external evidence hold suppresses ordinary completion wakes without invoking an adapter", async () => {
+    const f = await seedExternalEvidenceFixture(), heartbeat = heartbeatService(db);
+    const result = await heartbeat.wakeup(f.agentId, { source: "automation", reason: "issue_blockers_resolved",
+      requestedByActorType: "system", payload: { issueId: f.issueId } });
+    expect(result).toBeNull(); expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.companyId))).toHaveLength(0);
+  });
+
+  it("external evidence changed after queuing cancels dispatch before adapter invocation", async () => {
+    const f = await seedQueuedIssueRunFixture();
+    await db.update(issues).set({ status: "blocked", unblockDescriptor: { owner: { agentId: f.agentId },
+      action: "Evidence is still missing" } }).where(eq(issues.id, f.issueId));
+    const heartbeat = heartbeatService(db); await heartbeat.resumeQueuedRuns();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId));
+    expect(run.status).toBe("cancelled"); expect(run.errorCode).toBe("issue_external_evidence_hold");
+  });
+
+  it("external evidence native outbox admits one mocked run across concurrent dispatch and restart replay", async () => {
+    const f = await seedExternalEvidenceFixture();
+    const intent = await db.transaction(tx => queueExternalEvidenceSignal(tx as unknown as ReturnType<typeof createDb>, {
+      companyId: f.companyId, sourceIssueId: f.sourceId, actorUserId: "responsible-user", kind: "evidence_supplied",
+      commentId: f.commentId, eventId: f.commentId }));
+    expect(intent).not.toBeNull();
+    const heartbeat = heartbeatService(db);
+    await Promise.all([heartbeat.dispatchPendingNativeStatusWakeups({ companyId: f.companyId }),
+      heartbeat.dispatchPendingNativeStatusWakeups({ companyId: f.companyId })]);
+    await heartbeat.drainActiveRunExecutions();
+    await heartbeatService(db).dispatchPendingNativeStatusWakeups({ companyId: f.companyId });
+    const receipts = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.requestedByActorId,
+      `native-status-wake-dispatch:${intent!.id}`));
+    expect(receipts).toHaveLength(1);
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.companyId));
+    expect(runs).toHaveLength(1); expect(receipts[0].runId).toBe(runs[0].id);
+    expect(runs[0].contextSnapshot?.wakeReason).toBe(EXTERNAL_EVIDENCE_WAKE);
+    expect(runs[0].contextSnapshot?.evidenceVerified).toBe(false);
+  });
+
+  it("external evidence remains pending while the native agent is paused, then admits one mocked run", async () => {
+    const f = await seedExternalEvidenceFixture();
+    const intent = await db.transaction(tx => queueExternalEvidenceSignal(tx as unknown as ReturnType<typeof createDb>, {
+      companyId: f.companyId, sourceIssueId: f.sourceId, actorUserId: "responsible-user", kind: "evidence_supplied",
+      commentId: f.commentId, eventId: f.commentId }));
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, f.agentId));
+    const heartbeat = heartbeatService(db);
+    await heartbeat.dispatchPendingNativeStatusWakeups({ companyId: f.companyId });
+    const [held] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, intent!.id));
+    expect(held.status).toBe("queued"); expect(mockAdapterExecute).not.toHaveBeenCalled();
+    await db.update(agents).set({ status: "idle" }).where(eq(agents.id, f.agentId));
+    await heartbeat.dispatchPendingNativeStatusWakeups({ companyId: f.companyId });
+    await heartbeat.drainActiveRunExecutions();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.companyId));
+    expect(runs).toHaveLength(1);
+    // Simulate process loss after the actual dispatch transaction committed but before intent linkage.
+    await db.update(agentWakeupRequests).set({ status: "queued", runId: null, claimedAt: null }).where(eq(agentWakeupRequests.id, intent!.id));
+    await heartbeatService(db).dispatchPendingNativeStatusWakeups({ companyId: f.companyId });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.companyId))).toHaveLength(1);
+    const [reconciled] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, intent!.id));
+    expect(reconciled.runId).toBe(runs[0].id);
+  });
+
+  it("external evidence retains a deferred receipt across restart and retries only a confirmed zero-admission failure", async () => {
+    const f = await seedExternalEvidenceFixture();
+    const intent = await db.transaction(tx => queueExternalEvidenceSignal(tx as unknown as ReturnType<typeof createDb>, {
+      companyId: f.companyId, sourceIssueId: f.sourceId, actorUserId: "responsible-user", kind: "evidence_supplied",
+      commentId: f.commentId, eventId: f.commentId }));
+    const receiptId = randomUUID();
+    await db.insert(agentWakeupRequests).values({ id: receiptId, companyId: f.companyId, agentId: f.agentId,
+      source: "automation", reason: EXTERNAL_EVIDENCE_WAKE, status: "deferred_issue_execution",
+      requestedByActorType: "system", requestedByActorId: `native-status-wake-dispatch:${intent!.id}`,
+      payload: { issueId: f.issueId } });
+    await heartbeatService(db).dispatchPendingNativeStatusWakeups({ companyId: f.companyId });
+    const [pending] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, intent!.id));
+    expect(pending.status).toBe("queued"); expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.companyId))).toHaveLength(0);
+    await db.update(agentWakeupRequests).set({ status: "failed", finishedAt: new Date() }).where(eq(agentWakeupRequests.id, receiptId));
+    const heartbeat = heartbeatService(db);
+    await heartbeat.dispatchPendingNativeStatusWakeups({ companyId: f.companyId }); // Fenced attempt advance only.
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    await heartbeat.dispatchPendingNativeStatusWakeups({ companyId: f.companyId });
+    await heartbeat.drainActiveRunExecutions();
+    await heartbeatService(db).dispatchPendingNativeStatusWakeups({ companyId: f.companyId });
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.companyId));
+    expect(runs).toHaveLength(1);
+    const receipts = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId));
+    expect(receipts.some(r => r.id === receiptId && r.status === "failed" && !r.runId)).toBe(true);
+    expect(receipts.some(r => r.requestedByActorId === `native-status-wake-dispatch:${intent!.id}:1` && r.runId === runs[0].id)).toBe(true);
+  });
+
+  it.each([{ heldCount: 100, limit: undefined }, { heldCount: 1, limit: 1 }])(
+    "external evidence fair retries pass $heldCount older held intents across companies and restart (limit $limit)",
+    async ({ heldCount, limit }) => {
+      const held = await seedExternalEvidenceFixture();
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, held.agentId));
+      const heldIds: string[] = [];
+      for (let n = 0; n < heldCount; n++) {
+        const commentId = randomUUID();
+        await db.insert(issueComments).values({ id: commentId, companyId: held.companyId, issueId: held.sourceId,
+          authorUserId: "responsible-user", body: `Distinct retained source evidence ${n}` });
+        const intent = await db.transaction(tx => queueExternalEvidenceSignal(tx as unknown as ReturnType<typeof createDb>, {
+          companyId: held.companyId, sourceIssueId: held.sourceId, actorUserId: "responsible-user",
+          kind: "evidence_supplied", commentId, eventId: commentId }));
+        heldIds.push(intent!.id);
+      }
+      const ready = await seedExternalEvidenceFixture();
+      const readyIntent = await db.transaction(tx => queueExternalEvidenceSignal(tx as unknown as ReturnType<typeof createDb>, {
+        companyId: ready.companyId, sourceIssueId: ready.sourceId, actorUserId: "responsible-user",
+        kind: "evidence_supplied", commentId: ready.commentId, eventId: ready.commentId }));
+      const input = limit === undefined ? {} : { limit };
+      const first = await heartbeatService(db).dispatchPendingNativeStatusWakeups(input);
+      expect(first.scanned).toBe(heldCount); expect(first.deferred).toBe(heldCount);
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      // A new service instance must retain fairness; there is no process-local cursor.
+      const restarted = heartbeatService(db);
+      await restarted.dispatchPendingNativeStatusWakeups(input);
+      await restarted.drainActiveRunExecutions();
+      let readyRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, ready.companyId));
+      expect(readyRuns).toHaveLength(1);
+      const heldIntents = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, held.companyId));
+      expect(heldIntents.filter(r => heldIds.includes(r.id))).toHaveLength(heldCount);
+      expect(heldIntents.every(r => r.status === "queued" && !r.runId)).toBe(true);
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, held.companyId))).toHaveLength(0);
+      if (heldCount === 1) {
+        await db.update(agents).set({ status: "idle" }).where(eq(agents.id, held.agentId));
+        await heartbeatService(db).dispatchPendingNativeStatusWakeups(input);
+        await restarted.drainActiveRunExecutions();
+        expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, held.companyId))).toHaveLength(1);
+      }
+      await heartbeatService(db).dispatchPendingNativeStatusWakeups(input);
+      readyRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, ready.companyId));
+      expect(readyRuns).toHaveLength(1);
+      if (heldCount === 1)
+        expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, held.companyId))).toHaveLength(1);
+      const [linked] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, readyIntent!.id));
+      expect(linked.runId).toBe(readyRuns[0].id);
+    }, 45000);
+
+  it.each(["unexpired_claim", "unknown_attempt"])("external evidence fair retries preserve %s without starving later work", async kind => {
+    const held = await seedExternalEvidenceFixture();
+    const old = await db.transaction(tx => queueExternalEvidenceSignal(tx as unknown as ReturnType<typeof createDb>, {
+      companyId: held.companyId, sourceIssueId: held.sourceId, actorUserId: "responsible-user",
+      kind: "evidence_supplied", commentId: held.commentId, eventId: held.commentId }));
+    if (kind === "unexpired_claim") {
+      await db.update(agentWakeupRequests).set({ status: "claimed", claimedAt: new Date() }).where(eq(agentWakeupRequests.id, old!.id));
+    } else {
+      await db.update(agentWakeupRequests).set({ payload: { ...old!.payload, evidenceDispatchAttempt: -1 } }).where(eq(agentWakeupRequests.id, old!.id));
+    }
+    const ready = await seedExternalEvidenceFixture();
+    await db.transaction(tx => queueExternalEvidenceSignal(tx as unknown as ReturnType<typeof createDb>, {
+      companyId: ready.companyId, sourceIssueId: ready.sourceId, actorUserId: "responsible-user",
+      kind: "evidence_supplied", commentId: ready.commentId, eventId: ready.commentId }));
+    const heartbeat = heartbeatService(db);
+    await heartbeat.dispatchPendingNativeStatusWakeups({ limit: 1 });
+    await heartbeatService(db).dispatchPendingNativeStatusWakeups({ limit: 1 });
+    await heartbeat.drainActiveRunExecutions();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, ready.companyId))).toHaveLength(1);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, held.companyId))).toHaveLength(0);
+    const [retained] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, old!.id));
+    expect(retained.status).toBe(kind === "unexpired_claim" ? "claimed" : "queued");
+    expect(retained.runId).toBeNull();
+    if (kind === "unknown_attempt") expect(retained.payload?.evidenceDispatchAttempt).toBe(-1);
+  });
+
+  it.each([
+    { refusal: "attempt_cap", count: 1, limit: 1 },
+    { refusal: "independent_run", count: 1, limit: 1 },
+    { refusal: "attempt_cap", count: 100, limit: undefined },
+  ])("external evidence refused retry $refusal rotates $count intents across concurrent sweeps and restart", async ({ refusal, count, limit }) => {
+    const held = await seedExternalEvidenceFixture();
+    const retained: { id: string; receipt: typeof agentWakeupRequests.$inferSelect; proof?: typeof heartbeatRuns.$inferSelect;
+      payload: Record<string, unknown>; requestedAt: Date; key: string | null }[] = [];
+    for (let n = 0; n < count; n++) {
+      const commentId = randomUUID();
+      await db.insert(issueComments).values({ id: commentId, companyId: held.companyId, issueId: held.sourceId,
+        authorUserId: "responsible-user", body: `Retained refused evidence ${n}` });
+      const intent = await db.transaction(tx => queueExternalEvidenceSignal(tx as unknown as ReturnType<typeof createDb>, {
+        companyId: held.companyId, sourceIssueId: held.sourceId, actorUserId: "responsible-user",
+        kind: "evidence_supplied", commentId, eventId: commentId }));
+      const attempt = refusal === "attempt_cap" ? 1024 : 0;
+      const payload = { ...intent!.payload, evidenceDispatchAttempt: attempt };
+      await db.update(agentWakeupRequests).set({ payload, updatedAt: new Date(0) }).where(eq(agentWakeupRequests.id, intent!.id));
+      const [receipt] = await db.insert(agentWakeupRequests).values({ companyId: held.companyId, agentId: held.agentId,
+        source: "automation", reason: EXTERNAL_EVIDENCE_WAKE, status: "failed", requestedByActorType: "system",
+        requestedByActorId: `native-status-wake-dispatch:${intent!.id}${attempt ? `:${attempt}` : ""}`,
+        payload: { issueId: held.issueId }, finishedAt: new Date() }).returning();
+      let proof: typeof heartbeatRuns.$inferSelect | undefined;
+      if (refusal === "independent_run") {
+        [proof] = await db.insert(heartbeatRuns).values({ companyId: held.companyId, agentId: held.agentId, status: "succeeded",
+          invocationSource: "automation", responsibleUserId: "responsible-user", wakeupRequestId: receipt.id,
+          finishedAt: new Date(), contextSnapshot: { issueId: held.issueId } }).returning();
+      }
+      retained.push({ id: intent!.id, receipt, proof, payload, requestedAt: intent!.requestedAt, key: intent!.idempotencyKey });
+    }
+    const ready = await seedExternalEvidenceFixture();
+    await db.transaction(tx => queueExternalEvidenceSignal(tx as unknown as ReturnType<typeof createDb>, {
+      companyId: ready.companyId, sourceIssueId: ready.sourceId, actorUserId: "responsible-user",
+      kind: "evidence_supplied", commentId: ready.commentId, eventId: ready.commentId }));
+    const input = limit === undefined ? {} : { limit };
+    await Promise.all([heartbeatService(db).dispatchPendingNativeStatusWakeups(input),
+      heartbeatService(db).dispatchPendingNativeStatusWakeups(input)]);
+    const restarted = heartbeatService(db);
+    await restarted.dispatchPendingNativeStatusWakeups(input);
+    await restarted.drainActiveRunExecutions();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, ready.companyId))).toHaveLength(1);
+    await heartbeatService(db).dispatchPendingNativeStatusWakeups(input);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, ready.companyId))).toHaveLength(1);
+    const heldRows = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, held.companyId));
+    expect(heldRows).toHaveLength(count * 2); // Original intents and exact terminal receipts only.
+    for (const original of retained) {
+      const intent = heldRows.find(r => r.id === original.id)!;
+      expect(intent.status).toBe("queued"); expect(intent.runId).toBeNull();
+      expect(intent.updatedAt.getTime()).toBeGreaterThan(0);
+      expect(intent.payload).toEqual(original.payload); expect(intent.idempotencyKey).toBe(original.key);
+      expect(intent.requestedAt).toEqual(original.requestedAt);
+      const receipt = heldRows.find(r => r.id === original.receipt.id)!;
+      expect(receipt).toEqual(original.receipt);
+      if (refusal === "independent_run") {
+        const proofs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, receipt.id));
+        expect(proofs).toEqual([original.proof]);
+      }
+    }
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, held.companyId)))
+      .toHaveLength(refusal === "independent_run" ? count : 0);
+  }, 45000);
+
 });

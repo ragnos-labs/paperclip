@@ -1949,6 +1949,7 @@ export {
   createAcceptedPlanDecompositionSchema,
   resolveCreateIssueStatusDefault,
   createIssueLabelSchema,
+  externalEvidenceEventSchema,
   upsertIssueWatchdogSchema,
   issueBlockedInboxAttentionSchema,
   issueBlockedInboxIssueRefSchema,

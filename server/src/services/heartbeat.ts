@@ -1,3 +1,4 @@
+import { externalEvidenceWakeGate, existingNativeIntentDispatch, nativeEvidenceDispatchActor, retryUnadmittedEvidenceIntent, EXTERNAL_EVIDENCE_WAKE } from "./external-evidence-wakes.js";
 import { publicChatTaskUrl } from "./chat-task-url.js";
 import { toolActionDeliveryService } from "./tool-action-delivery.js";
 import { githubBotConnectionIdsForRun } from "./chat-github-tools.js";
@@ -17220,6 +17221,17 @@ export function heartbeatService(
         });
         return null;
       }
+      const admittedNativeReview = context.wakeReason === "native_completion_review" && await getNativeReviewAssignment(db, {
+        companyId: run.companyId, issueId, agentId: run.agentId, contextSnapshot: context });
+      const evidenceGate = await externalEvidenceWakeGate(db, { companyId: run.companyId, issueId,
+        nativeReview: Boolean(admittedNativeReview), agentId: run.agentId, receiptId: run.wakeupRequestId, runId: run.id,
+        intentId: context.wakeReason === EXTERNAL_EVIDENCE_WAKE
+          ? readNonEmptyString(context.nativeStatusWakeIntentId) : null });
+      if (evidenceGate.held) {
+        await cancelQueuedRunForIssueGate(run, issueId, { reason: "External evidence or protected native hold remains",
+          errorCode: "issue_external_evidence_hold", timeoutSource: "external_evidence_gate" });
+        return null;
+      }
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
         run.companyId,
         issueId,
@@ -17384,6 +17396,17 @@ export function heartbeatService(
               ) {
                 return { kind: "stale" as const, run: null };
               }
+
+              // Recheck under the issue/wake/run locks: a newer committed
+              // conversation reset or hold can race the earlier read-only gate.
+              // Reject before claiming a wake, lease or provider authority.
+              const lockedEvidenceGate = await externalEvidenceWakeGate(tx as unknown as Db, {
+                companyId: lockedRun.companyId, issueId, agentId: lockedRun.agentId,
+                receiptId: wake.id, runId: lockedRun.id,
+                intentId: context.wakeReason === EXTERNAL_EVIDENCE_WAKE
+                  ? readNonEmptyString(context.nativeStatusWakeIntentId) : null,
+              });
+              if (lockedEvidenceGate.held) return { kind: "evidence_held" as const, run: null };
 
               if (lockedRun.invocationSource === "automation") {
                 const admission = readChatControlRecoveryAdmission(lockedRun);
@@ -17610,6 +17633,13 @@ export function heartbeatService(
               throw error;
             })
         : null;
+    if (queuedCommentClaim?.kind === "evidence_held") {
+      await cancelQueuedRunForIssueGate(run, issueId!, {
+        reason: "Queued conversation delivery is superseded or protected by a current hold",
+        errorCode: "issue_external_evidence_hold", timeoutSource: "external_evidence_gate",
+      });
+      return null;
+    }
     if (queuedCommentClaim?.kind === "cancelled") {
       await appendRunEvent(queuedCommentClaim.run, {
         eventType: "lifecycle",
@@ -26938,8 +26968,22 @@ export function heartbeatService(
     }
 
     if (issueId) {
+      const evidenceIntentId = reason === EXTERNAL_EVIDENCE_WAKE && opts.requestedByActorType === "system"
+        && opts.requestedByActorId?.startsWith(`native-status-wake-dispatch:${enrichedContextSnapshot.nativeStatusWakeIntentId}`)
+        ? readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId) : null;
+      if (reason === EXTERNAL_EVIDENCE_WAKE && !evidenceIntentId) {
+        await writeSkippedRequest("issue.invalid_external_evidence_event", {}, { issueId });
+        return null;
+      }
       if (await hasPendingHumanConfirmation(db, agent.companyId, issueId)) {
         await writeSkippedRequest("issue.pending_human_confirmation", {}, { issueId });
+        return null;
+      }
+      const admittedNativeReview = reason === "native_completion_review" && await getNativeReviewAssignment(db, {
+        companyId: agent.companyId, issueId, agentId, contextSnapshot: enrichedContextSnapshot });
+      if ((await externalEvidenceWakeGate(db, { companyId: agent.companyId, issueId, agentId, deferNativeExecutionHolds: true,
+        nativeReview: Boolean(admittedNativeReview), dispatchActorId: evidenceIntentId ? opts.requestedByActorId : undefined, intentId: evidenceIntentId })).held) {
+        await writeSkippedRequest("issue.external_evidence_hold", {}, { issueId });
         return null;
       }
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
@@ -27012,6 +27056,20 @@ export function heartbeatService(
             sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
           );
 
+          const nativeIntentId = opts.requestedByActorType === "system"
+            ? readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId) : null;
+          const priorNativeDispatch = reason === EXTERNAL_EVIDENCE_WAKE ? await existingNativeIntentDispatch(tx as unknown as Db, {
+            companyId: agent.companyId, issueId, agentId, intentId: nativeIntentId,
+            actorId: opts.requestedByActorId ?? null }) : null;
+          if (priorNativeDispatch) return { kind: "durable" as const, receipt: priorNativeDispatch };
+          const admittedNativeReview = reason === "native_completion_review" && await getNativeReviewAssignment(tx as unknown as Db, {
+            companyId: agent.companyId, issueId, agentId, contextSnapshot: enrichedContextSnapshot });
+          const evidenceGate = await externalEvidenceWakeGate(tx as unknown as Db, {
+            companyId: agent.companyId, issueId, agentId, nativeReview: Boolean(admittedNativeReview),
+            deferNativeExecutionHolds: true,
+            dispatchActorId: reason === EXTERNAL_EVIDENCE_WAKE ? opts.requestedByActorId : undefined,
+            intentId: reason === EXTERNAL_EVIDENCE_WAKE ? nativeIntentId : null });
+          if (evidenceGate.held) return { kind: "deferred" as const };
           if (executionWaitRequestId) {
             const [pending] = await tx.select().from(agentWakeupRequests).where(and(
               eq(agentWakeupRequests.id, executionWaitRequestId), eq(agentWakeupRequests.companyId, agent.companyId),
@@ -27063,7 +27121,9 @@ export function heartbeatService(
           let automaticParentRunId: string | null = null;
           if (
             source === "automation" &&
-            opts.requestedByActorType === "system"
+            opts.requestedByActorType === "system" &&
+            !(reason === EXTERNAL_EVIDENCE_WAKE && nativeIntentId &&
+              opts.requestedByActorId?.startsWith(`native-status-wake-dispatch:${nativeIntentId}`))
           ) {
             const nativeParent = await readChatControlNativeParent(
               tx as unknown as Db,
@@ -28646,11 +28706,21 @@ export function heartbeatService(
             : undefined,
           eq(agentWakeupRequests.requestedByActorType, "system"),
           eq(agentWakeupRequests.requestedByActorId, "native-status-committer"),
-          inArray(agentWakeupRequests.status, ["queued", "claimed"]),
+          or(
+            eq(agentWakeupRequests.status, "queued"),
+            and(eq(agentWakeupRequests.status, "claimed"), or(
+              isNull(agentWakeupRequests.claimedAt),
+              lte(agentWakeupRequests.claimedAt, new Date(now.getTime() - staleClaimMs)),
+            )),
+          ),
           isNull(agentWakeupRequests.runId),
         ),
       )
-      .orderBy(asc(agentWakeupRequests.requestedAt))
+      // updatedAt is the durable retry cursor: a held or uncertain attempt
+      // advances it without changing requestedAt, eligibility or its receipt.
+      // Restarted/global sweeps therefore rotate past held companies instead
+      // of repeatedly filling the bounded batch with their oldest events.
+      .orderBy(asc(agentWakeupRequests.updatedAt), asc(agentWakeupRequests.requestedAt), asc(agentWakeupRequests.id))
       .limit(Math.max(1, Math.min(input.limit ?? 100, 500)));
 
     let dispatched = 0;
@@ -28662,7 +28732,16 @@ export function heartbeatService(
     >();
 
     for (const candidate of candidates) {
-      const dispatchActorId = `native-status-wake-dispatch:${candidate.id}`;
+      const dispatchActorId = nativeEvidenceDispatchActor(candidate);
+      if (!dispatchActorId) {
+        // Unknown intent data stays held, but cannot monopolize a retry slot.
+        await db.update(agentWakeupRequests).set({ updatedAt: now }).where(and(
+          eq(agentWakeupRequests.id, candidate.id), isNull(agentWakeupRequests.runId),
+          inArray(agentWakeupRequests.status, ["queued", "claimed"]),
+        ));
+        deferred += 1;
+        continue;
+      }
       const existingDispatch = await db
         .select()
         .from(agentWakeupRequests)
@@ -28677,9 +28756,32 @@ export function heartbeatService(
         .limit(1)
         .then((rows) => rows[0] ?? null);
 
+      if (existingDispatch && candidate.reason === EXTERNAL_EVIDENCE_WAKE && !existingDispatch.runId
+        && ["skipped", "failed", "cancelled"].includes(existingDispatch.status)) {
+        if (!await retryUnadmittedEvidenceIntent(db, candidate.id, dispatchActorId)) {
+          // A cap or possible-admission proof forbids another effect, not fair
+          // inspection of later work. Rotate only the same still-pending intent;
+          // a concurrent payload/attempt change or run linkage wins this guard.
+          await db.update(agentWakeupRequests).set({
+            updatedAt: sql`greatest(${agentWakeupRequests.updatedAt}, clock_timestamp())`,
+          }).where(and(
+            eq(agentWakeupRequests.id, candidate.id), eq(agentWakeupRequests.companyId, candidate.companyId),
+            eq(agentWakeupRequests.agentId, candidate.agentId), eq(agentWakeupRequests.reason, EXTERNAL_EVIDENCE_WAKE),
+            eq(agentWakeupRequests.requestedByActorType, "system"),
+            eq(agentWakeupRequests.requestedByActorId, "native-status-committer"),
+            isNull(agentWakeupRequests.runId), inArray(agentWakeupRequests.status, ["queued", "claimed"]),
+            candidate.payload === null ? isNull(agentWakeupRequests.payload)
+              : sql`${agentWakeupRequests.payload} = ${JSON.stringify(candidate.payload)}::jsonb`,
+          ));
+        }
+        deferred += 1;
+        continue;
+      }
       if (existingDispatch) {
         const recoveredStatus = existingDispatch.runId
           ? "coalesced"
+          : candidate.reason === EXTERNAL_EVIDENCE_WAKE
+            ? "queued"
           : existingDispatch.status === "deferred_issue_execution"
             ? "coalesced"
             : existingDispatch.status;
@@ -28741,7 +28843,7 @@ export function heartbeatService(
         readNonEmptyString(payload.taskId) ??
         readNonEmptyString(wakeContext.issueId) ??
         null;
-      const scopeKey = issueId
+      const scopeKey = issueId && candidate.reason !== EXTERNAL_EVIDENCE_WAKE
         ? `${candidate.companyId}:${candidate.agentId}:${issueId}:${readNativeReviewAssignmentContext(wakeContext)?.nativeReviewInteractionId ?? ""}`
         : null;
       const priorDelivery = scopeKey
@@ -28807,6 +28909,33 @@ export function heartbeatService(
         }
       }
 
+      if (issueId && candidate.reason === EXTERNAL_EVIDENCE_WAKE) {
+        const targetAgent = await getAgent(candidate.agentId);
+        const invokable = targetAgent && await getAgentInvokability(targetAgent);
+        const blocker = await getExecutionBlocker(db, candidate.companyId, issueId);
+        const pause = await treeControlSvc.getActivePauseHoldGate(candidate.companyId, issueId);
+        if (!targetAgent || !invokable?.invokable || !parseHeartbeatPolicy(targetAgent).wakeOnDemand || blocker || pause) {
+          await db.update(agentWakeupRequests).set({ status: "queued", claimedAt: null,
+            error: "Current native agent or execution policy holds admission", updatedAt: new Date() }).where(eq(agentWakeupRequests.id, candidate.id));
+          deferred += 1;
+          continue;
+        }
+        const evidenceGate = await externalEvidenceWakeGate(db, { companyId: candidate.companyId, issueId,
+          agentId: candidate.agentId, intentId: candidate.id });
+        const readiness = await issuesSvc.getDependencyReadiness(issueId);
+        if (!readiness.isDependencyReady && readiness.blockerIssueIds.length > 0) {
+          await db.update(agentWakeupRequests).set({ status: "queued", claimedAt: null,
+            error: "Production dependencies remain unready", updatedAt: new Date() }).where(eq(agentWakeupRequests.id, candidate.id));
+          deferred += 1;
+          continue;
+        }
+        if (evidenceGate.held) {
+          await db.update(agentWakeupRequests).set({ status: evidenceGate.reason === "stale_or_invalid_evidence_event" ? "skipped" : "queued",
+            claimedAt: null, error: evidenceGate.reason, updatedAt: new Date() }).where(eq(agentWakeupRequests.id, candidate.id));
+          deferred += 1;
+          continue;
+        }
+      }
       try {
         const wakeRun = await enqueueWakeup(candidate.agentId, {
           source: candidate.source as WakeupOptions["source"],
@@ -28815,6 +28944,7 @@ export function heartbeatService(
           reason: candidate.reason,
           payload,
           idempotencyKey: candidate.idempotencyKey,
+          ...(candidate.reason === EXTERNAL_EVIDENCE_WAKE ? { allowRunCoalescing: false } : {}),
           requestedByActorType: "system",
           requestedByActorId: dispatchActorId,
           contextSnapshot: {
@@ -28843,14 +28973,17 @@ export function heartbeatService(
 
         // The committer intent is the durable outbox entry. When admission is
         // blocked, enqueueWakeup creates a separate deferred dispatch receipt;
-        // leave the original intent coalesced so the release drain cannot
-        // promote both rows (the original has no nativeStatusWakeIntentId
-        // provenance and would otherwise run once before the dispatch receipt).
+        // The original never enters deferred_issue_execution, so only the
+        // actual receipt can enter release promotion. Evidence intents stay
+        // queued until run admission is known, allowing a later sweep to
+        // observe promotion or confirmed zero-admission failure after restart.
         const deliveredStatus = delivered?.status ?? "queued";
         await db
           .update(agentWakeupRequests)
           .set({
-            status: wakeRun || deliveredStatus === "deferred_issue_execution"
+            status: candidate.reason === EXTERNAL_EVIDENCE_WAKE
+              ? wakeRun || delivered?.runId ? "coalesced" : "queued"
+              : wakeRun || deliveredStatus === "deferred_issue_execution"
               ? "coalesced"
               : deliveredStatus,
             runId: wakeRun?.id ?? delivered?.runId ?? null,
