@@ -67,7 +67,7 @@ describe("external evidence event admission and durable native wake intent", () 
         cause: "legacy_execution_requires_reconciliation", status: "active", evidence: {},
         fingerprint: randomUUID(), nextAction: "Reconcile this exact stopped execution." });
       if (hold === "human") await db.update(issues).set({ unblockDescriptor: { owner: "board", action: "Human approval remains required" } }).where(eq(issues.id, f.parent));
-      if (hold === "unknown") await db.update(issues).set({ unblockDescriptor: { kind: "unknown_synthetic_hold", action: "Preserve unsupported hold" } }).where(eq(issues.id, f.parent));
+      if (hold === "unknown") await db.update(issues).set({ unblockDescriptor: sql`${JSON.stringify({ kind: "unknown_synthetic_hold", action: "Preserve unsupported hold" })}::jsonb` }).where(eq(issues.id, f.parent));
       if (hold === "cancelled_request") {
         await db.update(issues).set({ unblockDescriptor: null }).where(eq(issues.id, f.parent));
         await db.update(issues).set({ status: "cancelled" }).where(eq(issues.id, f.source));
@@ -93,7 +93,7 @@ describe("external evidence event admission and durable native wake intent", () 
         cause: "legacy_execution_requires_reconciliation", status: "active", evidence: {},
         fingerprint: randomUUID(), nextAction: "Reconcile this exact stopped execution." });
       if (hold === "human") await db.update(issues).set({ unblockDescriptor: { owner: "board", action: "Human approval remains required" } }).where(eq(issues.id, f.parent));
-      if (hold === "unknown") await db.update(issues).set({ unblockDescriptor: { kind: "unknown_synthetic_hold", action: "Preserve unsupported hold" } }).where(eq(issues.id, f.parent));
+      if (hold === "unknown") await db.update(issues).set({ unblockDescriptor: sql`${JSON.stringify({ kind: "unknown_synthetic_hold", action: "Preserve unsupported hold" })}::jsonb` }).where(eq(issues.id, f.parent));
       if (hold === "cancelled_request") {
         await db.update(issues).set({ unblockDescriptor: null }).where(eq(issues.id, f.parent));
         await db.update(issues).set({ status: "cancelled" }).where(eq(issues.id, f.source));
