@@ -2,11 +2,11 @@
 import { createHash } from "node:crypto";
 import { and, eq, isNull, like, not, or, sql } from "drizzle-orm";
 import { agentWakeupRequests, companyMemberships, issueComments, issueCreateIdempotencyKeys,
-  issueRecoveryActions, issueThreadInteractions, issueApprovals, approvals, issues, type Db } from "@paperclipai/db";
+  issueRecoveryActions, issueThreadInteractions, issueApprovals, approvals, issues, heartbeatRuns, type Db } from "@paperclipai/db";
 import { conflict } from "../errors.js";
 import { issueExecutionStateSchema } from "@paperclipai/shared";
-import { executionBlockerPredicate } from "./execution-blocker.js";
-import { conversationRecoveryActionPredicate } from "./conversation-continuation.js";
+import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
+import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
 
 export const EXTERNAL_EVIDENCE_WAKE = "issue_external_evidence_changed";
 const PRODUCTION_ACTION = "Read retained child contributions when dependencies are ready; reconcile cancelled or failed children before continuing.";
@@ -151,6 +151,92 @@ async function resolvedReplacement(db: Db, companyId: string, parent: Issue, sou
   return resolvedReplacement(db, companyId, parent, [...targets][0], visited);
 }
 
+/** Hand only durable native user conversation deliveries back to their existing
+ * execution/reset contract. This does not admit an evidence signal or resolve a hold.
+ * Queue edits, process ownership, dependencies and issue locks remain enforced by
+ * claimQueuedRun after this read-only gate.
+ */
+async function nativeConversationExecutionHandoff(db: Db, parent: Issue, input: {
+  companyId: string; agentId?: string; intentId?: string | null;
+  receiptId?: string | null; runId?: string;
+}) {
+  if (input.intentId || !input.runId || !input.receiptId || !input.agentId
+    || parent.conversationAgentId !== input.agentId || !parent.conversationUserId) return "unproved" as const;
+  const [run] = await db.select().from(heartbeatRuns).where(and(
+    eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),
+    eq(heartbeatRuns.agentId, input.agentId), eq(heartbeatRuns.status, "queued"),
+    eq(heartbeatRuns.wakeupRequestId, input.receiptId)));
+  const [wake] = await db.select().from(agentWakeupRequests).where(and(
+    eq(agentWakeupRequests.id, input.receiptId), eq(agentWakeupRequests.companyId, input.companyId),
+    eq(agentWakeupRequests.agentId, input.agentId), eq(agentWakeupRequests.runId, input.runId),
+    eq(agentWakeupRequests.status, "queued")));
+  const context = object(run?.contextSnapshot);
+  const commentId = context?.wakeCommentId;
+  if (!run || !wake || run.invocationSource !== "on_demand"
+    || typeof commentId !== "string" || context?.commentId !== commentId
+    || context.issueId !== parent.id || context.source !== "issue.comment"
+    || wake.source !== "on_demand" || wake.triggerDetail !== "manual" || wake.reason !== "issue_commented"
+    || wake.requestedByActorType !== "user" || wake.requestedByActorId !== parent.conversationUserId
+    || wake.idempotencyKey !== `conversation-comment:${commentId}`
+    || wake.payload?.issueId !== parent.id || wake.payload?.commentId !== commentId) return "unproved" as const;
+  const [comment] = await db.select().from(issueComments).where(and(
+    eq(issueComments.id, commentId), eq(issueComments.companyId, input.companyId),
+    eq(issueComments.issueId, parent.id), isNull(issueComments.deletedAt)));
+  if (!comment || comment.authorType !== "user" || comment.authorUserId !== wake.requestedByActorId
+    || comment.authorAgentId || comment.createdByRunId || comment.derivedAuthorAgentId
+    || comment.derivedCreatedByRunId || comment.onBehalfOfUserId || !comment.body.trim()
+    || !await activeMember(db, input.companyId, comment.authorUserId)) return "unproved" as const;
+  // A missing generation is common before first claim; it does not authorize
+  // delivery before a committed /new. Fence BOTH ordinary comments and older
+  // reset commands by the same (createdAt, UUID) order as native queue delivery.
+  const boundaryId = parent.conversationBoundaryCommentId;
+  const [boundary] = boundaryId ? await db.select().from(issueComments).where(and(
+    eq(issueComments.id, boundaryId), eq(issueComments.companyId, input.companyId),
+    eq(issueComments.issueId, parent.id), isNull(issueComments.deletedAt))) : [];
+  if (boundaryId && (!boundary || boundary.body.trim() !== "/new"
+    || boundary.authorType !== "user" || boundary.authorUserId !== parent.conversationUserId || boundary.authorAgentId
+    || boundary.createdByRunId || boundary.derivedAuthorAgentId || boundary.derivedCreatedByRunId
+    || boundary.onBehalfOfUserId || boundary.conversationSessionGeneration !== parent.conversationSessionGeneration)
+    || !boundaryId && parent.conversationSessionGeneration !== 0)
+    return "superseded" as const; // Unknown committed boundary fails closed.
+  const generation = context.conversationSessionGeneration;
+  if (generation !== undefined && (typeof generation !== "number" || !Number.isSafeInteger(generation)
+    || generation !== parent.conversationSessionGeneration)) return "superseded" as const;
+  const ids = context.wakeCommentIds;
+  const wakeContext = object(wake.payload?._paperclipWakeContext);
+  const authoritativeIds = wakeContext?.wakeCommentIds;
+  // claimQueuedRun adopts the durable wake envelope, not the cached run list.
+  // Unsupported missing lists fail closed: every eligible exception therefore
+  // enters the existing locked queued-comment claim and its second gate check.
+  if (!Array.isArray(ids) || !ids.length || !ids.includes(comment.id)
+    || ids.some(id => typeof id !== "string" || !id) || new Set(ids).size !== ids.length
+    || !Array.isArray(authoritativeIds) || JSON.stringify(ids) !== JSON.stringify(authoritativeIds)
+    || wakeContext?.issueId !== parent.id || wakeContext.commentId !== comment.id
+    || wakeContext.wakeCommentId !== comment.id) return "superseded" as const;
+  for (const id of authoritativeIds) {
+    // Compare in PostgreSQL, preserving microsecond timestamp precision and
+    // native UUID ordering; JS Date truncation must not invert a boundary tie.
+    const [delivery] = await db.select({ row: issueComments, current: boundary
+      ? sql<boolean>`(${issueComments.createdAt}, ${issueComments.id}) >=
+          (select b.created_at, b.id from issue_comments b where b.id = ${boundary.id}::uuid
+            and b.company_id = ${input.companyId}::uuid and b.issue_id = ${parent.id}::uuid)`
+      : sql<boolean>`true` }).from(issueComments).where(and(
+        eq(issueComments.id, id), eq(issueComments.companyId, input.companyId), eq(issueComments.issueId, parent.id)));
+    const delivered = delivery?.row;
+    if (!delivered || !delivery.current || delivered.deletedAt || delivered.authorType !== "user"
+      || delivered.authorUserId !== parent.conversationUserId || delivered.authorAgentId || delivered.createdByRunId
+      || delivered.derivedAuthorAgentId || delivered.derivedCreatedByRunId || delivered.onBehalfOfUserId
+      || delivered.conversationSessionGeneration !== null
+        && delivered.conversationSessionGeneration !== parent.conversationSessionGeneration)
+      return "superseded" as const;
+  }
+  // Even /new must wait for the old process/lease authority to end. Only the
+  // existing native boundary rules may supersede recognized recovery history.
+  if (await getConversationOwnershipBlocker(db, input.companyId, parent.id)) return "unproved" as const;
+  return await getExecutionBlocker(db, input.companyId, parent.id,
+    { conversationResetCommentId: comment.id }) ? "unproved" as const : "native" as const;
+}
+
 /** Shared admission/queued-dispatch gate. Unknown holds fail closed; a signal never overrides human decisions. */
 export async function externalEvidenceWakeGate(db: Db, input: {
   companyId: string; issueId: string; agentId?: string; intentId?: string | null;
@@ -163,22 +249,28 @@ export async function externalEvidenceWakeGate(db: Db, input: {
   const state = issueExecutionStateSchema.safeParse(parent.executionState);
   const admittedReview = input.nativeReview === true && state.success && state.data.status === "pending"
     && state.data.currentParticipant?.type === "agent" && state.data.currentParticipant.agentId === input.agentId;
-  // The installed execution-review scheduler owns this typed native stage.
+  // The installed execution-policy scheduler owns typed native agent stages.
   // Do not turn its pending agent participant into an external evidence hold.
   // Descriptor, human interaction, approval and owner-request checks still apply.
-  const nativeAgentReview = parent.status === "in_review" && state.success && state.data.status === "pending"
-    && state.data.currentStageType === "review" && state.data.currentStageId !== null
+  const nativeAgentStage = parent.status === "in_review" && state.success && state.data.status === "pending"
+    && (state.data.currentStageType === "review" || state.data.currentStageType === "approval")
+    && state.data.currentStageId !== null
     && state.data.currentParticipant?.type === "agent"
+    && parent.assigneeAgentId === state.data.currentParticipant.agentId
     && (!input.agentId || state.data.currentParticipant.agentId === input.agentId);
-  const classification = classifyEvidenceHold(admittedReview || nativeAgentReview ? { ...parent, executionState: null } : parent);
+  const classification = classifyEvidenceHold(admittedReview || nativeAgentStage ? { ...parent, executionState: null } : parent);
+  const nativeConversationHandoff = await nativeConversationExecutionHandoff(db, parent, input);
+  if (nativeConversationHandoff === "superseded")
+    return { held: true, reason: "superseded_conversation_delivery" };
   const [recovery] = await db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
     eq(issueRecoveryActions.companyId, input.companyId), eq(issueRecoveryActions.sourceIssueId, parent.id),
     eq(issueRecoveryActions.status, "active"), eq(issueRecoveryActions.ownerType, "board"),
     // These exact installed predicates identify native-owned waits. Admission
     // still records/coalesces them under its issue lock; this gate must not
     // replace their recoveryActionId with a generic evidence-wait payload.
-    // Unknown board holds remain here, and queued dispatch never opts out.
-    input.deferNativeExecutionHolds ? not(or(
+    // A proven queued conversation delivery retains the native reset/boundary
+    // contract. Unknown board holds and all other queued deliveries stay here.
+    input.deferNativeExecutionHolds || nativeConversationHandoff === "native" ? not(or(
       executionBlockerPredicate(), conversationRecoveryActionPredicate(),
     )!) : undefined)).limit(1);
   const [interaction] = await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(

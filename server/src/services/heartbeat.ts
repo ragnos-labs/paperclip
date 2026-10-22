@@ -17397,6 +17397,17 @@ export function heartbeatService(
                 return { kind: "stale" as const, run: null };
               }
 
+              // Recheck under the issue/wake/run locks: a newer committed
+              // conversation reset or hold can race the earlier read-only gate.
+              // Reject before claiming a wake, lease or provider authority.
+              const lockedEvidenceGate = await externalEvidenceWakeGate(tx as unknown as Db, {
+                companyId: lockedRun.companyId, issueId, agentId: lockedRun.agentId,
+                receiptId: wake.id, runId: lockedRun.id,
+                intentId: context.wakeReason === EXTERNAL_EVIDENCE_WAKE
+                  ? readNonEmptyString(context.nativeStatusWakeIntentId) : null,
+              });
+              if (lockedEvidenceGate.held) return { kind: "evidence_held" as const, run: null };
+
               if (lockedRun.invocationSource === "automation") {
                 const admission = readChatControlRecoveryAdmission(lockedRun);
                 if (admission === "invalid")
@@ -17622,6 +17633,13 @@ export function heartbeatService(
               throw error;
             })
         : null;
+    if (queuedCommentClaim?.kind === "evidence_held") {
+      await cancelQueuedRunForIssueGate(run, issueId!, {
+        reason: "Queued conversation delivery is superseded or protected by a current hold",
+        errorCode: "issue_external_evidence_hold", timeoutSource: "external_evidence_gate",
+      });
+      return null;
+    }
     if (queuedCommentClaim?.kind === "cancelled") {
       await appendRunEvent(queuedCommentClaim.run, {
         eventType: "lifecycle",
