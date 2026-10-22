@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import { createDb, companies, agents, issues, companyMemberships, issueComments, issueCreateIdempotencyKeys,
-  agentWakeupRequests, type Db } from "@paperclipai/db";
+  agentWakeupRequests, issueRecoveryActions, type Db } from "@paperclipai/db";
 import { issueService } from "./issues.js";
 import { externalEvidenceEventSchema } from "@paperclipai/shared";
 import { startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
@@ -37,6 +37,50 @@ describe("external evidence event admission and durable native wake intent", () 
     return db.transaction(tx => queueExternalEvidenceSignal(tx as unknown as Db, { companyId: f.company, sourceIssueId: f.source,
       actorUserId: f.user, eventId: f.comment, kind: "evidence_supplied", commentId: f.comment, ...overrides }));
   }
+  it("delegates only recognized native execution waits while queued dispatch and unknown holds stay protected", async () => {
+    const f = await fixture(); const target = randomUUID();
+    await db.insert(issues).values({ id: target, companyId: f.company, title: "Synthetic execution-only target",
+      status: "blocked", assigneeAgentId: f.chief, unblockDescriptor: null });
+    await db.insert(issueRecoveryActions).values({ companyId: f.company, sourceIssueId: target,
+      kind: "active_run_watchdog", ownerType: "board", returnOwnerAgentId: f.chief,
+      cause: "legacy_execution_requires_reconciliation", status: "active", evidence: {},
+      fingerprint: randomUUID(), nextAction: "Reconcile this exact stopped execution." });
+    const input = { companyId: f.company, issueId: target, agentId: f.chief };
+    expect((await externalEvidenceWakeGate(db, input)).held).toBe(true);
+    expect((await externalEvidenceWakeGate(db, { ...input, deferNativeExecutionHolds: true })).held).toBe(false);
+    // Migration0084 permits only one active recovery per source. Give the
+    // unknown-hold control its own source rather than violating that index.
+    const unknownTarget = randomUUID();
+    await db.insert(issues).values({ id: unknownTarget, companyId: f.company, title: "Synthetic unknown-held target",
+      status: "blocked", assigneeAgentId: f.chief, unblockDescriptor: null });
+    await db.insert(issueRecoveryActions).values({ companyId: f.company, sourceIssueId: unknownTarget,
+      kind: "active_run_watchdog", ownerType: "board", returnOwnerAgentId: f.chief,
+      cause: "unknown_synthetic_recovery_hold", status: "active", evidence: {},
+      fingerprint: randomUUID(), nextAction: "Keep this unknown hold." });
+    expect((await externalEvidenceWakeGate(db, { ...input, issueId: unknownTarget, deferNativeExecutionHolds: true })).held).toBe(true);
+  });
+  it.each(["external", "human", "unknown", "cancelled_request"] as const)(
+    "does not delegate a coexisting %s hold to execution recovery", async (hold) => {
+      const f = await fixture();
+      await db.insert(issueRecoveryActions).values({ companyId: f.company, sourceIssueId: f.parent,
+        kind: "active_run_watchdog", ownerType: "board", returnOwnerAgentId: f.chief,
+        cause: "legacy_execution_requires_reconciliation", status: "active", evidence: {},
+        fingerprint: randomUUID(), nextAction: "Reconcile this exact stopped execution." });
+      if (hold === "human") await db.update(issues).set({ unblockDescriptor: { owner: "board", action: "Human approval remains required" } }).where(eq(issues.id, f.parent));
+      if (hold === "unknown") await db.update(issues).set({ unblockDescriptor: { kind: "unknown_synthetic_hold", action: "Preserve unsupported hold" } }).where(eq(issues.id, f.parent));
+      if (hold === "cancelled_request") {
+        await db.update(issues).set({ unblockDescriptor: null }).where(eq(issues.id, f.parent));
+        await db.update(issues).set({ status: "cancelled" }).where(eq(issues.id, f.source));
+      }
+      const input = { companyId: f.company, issueId: f.parent, agentId: f.chief };
+      expect((await externalEvidenceWakeGate(db, { ...input, deferNativeExecutionHolds: true })).held).toBe(true);
+      if (hold === "external") {
+        const intent = await queue(f); expect(intent).not.toBeNull();
+        // Fresh evidence cannot override the installed execution hold at queued dispatch.
+        expect((await externalEvidenceWakeGate(db, { ...input, intentId: intent!.id })).held).toBe(true);
+      }
+    },
+  );
   it("holds telemetry and production completion, while fresh exact evidence admits reconsideration without health certification", async () => {
     const f = await fixture();
     expect((await externalEvidenceWakeGate(db, { companyId: f.company, issueId: f.parent })).held).toBe(true);

@@ -17213,6 +17213,14 @@ export function heartbeatService(
       if (settlingOwner) return null;
     }
     if (issueId) {
+      if (await hasPendingHumanConfirmation(db, run.companyId, issueId)) {
+        await cancelQueuedRunForIssueGate(run, issueId, {
+          reason: "Cancelled because issue awaits human confirmation",
+          errorCode: "issue_pending_human_confirmation",
+          timeoutSource: "human_confirmation_gate",
+        });
+        return null;
+      }
       const admittedNativeReview = context.wakeReason === "native_completion_review" && await getNativeReviewAssignment(db, {
         companyId: run.companyId, issueId, agentId: run.agentId, contextSnapshot: context });
       const evidenceGate = await externalEvidenceWakeGate(db, { companyId: run.companyId, issueId,
@@ -17222,14 +17230,6 @@ export function heartbeatService(
       if (evidenceGate.held) {
         await cancelQueuedRunForIssueGate(run, issueId, { reason: "External evidence or protected native hold remains",
           errorCode: "issue_external_evidence_hold", timeoutSource: "external_evidence_gate" });
-        return null;
-      }
-      if (await hasPendingHumanConfirmation(db, run.companyId, issueId)) {
-        await cancelQueuedRunForIssueGate(run, issueId, {
-          reason: "Cancelled because issue awaits human confirmation",
-          errorCode: "issue_pending_human_confirmation",
-          timeoutSource: "human_confirmation_gate",
-        });
         return null;
       }
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
@@ -26957,15 +26957,15 @@ export function heartbeatService(
         await writeSkippedRequest("issue.invalid_external_evidence_event", {}, { issueId });
         return null;
       }
-      const admittedNativeReview = reason === "native_completion_review" && await getNativeReviewAssignment(db, {
-        companyId: agent.companyId, issueId, agentId, contextSnapshot: enrichedContextSnapshot });
-      if ((await externalEvidenceWakeGate(db, { companyId: agent.companyId, issueId, agentId,
-        nativeReview: Boolean(admittedNativeReview), dispatchActorId: evidenceIntentId ? opts.requestedByActorId : undefined, intentId: evidenceIntentId })).held) {
-        await writeSkippedRequest("issue.external_evidence_hold", {}, { issueId });
-        return null;
-      }
       if (await hasPendingHumanConfirmation(db, agent.companyId, issueId)) {
         await writeSkippedRequest("issue.pending_human_confirmation", {}, { issueId });
+        return null;
+      }
+      const admittedNativeReview = reason === "native_completion_review" && await getNativeReviewAssignment(db, {
+        companyId: agent.companyId, issueId, agentId, contextSnapshot: enrichedContextSnapshot });
+      if ((await externalEvidenceWakeGate(db, { companyId: agent.companyId, issueId, agentId, deferNativeExecutionHolds: true,
+        nativeReview: Boolean(admittedNativeReview), dispatchActorId: evidenceIntentId ? opts.requestedByActorId : undefined, intentId: evidenceIntentId })).held) {
+        await writeSkippedRequest("issue.external_evidence_hold", {}, { issueId });
         return null;
       }
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(
@@ -27048,6 +27048,7 @@ export function heartbeatService(
             companyId: agent.companyId, issueId, agentId, contextSnapshot: enrichedContextSnapshot });
           const evidenceGate = await externalEvidenceWakeGate(tx as unknown as Db, {
             companyId: agent.companyId, issueId, agentId, nativeReview: Boolean(admittedNativeReview),
+            deferNativeExecutionHolds: true,
             dispatchActorId: reason === EXTERNAL_EVIDENCE_WAKE ? opts.requestedByActorId : undefined,
             intentId: reason === EXTERNAL_EVIDENCE_WAKE ? nativeIntentId : null });
           if (evidenceGate.held) return { kind: "deferred" as const };

@@ -8991,6 +8991,7 @@ export function issueService(db: Db) {
 
       const externalHolds = await Promise.all(candidates.map(candidate => externalEvidenceWakeGate(db, {
         companyId: blockerIssue.companyId, issueId: candidate.id, agentId: candidate.assigneeAgentId ?? undefined,
+        deferNativeExecutionHolds: true,
       })));
       const wakeableCandidates = candidates.filter(
         (candidate, index) =>
@@ -9049,7 +9050,7 @@ export function issueService(db: Db) {
       }
 
       if ((await externalEvidenceWakeGate(db, { companyId: parent.companyId,
-        issueId: parent.id, agentId: parent.assigneeAgentId })).held) return null;
+        issueId: parent.id, agentId: parent.assigneeAgentId, deferNativeExecutionHolds: true })).held) return null;
 
       const children = await db
         .select({

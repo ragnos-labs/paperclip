@@ -1,10 +1,12 @@
 /** External evidence is a reconsideration signal, never production completion or health verification. */
 import { createHash } from "node:crypto";
-import { and, eq, isNull, like, sql } from "drizzle-orm";
+import { and, eq, isNull, like, not, or, sql } from "drizzle-orm";
 import { agentWakeupRequests, companyMemberships, issueComments, issueCreateIdempotencyKeys,
   issueRecoveryActions, issueThreadInteractions, issueApprovals, approvals, issues, type Db } from "@paperclipai/db";
 import { conflict } from "../errors.js";
 import { issueExecutionStateSchema } from "@paperclipai/shared";
+import { executionBlockerPredicate } from "./execution-blocker.js";
+import { conversationRecoveryActionPredicate } from "./conversation-continuation.js";
 
 export const EXTERNAL_EVIDENCE_WAKE = "issue_external_evidence_changed";
 const PRODUCTION_ACTION = "Read retained child contributions when dependencies are ready; reconcile cancelled or failed children before continuing.";
@@ -153,6 +155,8 @@ async function resolvedReplacement(db: Db, companyId: string, parent: Issue, sou
 export async function externalEvidenceWakeGate(db: Db, input: {
   companyId: string; issueId: string; agentId?: string; intentId?: string | null;
   receiptId?: string | null; runId?: string; nativeReview?: boolean; dispatchActorId?: string | null;
+  /** Only admission/candidate callers that retain the installed native execution gate. */
+  deferNativeExecutionHolds?: boolean;
 }): Promise<{ held: boolean; reason: string | null }> {
   const [parent] = await db.select().from(issues).where(and(eq(issues.id, input.issueId), eq(issues.companyId, input.companyId)));
   if (!parent) return { held: true, reason: "evidence_target_missing" };
@@ -169,7 +173,14 @@ export async function externalEvidenceWakeGate(db: Db, input: {
   const classification = classifyEvidenceHold(admittedReview || nativeAgentReview ? { ...parent, executionState: null } : parent);
   const [recovery] = await db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
     eq(issueRecoveryActions.companyId, input.companyId), eq(issueRecoveryActions.sourceIssueId, parent.id),
-    eq(issueRecoveryActions.status, "active"), eq(issueRecoveryActions.ownerType, "board"))).limit(1);
+    eq(issueRecoveryActions.status, "active"), eq(issueRecoveryActions.ownerType, "board"),
+    // These exact installed predicates identify native-owned waits. Admission
+    // still records/coalesces them under its issue lock; this gate must not
+    // replace their recoveryActionId with a generic evidence-wait payload.
+    // Unknown board holds remain here, and queued dispatch never opts out.
+    input.deferNativeExecutionHolds ? not(or(
+      executionBlockerPredicate(), conversationRecoveryActionPredicate(),
+    )!) : undefined))).limit(1);
   const [interaction] = await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
     eq(issueThreadInteractions.companyId, input.companyId), eq(issueThreadInteractions.issueId, parent.id),
     eq(issueThreadInteractions.status, "pending"), eq(issueThreadInteractions.effectiveResolverPolicy, "human_only"))).limit(1);
