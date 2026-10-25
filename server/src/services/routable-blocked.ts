@@ -32,6 +32,8 @@ export async function deliverAgentUnblockNotification(input: {
   }) => Promise<unknown>;
   markNotified: (notifiedAt: Date) => Promise<unknown>;
   now?: () => Date;
+  /** Agent that made the update. An agent never notifies itself about its own hold. */
+  actorAgentId?: string | null;
 }) {
   const { issue } = input;
   if (!isProspectiveBlockedTransition(issue) || !issue.unblockDescriptor || issue.blockedOwnerNotifiedAt) {
@@ -40,6 +42,10 @@ export async function deliverAgentUnblockNotification(input: {
 
   const owner = issue.unblockDescriptor.owner;
   if (owner === "board" || !("agentId" in owner)) return false;
+  // An agent may only name itself as unblock owner. Waking it for the hold it
+  // just declared re-activates it, and an agent that blocks again restarts the
+  // loop (a new blocked cycle gives a new idempotency key every time).
+  if (input.actorAgentId && owner.agentId === input.actorAgentId) return false;
 
   await input.wakeup(owner.agentId, {
     source: "automation",

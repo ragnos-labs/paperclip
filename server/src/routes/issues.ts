@@ -13755,6 +13755,7 @@ export function issueRoutes(
         let ownerNotifiedAt: Date | null = null;
         await deliverAgentUnblockNotification({
           issue: blockedIssue,
+          actorAgentId: actor.agentId,
           wakeup: heartbeat.wakeup,
           markNotified: async (blockedOwnerNotifiedAt) => {
             ownerNotifiedAt = blockedOwnerNotifiedAt;
@@ -14763,7 +14764,11 @@ export function issueRoutes(
         // The assignee agent putting its own issue back to blocked is a hold it
         // declared, not a blockers-resolved event. Each re-block stamps a new
         // blocked cycle (a new idempotency key), so waking it here would
-        // re-activate the same agent for every re-block.
+        // re-activate the same agent for every re-block. The same holds when the
+        // agent assigns a ready blocked issue to itself or edits blockedByIssueIds
+        // on its own blocked issue: it is running and already knows the state.
+        // A blocker that completes between validation and this update (a window
+        // of milliseconds) is still woken by the blocker-done paths.
         const assigneeAgentReblockedOwnIssue =
           actor.actorType === "agent" &&
           issue.assigneeAgentId != null &&
