@@ -102,6 +102,7 @@ import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   buildIssueBlockersResolvedWakeStateKey,
   findExistingIssueBlockersResolvedWakeForReadyState,
+  isReadyBlockedCycleSelfAuthored,
 } from "../issue-dependency-wakeups.js";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
@@ -5215,6 +5216,7 @@ export function recoveryService(
       checked: 0,
       healed: 0,
       existingWakeSkipped: 0,
+      selfAuthoredBlockSkipped: 0,
       livePathSkipped: 0,
       interactionSkipped: 0,
       pauseHoldSkipped: 0,
@@ -5379,6 +5381,22 @@ export function recoveryService(
           });
         if (existingWake) {
           result.existingWakeSkipped += 1;
+          continue;
+        }
+
+        // The assignee agent put the issue back to blocked after its blockers
+        // had already resolved. No blocker resolved since, so there is nothing
+        // to report; the new blocked cycle must not re-arm the wake.
+        if (
+          await isReadyBlockedCycleSelfAuthored(db, {
+            companyId,
+            dependentIssueId: candidate.id,
+            assigneeAgentId: agentId,
+            blockerIssueIds: readiness.blockerIssueIds,
+            blockedTransitionAt: candidate.blockedTransitionAt,
+          })
+        ) {
+          result.selfAuthoredBlockSkipped += 1;
           continue;
         }
 

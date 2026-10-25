@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -967,6 +967,285 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
 
     expect(result.healed).toBe(0);
     expect(result.existingWakeSkipped).toBe(1);
+  });
+
+  // Incident 2026-10-22: one blocked issue drew 261 runs. The agent re-blocked the
+  // issue after each wake, every re-block stamped a new blocked cycle, and the
+  // cycle-aware key let the backstop wake the same agent again.
+  describe("blocked cycle authored by the assignee agent", () => {
+    async function startBlockedCycle(
+      fixture: { companyId: string; agentId: string; blockedIssueId: string; blockerIssueId: string },
+      opts: {
+        cycleAt: Date;
+        blockerResolvedAt: Date;
+        authoredBy: "assignee_route" | "assignee_native_run" | "board_user" | "other_agent" | "none";
+        blockerCompletedAt?: Date | null;
+      },
+    ) {
+      const { companyId, agentId, blockedIssueId, blockerIssueId } = fixture;
+      await db
+        .update(issues)
+        .set({ blockedTransitionAt: opts.cycleAt, updatedAt: opts.cycleAt })
+        .where(eq(issues.id, blockedIssueId));
+      await db
+        .update(issues)
+        .set({
+          completedAt: opts.blockerCompletedAt === undefined ? opts.blockerResolvedAt : opts.blockerCompletedAt,
+          updatedAt: opts.blockerResolvedAt,
+        })
+        .where(eq(issues.id, blockerIssueId));
+      const createdAt = new Date(opts.cycleAt.getTime() + 40);
+      const changes = { status: { from: "in_progress", to: "blocked" } };
+      if (opts.authoredBy === "assignee_route") {
+        await db.insert(activityLog).values({
+          companyId,
+          actorType: "agent",
+          actorId: agentId,
+          agentId,
+          action: "issue.updated",
+          entityType: "issue",
+          entityId: blockedIssueId,
+          details: { status: "blocked", changes },
+          createdAt,
+        });
+      } else if (opts.authoredBy === "assignee_native_run") {
+        const [run] = await db
+          .insert(heartbeatRuns)
+          .values({ companyId, agentId, status: "succeeded", invocationSource: "automation" })
+          .returning({ id: heartbeatRuns.id });
+        await db.insert(activityLog).values({
+          companyId,
+          actorType: "system",
+          actorId: "native-status-committer",
+          action: "issue.updated",
+          entityType: "issue",
+          entityId: blockedIssueId,
+          runId: run!.id,
+          details: { source: "native_status_decision", fromStatus: "in_progress", toStatus: "blocked" },
+          createdAt,
+        });
+      } else if (opts.authoredBy === "other_agent") {
+        const [other] = await db
+          .insert(agents)
+          .values({
+            companyId,
+            name: "Other agent",
+            role: "engineer",
+            status: "idle",
+            adapterType: "test_adapter",
+            adapterConfig: {},
+            runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+            permissions: {},
+          })
+          .returning({ id: agents.id });
+        await db.insert(activityLog).values({
+          companyId,
+          actorType: "agent",
+          actorId: other!.id,
+          agentId: other!.id,
+          action: "issue.updated",
+          entityType: "issue",
+          entityId: blockedIssueId,
+          details: { status: "blocked", changes },
+          createdAt,
+        });
+      } else if (opts.authoredBy === "board_user") {
+        await db.insert(activityLog).values({
+          companyId,
+          actorType: "user",
+          actorId: "local-board",
+          action: "issue.updated",
+          entityType: "issue",
+          entityId: blockedIssueId,
+          details: { status: "blocked", changes },
+          createdAt,
+        });
+      }
+    }
+
+    async function cycleWakeCount(companyId: string, blockedIssueId: string) {
+      return db
+        .select({ id: agentWakeupRequests.id })
+        .from(agentWakeupRequests)
+        .where(
+          and(
+            eq(agentWakeupRequests.companyId, companyId),
+            eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+            sql`${agentWakeupRequests.payload} ->> 'issueId' = ${blockedIssueId}`,
+          ),
+        )
+        .then((rows) => rows.length);
+    }
+
+    async function logBlockersUpdated(
+      fixture: { companyId: string; agentId: string; blockedIssueId: string },
+      opts: { at: Date; by: "assignee" | "board_user" },
+    ) {
+      await db.insert(activityLog).values({
+        companyId: fixture.companyId,
+        actorType: opts.by === "assignee" ? "agent" : "user",
+        actorId: opts.by === "assignee" ? fixture.agentId : "local-board",
+        agentId: opts.by === "assignee" ? fixture.agentId : null,
+        action: "issue.blockers_updated",
+        entityType: "issue",
+        entityId: fixture.blockedIssueId,
+        details: { addedBlockedByIssueIds: [], removedBlockedByIssueIds: [randomUUID()] },
+        createdAt: opts.at,
+      });
+    }
+
+    it("does not wake the assignee again for each re-block of an already ready issue", async () => {
+      const fixture = await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      const resolvedAt = new Date("2026-10-22T09:00:00.000Z");
+      for (let cycle = 1; cycle <= 4; cycle += 1) {
+        await startBlockedCycle(fixture, {
+          cycleAt: new Date(`2026-10-22T10:0${cycle}:00.000Z`),
+          blockerResolvedAt: resolvedAt,
+          authoredBy: "assignee_route",
+        });
+        const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+        expect(result.healed).toBe(0);
+        expect(result.selfAuthoredBlockSkipped).toBe(1);
+      }
+      expect(await cycleWakeCount(fixture.companyId, fixture.blockedIssueId)).toBe(0);
+    });
+
+    it("does not wake the assignee when its own run committed the re-block natively", async () => {
+      const fixture = await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      await startBlockedCycle(fixture, {
+        cycleAt: new Date("2026-10-22T10:00:00.000Z"),
+        blockerResolvedAt: new Date("2026-10-22T09:00:00.000Z"),
+        authoredBy: "assignee_native_run",
+      });
+      const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+      expect(result.healed).toBe(0);
+      expect(result.selfAuthoredBlockSkipped).toBe(1);
+      expect(await cycleWakeCount(fixture.companyId, fixture.blockedIssueId)).toBe(0);
+    });
+
+    it("still wakes the assignee when a board user restored the ready blocked cycle", async () => {
+      const fixture = await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      await startBlockedCycle(fixture, {
+        cycleAt: new Date("2026-10-22T10:00:00.000Z"),
+        blockerResolvedAt: new Date("2026-10-22T09:00:00.000Z"),
+        authoredBy: "board_user",
+      });
+      const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+      expect(result.healed).toBe(1);
+      expect(result.selfAuthoredBlockSkipped).toBe(0);
+    });
+
+    it("still wakes the assignee when a blocker resolved after the agent blocked itself", async () => {
+      const fixture = await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      await startBlockedCycle(fixture, {
+        cycleAt: new Date("2026-10-22T10:00:00.000Z"),
+        blockerResolvedAt: new Date("2026-10-22T11:00:00.000Z"),
+        authoredBy: "assignee_route",
+      });
+      const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+      expect(result.healed).toBe(1);
+      expect(result.selfAuthoredBlockSkipped).toBe(0);
+    });
+
+    const earlier = new Date("2026-10-22T09:00:00.000Z");
+    const cycleAt = new Date("2026-10-22T10:00:00.000Z");
+
+    it("still wakes the assignee when a different agent blocked the issue", async () => {
+      const fixture = await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      await startBlockedCycle(fixture, { cycleAt, blockerResolvedAt: earlier, authoredBy: "other_agent" });
+      const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+      expect(result.healed).toBe(1);
+      expect(result.selfAuthoredBlockSkipped).toBe(0);
+    });
+
+    it("still wakes the assignee when a reopened blocker was completed again after the cycle began", async () => {
+      const fixture = await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      // A reopened blocker has no completion time until it is done again; its update time
+      // then stands in for the resolution time.
+      await startBlockedCycle(fixture, {
+        cycleAt,
+        blockerResolvedAt: new Date("2026-10-22T10:30:00.000Z"),
+        blockerCompletedAt: null,
+        authoredBy: "assignee_route",
+      });
+      const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+      expect(result.healed).toBe(1);
+      expect(result.selfAuthoredBlockSkipped).toBe(0);
+    });
+
+    it("still wakes the assignee when a board user removed an open blocker after the agent blocked itself", async () => {
+      const fixture = await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      await startBlockedCycle(fixture, { cycleAt, blockerResolvedAt: earlier, authoredBy: "assignee_route" });
+      await logBlockersUpdated(fixture, { at: new Date("2026-10-22T10:20:00.000Z"), by: "board_user" });
+      const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+      expect(result.healed).toBe(1);
+      expect(result.selfAuthoredBlockSkipped).toBe(0);
+    });
+
+    it("does not wake the assignee for its own blocker edge change after it blocked itself", async () => {
+      const fixture = await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      await startBlockedCycle(fixture, { cycleAt, blockerResolvedAt: earlier, authoredBy: "assignee_route" });
+      await logBlockersUpdated(fixture, { at: new Date("2026-10-22T10:20:00.000Z"), by: "assignee" });
+      const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+      expect(result.healed).toBe(0);
+      expect(result.selfAuthoredBlockSkipped).toBe(1);
+    });
+
+    it("still wakes the assignee when the blocker workspace finalized after the cycle began", async () => {
+      const fixture = await seedResolvedDependencyBackstopFixture({ workspaceState: "finalized" });
+      // The fixture's finalize operation starts now, which is after this cycle.
+      await startBlockedCycle(fixture, { cycleAt, blockerResolvedAt: earlier, authoredBy: "assignee_route" });
+      const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+      expect(result.healed).toBe(1);
+      expect(result.selfAuthoredBlockSkipped).toBe(0);
+    });
+
+    it("does not wake the assignee when the workspace finalized before the cycle began", async () => {
+      const fixture = await seedResolvedDependencyBackstopFixture({ workspaceState: "finalized" });
+      const futureCycleAt = new Date(Date.now() - 120_000);
+      await startBlockedCycle(fixture, {
+        cycleAt: futureCycleAt,
+        blockerResolvedAt: new Date(futureCycleAt.getTime() - 3_600_000),
+        authoredBy: "assignee_route",
+      });
+      await db
+        .update(workspaceOperations)
+        .set({ startedAt: new Date(futureCycleAt.getTime() - 60_000), finishedAt: new Date(futureCycleAt.getTime() - 50_000) })
+        .where(eq(workspaceOperations.companyId, fixture.companyId));
+      const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+      expect(result.healed).toBe(0);
+      expect(result.selfAuthoredBlockSkipped).toBe(1);
+    });
+
+    it("wakes as before when the blocked cycle has no recorded transition time", async () => {
+      const fixture = await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+      expect(result.healed).toBe(1);
+      expect(result.selfAuthoredBlockSkipped).toBe(0);
+      expect(await cycleWakeCount(fixture.companyId, fixture.blockedIssueId)).toBe(1);
+    });
+
+    it("waits one pass for the transition record of a just-started cycle, then wakes when it is missing", async () => {
+      const fixture = await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      const justNow = new Date(Date.now() - 1_000);
+      await startBlockedCycle(fixture, {
+        cycleAt: justNow,
+        blockerResolvedAt: new Date(justNow.getTime() - 3_600_000),
+        authoredBy: "none",
+      });
+      const recent = await heartbeatService(db).reconcileResolvedDependencyWakes();
+      expect(recent.healed).toBe(0);
+      expect(recent.selfAuthoredBlockSkipped).toBe(1);
+
+      const old = new Date(Date.now() - 600_000);
+      await startBlockedCycle(fixture, {
+        cycleAt: old,
+        blockerResolvedAt: new Date(old.getTime() - 3_600_000),
+        authoredBy: "none",
+      });
+      const settled = await heartbeatService(db).reconcileResolvedDependencyWakes();
+      expect(settled.healed).toBe(1);
+    });
   });
 
   it("counts null dependency wake returns as deferred instead of enqueue failures", async () => {
