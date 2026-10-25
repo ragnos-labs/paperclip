@@ -1,7 +1,7 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests } from "@paperclipai/db";
+import { activityLog, agentWakeupRequests, heartbeatRuns, issues } from "@paperclipai/db";
 
 export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
 
@@ -236,4 +236,79 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
     }),
   );
   return covering ?? null;
+}
+
+// The activity row for a blocked transition is written by the same request that
+// stamps `blockedTransitionAt`, so it is at or just after that stamp. A
+// transaction-scoped `now()` default can land a few milliseconds before the
+// application clock, so allow a small window and take the earliest match.
+const BLOCKED_CYCLE_ACTIVITY_CLOCK_SKEW_MS = 5_000;
+
+/**
+ * True when the dependent's current blocked cycle began with every blocker
+ * already resolved and the assignee agent itself (or its own run) put the issue
+ * back into `blocked`.
+ *
+ * That transition is not a blockers-resolved event: nothing resolved after the
+ * cycle began, and the agent that would be woken is the one that just declared
+ * the hold. Each such re-block stamps a new `blockedTransitionAt`, so the
+ * cycle-aware state key changes every time and, without this check, a wake for
+ * the new key re-activates the agent, which re-blocks again (incident
+ * 2026-10-22: 261 runs on one issue). A blocker that resolves after the cycle
+ * began, or a cycle begun by a board user or another agent, is not matched.
+ *
+ * Any missing evidence returns false so the existing wake behaviour applies.
+ */
+export async function isReadyBlockedCycleSelfAuthored(
+  db: Db,
+  input: {
+    companyId: string;
+    dependentIssueId: string;
+    assigneeAgentId: string;
+    blockerIssueIds: string[];
+    blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
+  },
+): Promise<boolean> {
+  const cycleStart = parseWakeCycleDate(input.blockedTransitionAt);
+  const blockerIssueIds = uniqueSortedBlockerIssueIds(input.blockerIssueIds);
+  if (!cycleStart || blockerIssueIds.length === 0) return false;
+
+  const blockers = await db
+    .select({ id: issues.id, resolvedAt: sql<Date | null>`coalesce(${issues.completedAt}, ${issues.updatedAt})` })
+    .from(issues)
+    .where(and(eq(issues.companyId, input.companyId), inArray(issues.id, blockerIssueIds)));
+  if (blockers.length !== blockerIssueIds.length) return false;
+  const resolvedAfterCycleStart = blockers.some((blocker) => {
+    const resolvedAt = blocker.resolvedAt == null ? null : new Date(blocker.resolvedAt);
+    return !resolvedAt || Number.isNaN(resolvedAt.getTime()) || resolvedAt.getTime() > cycleStart.getTime();
+  });
+  if (resolvedAfterCycleStart) return false;
+
+  const [transition] = await db
+    .select({ agentId: activityLog.agentId, runId: activityLog.runId })
+    .from(activityLog)
+    .where(
+      and(
+        eq(activityLog.companyId, input.companyId),
+        eq(activityLog.entityType, "issue"),
+        eq(activityLog.entityId, input.dependentIssueId),
+        eq(activityLog.action, "issue.updated"),
+        gte(activityLog.createdAt, new Date(cycleStart.getTime() - BLOCKED_CYCLE_ACTIVITY_CLOCK_SKEW_MS)),
+        // Route updates record `changes.status.to`; the native status committer
+        // records `toStatus`.
+        sql`(${activityLog.details} -> 'changes' -> 'status' ->> 'to' = 'blocked' OR ${activityLog.details} ->> 'toStatus' = 'blocked')`,
+      ),
+    )
+    .orderBy(asc(activityLog.createdAt))
+    .limit(1);
+  if (!transition) return false;
+  if (transition.agentId === input.assigneeAgentId) return true;
+  if (!transition.runId) return false;
+
+  const [run] = await db
+    .select({ agentId: heartbeatRuns.agentId })
+    .from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.id, transition.runId)))
+    .limit(1);
+  return run?.agentId === input.assigneeAgentId;
 }

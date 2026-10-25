@@ -14760,9 +14760,18 @@ export function issueRoutes(
           }
         }
 
+        // The assignee agent putting its own issue back to blocked is a hold it
+        // declared, not a blockers-resolved event. Each re-block stamps a new
+        // blocked cycle (a new idempotency key), so waking it here would
+        // re-activate the same agent for every re-block.
+        const assigneeAgentReblockedOwnIssue =
+          actor.actorType === "agent" &&
+          issue.assigneeAgentId != null &&
+          actor.agentId === issue.assigneeAgentId;
         const restoredBlockedReadyDependency =
           issue.status === "blocked" &&
           issue.assigneeAgentId &&
+          !assigneeAgentReblockedOwnIssue &&
           (existing.status !== "blocked" ||
             Array.isArray(req.body.blockedByIssueIds) ||
             existing.assigneeAgentId !== issue.assigneeAgentId);

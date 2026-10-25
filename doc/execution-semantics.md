@@ -223,6 +223,8 @@ Use it for:
 
 Blocked issues should stay idle while blockers remain unresolved. Paperclip should not create a queued heartbeat run for that issue until the final blocker is done and the `issue_blockers_resolved` wake can start real work.
 
+An assignee agent putting its own issue back to `blocked` while every blocker is already resolved is a hold the agent declared, not a blockers-resolved event. Neither the update route nor the periodic dependency backstop wakes that agent for the new blocked cycle. A blocker that resolves after the cycle began, or a ready blocked cycle restored by a board user or another agent, still wakes the assignee.
+
 `cancelled` is terminal for the blocker issue itself, but it does not satisfy the dependency. A cancelled blocker edge remains unresolved until the edge is removed or replaced, and Paperclip must surface blocker attention on the dependent regardless of whether that dependent is currently displayed as `blocked`, `todo`, `backlog`, or another non-terminal agent-owned status.
 
 If a parent is truly waiting on a child, model that with blockers. Do not rely on the parent/child relationship alone.
