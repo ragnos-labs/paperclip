@@ -120,8 +120,8 @@ prove these application-level mitigations or deployed reachability.
 The November 1 dependency repair pins the upstream fixes for Better Auth 1.7.7,
 Zod 4.6.6, Undici 6.29.1/8.12.2, body-parser 2.4.0, Multer 2.5.0,
 fast-uri 3.1.9, qs 6.16.1 and follow-redirects 1.16.2. The Teams dependency
-uses MSAL Node 7.1.0, and the Google client cleanup path uses Glob 14.0.2 with
-Minimatch 11.0.1. The existing scoped override mechanism applies these fixes;
+uses MSAL Node 7.1.0. Google clients use Gaxios 8.3.2, removing the
+obsolete Rimraf/Glob/Minimatch cleanup chain. The existing scoped override mechanism applies these fixes;
 the original audit baseline is unchanged.
 
 Better Auth 1.7.3 removed the required account issuer introduced in 1.7.0–1.7.2.
