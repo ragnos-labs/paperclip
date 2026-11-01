@@ -73,4 +73,21 @@ describe("routable blocked notifications", () => {
       idempotencyKey: expect.stringContaining(secondTransition.toISOString()),
     });
   });
+
+  it("does not notify an agent owner about the hold that agent just declared", async () => {
+    const wakeup = vi.fn(async () => undefined);
+    const markNotified = vi.fn(async () => undefined);
+    const issue = blockedIssue({ transitionAt: new Date(ROUTABLE_BLOCKED_ROLLOUT_AT.getTime() + 1) });
+
+    await expect(deliverAgentUnblockNotification({
+      issue, actorAgentId: agentId, wakeup, markNotified,
+    })).resolves.toBe(false);
+    expect(wakeup).not.toHaveBeenCalled();
+    expect(markNotified).not.toHaveBeenCalled();
+
+    await expect(deliverAgentUnblockNotification({
+      issue, actorAgentId: "another-agent", wakeup, markNotified,
+    })).resolves.toBe(true);
+    expect(wakeup).toHaveBeenCalledTimes(1);
+  });
 });

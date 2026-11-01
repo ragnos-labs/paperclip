@@ -1,7 +1,7 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, gt, gte, inArray, lte, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests } from "@paperclipai/db";
+import { activityLog, agentWakeupRequests, heartbeatRuns, issues, workspaceOperations } from "@paperclipai/db";
 
 export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
 
@@ -236,4 +236,184 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
     }),
   );
   return covering ?? null;
+}
+
+// The activity row for a blocked transition is written by the same request that
+// stamps `blockedTransitionAt`. Its `created_at` can be a few milliseconds before
+// the stamp (a transaction-scoped `now()` default taken before the application
+// clock) or later than it (the route logs after the update commits). Take the
+// row nearest to the stamp inside this window.
+const BLOCKED_CYCLE_ACTIVITY_BEFORE_MS = 5_000;
+const BLOCKED_CYCLE_ACTIVITY_AFTER_MS = 30_000;
+
+type BlockedCycleActivityRow = {
+  id: string;
+  agentId: string | null;
+  runId: string | null;
+  createdAt: Date;
+};
+
+async function isActivityAuthoredByAssignee(
+  db: Db,
+  input: { companyId: string; assigneeAgentId: string },
+  row: Pick<BlockedCycleActivityRow, "agentId" | "runId">,
+): Promise<boolean> {
+  if (row.agentId === input.assigneeAgentId) return true;
+  if (!row.runId) return false;
+  const [run] = await db
+    .select({ agentId: heartbeatRuns.agentId })
+    .from(heartbeatRuns)
+    .where(and(eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.id, row.runId)))
+    .limit(1);
+  return run?.agentId === input.assigneeAgentId;
+}
+
+/**
+ * Latest time at which each blocker became ready for its dependents: the later
+ * of its completion and, for a blocker with an execution workspace, the latest
+ * successful `workspace_finalize` of that workspace (readiness also waits for
+ * that barrier). A missing completion time falls back to `updatedAt`, which can
+ * only make a blocker look more recent and so keeps the old wake behaviour.
+ */
+async function listBlockerReadyAt(
+  db: Db,
+  companyId: string,
+  blockerIssueIds: string[],
+): Promise<Map<string, Date> | null> {
+  const blockers = await db
+    .select({
+      id: issues.id,
+      executionWorkspaceId: issues.executionWorkspaceId,
+      resolvedAt: sql<Date | string | null>`coalesce(${issues.completedAt}, ${issues.updatedAt})`,
+    })
+    .from(issues)
+    .where(and(eq(issues.companyId, companyId), inArray(issues.id, blockerIssueIds)));
+  if (blockers.length !== blockerIssueIds.length) return null;
+
+  const readyAt = new Map<string, Date>();
+  for (const blocker of blockers) {
+    const resolvedAt = blocker.resolvedAt == null ? null : new Date(blocker.resolvedAt);
+    if (!resolvedAt || Number.isNaN(resolvedAt.getTime())) return null;
+    readyAt.set(blocker.id, resolvedAt);
+  }
+
+  const executionWorkspaceIds = [
+    ...new Set(blockers.map((blocker) => blocker.executionWorkspaceId).filter((id): id is string => Boolean(id))),
+  ];
+  if (executionWorkspaceIds.length > 0) {
+    const finalizes = await db
+      .select({
+        executionWorkspaceId: workspaceOperations.executionWorkspaceId,
+        finishedAt: workspaceOperations.finishedAt,
+        startedAt: workspaceOperations.startedAt,
+      })
+      .from(workspaceOperations)
+      .where(
+        and(
+          eq(workspaceOperations.companyId, companyId),
+          inArray(workspaceOperations.executionWorkspaceId, executionWorkspaceIds),
+          eq(workspaceOperations.phase, "workspace_finalize"),
+          eq(workspaceOperations.status, "succeeded"),
+        ),
+      );
+    for (const blocker of blockers) {
+      for (const finalize of finalizes) {
+        if (finalize.executionWorkspaceId !== blocker.executionWorkspaceId) continue;
+        const finalizedAt = new Date(finalize.finishedAt ?? finalize.startedAt);
+        if (finalizedAt.getTime() > readyAt.get(blocker.id)!.getTime()) readyAt.set(blocker.id, finalizedAt);
+      }
+    }
+  }
+  return readyAt;
+}
+
+/**
+ * True when the dependent's current blocked cycle began with every blocker
+ * already ready and the assignee agent itself (or its own run) put the issue
+ * back into `blocked`.
+ *
+ * That transition is not a blockers-resolved event: nothing resolved after the
+ * cycle began, and the agent that would be woken is the one that just declared
+ * the hold. Each such re-block stamps a new `blockedTransitionAt`, so the
+ * cycle-aware state key changes every time and, without this check, a wake for
+ * the new key re-activates the agent, which re-blocks again (incident
+ * 2026-10-22: 261 runs on one issue). Not matched: a blocker that became ready
+ * after the cycle began, a blocker edge change by someone other than the
+ * assignee after the cycle began, and a cycle begun by a board user or another
+ * agent.
+ *
+ * Missing evidence returns false so the existing wake behaviour applies, with
+ * one exception: a cycle younger than the activity window with no transition
+ * row yet is treated as self-authored, because the route logs that row after
+ * the update commits and the next backstop pass sees the settled state.
+ */
+export async function isReadyBlockedCycleSelfAuthored(
+  db: Db,
+  input: {
+    companyId: string;
+    dependentIssueId: string;
+    assigneeAgentId: string;
+    blockerIssueIds: string[];
+    blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
+    now?: Date;
+  },
+): Promise<boolean> {
+  const cycleStart = parseWakeCycleDate(input.blockedTransitionAt);
+  const blockerIssueIds = uniqueSortedBlockerIssueIds(input.blockerIssueIds);
+  if (!cycleStart || blockerIssueIds.length === 0) return false;
+
+  const readyAt = await listBlockerReadyAt(db, input.companyId, blockerIssueIds);
+  if (!readyAt) return false;
+  for (const at of readyAt.values()) {
+    if (at.getTime() > cycleStart.getTime()) return false;
+  }
+
+  const candidates: BlockedCycleActivityRow[] = await db
+    .select({
+      id: activityLog.id,
+      agentId: activityLog.agentId,
+      runId: activityLog.runId,
+      createdAt: activityLog.createdAt,
+    })
+    .from(activityLog)
+    .where(
+      and(
+        eq(activityLog.companyId, input.companyId),
+        eq(activityLog.entityType, "issue"),
+        eq(activityLog.entityId, input.dependentIssueId),
+        eq(activityLog.action, "issue.updated"),
+        gte(activityLog.createdAt, new Date(cycleStart.getTime() - BLOCKED_CYCLE_ACTIVITY_BEFORE_MS)),
+        lte(activityLog.createdAt, new Date(cycleStart.getTime() + BLOCKED_CYCLE_ACTIVITY_AFTER_MS)),
+        // Route updates record `changes.status.to`; the native status committer
+        // records `toStatus`.
+        sql`(${activityLog.details} -> 'changes' -> 'status' ->> 'to' = 'blocked' OR ${activityLog.details} ->> 'toStatus' = 'blocked')`,
+      ),
+    );
+  const transition = candidates
+    .map((row) => ({ row, distance: Math.abs(new Date(row.createdAt).getTime() - cycleStart.getTime()) }))
+    .sort((a, b) => a.distance - b.distance)[0]?.row;
+  if (!transition) {
+    const now = input.now ?? new Date();
+    return now.getTime() - cycleStart.getTime() < BLOCKED_CYCLE_ACTIVITY_AFTER_MS;
+  }
+  if (!(await isActivityAuthoredByAssignee(db, input, transition))) return false;
+
+  // A blocker edge change by someone else after the cycle began can make the
+  // current blocker set ready without any completion after the cycle start.
+  const laterEdgeChanges = await db
+    .select({ id: activityLog.id, agentId: activityLog.agentId, runId: activityLog.runId })
+    .from(activityLog)
+    .where(
+      and(
+        eq(activityLog.companyId, input.companyId),
+        eq(activityLog.entityType, "issue"),
+        eq(activityLog.entityId, input.dependentIssueId),
+        eq(activityLog.action, "issue.blockers_updated"),
+        gt(activityLog.createdAt, new Date(transition.createdAt)),
+      ),
+    );
+  for (const change of laterEdgeChanges) {
+    if (!(await isActivityAuthoredByAssignee(db, input, change))) return false;
+  }
+  return true;
 }
