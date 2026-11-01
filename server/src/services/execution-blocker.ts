@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, not, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, not, or, sql } from "drizzle-orm";
 import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
 import { z } from "zod";
 import { heartbeatRuns, issueComments, issues, issueRecoveryActions, type Db } from "@paperclipai/db";
@@ -29,7 +29,7 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
     if (command?.authorUserId && !command.deletedAt && command.body.trim() === "/new") return null;
   }
   const [boundary] = conversation?.agentId && conversation.boundaryId
-    ? await db.select({ createdAt: issueComments.createdAt }).from(issueComments).where(and(
+    ? await db.select({ id: issueComments.id }).from(issueComments).where(and(
       eq(issueComments.companyId, companyId), eq(issueComments.issueId, issueId),
       eq(issueComments.id, conversation.boundaryId),
     )).limit(1) : [];
@@ -40,7 +40,17 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
     eq(issueRecoveryActions.companyId, companyId),
     eq(issueRecoveryActions.sourceIssueId, issueId),
     executionBlockerPredicate(),
-    boundary ? gt(issueRecoveryActions.createdAt, boundary.createdAt) : undefined,
+    // Keep both sides in PostgreSQL: JavaScript Date truncates microseconds
+    // and can turn an older hold into a newer one within the same millisecond.
+    // If the captured boundary disappears, retain the hold rather than infer
+    // resolution from a missing comparison operand.
+    boundary ? sql`coalesce(${issueRecoveryActions.createdAt} > (
+      select ${issueComments.createdAt} from ${issueComments}
+      where ${issueComments.companyId} = ${companyId}
+        and ${issueComments.issueId} = ${issueId}
+        and ${issueComments.id} = ${boundary.id}
+      limit 1
+    ), true)` : undefined,
   )).orderBy(desc(issueRecoveryActions.updatedAt), desc(issueRecoveryActions.id)).limit(1);
   if (!action) return null;
   const parsedRunId = z.string().guid().safeParse(action.evidence.runId ?? action.evidence.sourceRunId);

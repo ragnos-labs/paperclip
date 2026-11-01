@@ -491,6 +491,14 @@ export async function deliverConversationComments(
         issue.id,
       )) {
         await resumeConversationForReset(db, comment);
+        const contextSnapshot = {
+          issueId: issue.id,
+          taskKey: issue.id,
+          commentId: comment.id,
+          wakeCommentId: comment.id,
+          wakeCommentIds: [comment.id],
+          source: "issue.comment",
+        };
         await enqueue(issue.conversationAgentId!, {
           source: "on_demand",
           triggerDetail: "manual",
@@ -498,15 +506,12 @@ export async function deliverConversationComments(
           idempotencyKey: `conversation-comment:${comment.id}`,
           requestedByActorType: "user",
           requestedByActorId: comment.authorUserId,
-          payload: { issueId: issue.id, commentId: comment.id },
-          contextSnapshot: {
-            issueId: issue.id,
-            taskKey: issue.id,
-            commentId: comment.id,
-            wakeCommentId: comment.id,
-            wakeCommentIds: [comment.id],
-            source: "issue.comment",
-          },
+          // Immediate delivery needs the same durable envelope as deferred
+          // delivery. The locked claim validates this exact adopted list;
+          // missing or mismatched envelopes must still fail closed.
+          payload: { issueId: issue.id, commentId: comment.id,
+            _paperclipWakeContext: contextSnapshot },
+          contextSnapshot,
         });
       }
       return true;

@@ -2124,3 +2124,16 @@ export type UpsertIssueDocument = z.infer<typeof upsertIssueDocumentSchema>;
 export type RestoreIssueDocumentRevision = z.infer<
   typeof restoreIssueDocumentRevisionSchema
 >;
+
+/** Exact owner evidence events admit reconsideration, never health verification or acceptance. */
+export const externalEvidenceEventSchema = z.object({
+  eventId: z.string().uuid(),
+  kind: z.enum(["evidence_supplied", "resolved", "cancelled", "replaced"]),
+  commentId: z.string().uuid().optional(),
+  replacementIssueId: z.string().uuid().optional(),
+}).strict().superRefine((event, ctx) => {
+  if ((event.kind === "evidence_supplied") !== Boolean(event.commentId))
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["commentId"], message: "Only supplied evidence requires an exact comment" });
+  if ((event.kind === "replaced") !== Boolean(event.replacementIssueId))
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["replacementIssueId"], message: "Only replacement requires an exact replacement request" });
+});

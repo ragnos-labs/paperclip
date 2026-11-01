@@ -28,9 +28,7 @@ const ORIGIN = "http://127.0.0.1:41999";
 const EMAIL = "founder@example.com";
 const PASSWORD = "correct-horse-battery-staple";
 
-// The issuer Better Auth stamps on an email/password account:
-// `createLocalAccountIssuer("credential")`. Sign-in matches on it, so a row
-// written with anything else is a row nobody can sign in as.
+// Legacy Better Auth 1.7.0–1.7.2 credential accounts retain this metadata.
 const CREDENTIAL_ISSUER = "local:credential";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -107,7 +105,7 @@ describeEmbeddedPostgres("Better Auth credential sign-up against the real schema
     expect(accounts).toHaveLength(1);
     expect(accounts[0]).toMatchObject({
       providerId: "credential",
-      issuer: CREDENTIAL_ISSUER,
+      issuer: null,
     });
     expect(accounts[0]?.password).toBeTruthy();
 
@@ -119,5 +117,16 @@ describeEmbeddedPostgres("Better Auth credential sign-up against the real schema
     expect(signIn.status).toBe(200);
     expect(signIn.body?.user?.email).toBe(EMAIL);
     expect(sessionCookies(signIn).length).toBeGreaterThan(0);
+
+    // Rows written before 1.7.3 keep their issuer; upgrading must preserve login.
+    await db.update(authAccounts).set({ issuer: CREDENTIAL_ISSUER });
+    const legacySignIn = await request(app)
+      .post("/api/auth/sign-in/email")
+      .set("origin", ORIGIN)
+      .send({ email: EMAIL, password: PASSWORD });
+    expect(legacySignIn.status).toBe(200);
+    expect(legacySignIn.body?.user?.email).toBe(EMAIL);
+    expect(sessionCookies(legacySignIn).length).toBeGreaterThan(0);
+    expect((await db.select().from(authAccounts))[0]?.issuer).toBe(CREDENTIAL_ISSUER);
   });
 });

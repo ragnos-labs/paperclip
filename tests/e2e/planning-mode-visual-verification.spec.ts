@@ -106,6 +106,17 @@ test("captures planning mode UI for desktop and mobile", async ({ page }) => {
   // and must not bounce through the dashboard (PAP-404).
   await expectLandsOnFirstTaskWithoutDashboardBounce(page);
 
+  // These routes exist only to provision the inert onboarding agent. Keeping
+  // any page route enabled disables HTTP caching for every later full reload.
+  // Retire exactly this fixture's setup mocks after the real first-task landing;
+  // all desktop/mobile loads, screenshots, assertions and deadlines stay intact.
+  for (const pattern of [
+    "**/test-environment",
+    "**/agent-hires",
+    "**/ai-connections/local/check",
+    "**/ai-connections/local",
+  ]) await page.unroute(pattern);
+
   const baseOrigin = new URL(page.url()).origin;
   const companyRes = await page.request.get(`${baseOrigin}/api/companies`);
   expect(companyRes.ok()).toBe(true);

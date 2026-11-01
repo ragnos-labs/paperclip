@@ -42,6 +42,7 @@ import {
   // Issue
   createIssueSchema,
   updateIssueSchema,
+  externalEvidenceEventSchema,
   stalledReviewDecisionSchema,
   createIssueLabelSchema,
   addIssueCommentSchema,
@@ -4338,6 +4339,14 @@ registry.registerPath({
   summary: "List issue attachments",
   request: { params: z.object({ id: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post", path: "/api/issues/{id}/evidence-events", tags: ["issues"],
+  summary: "Record an authenticated owner-request evidence or lifecycle event",
+  description: "Board members only. Exact native source provenance and durable wake intent; no health verification, human hold override or work acceptance.",
+  request: { params: z.object({ id: z.string() }), body: jsonBody(externalEvidenceEventSchema) },
+  responses: { 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
 });
 
 registry.registerPath({
