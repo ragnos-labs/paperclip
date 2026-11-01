@@ -41,20 +41,12 @@ async function migrationHash() {
 }
 
 describe("account issuer schema", () => {
-  it("declares the column Better Auth requires and the key it indexes on", () => {
+  it("keeps legacy issuer metadata nullable without the obsolete unique key", () => {
     const config = getTableConfig(authAccounts);
     const issuer = config.columns.find((column) => column.name === "issuer");
     expect(issuer).toBeDefined();
-    expect(issuer?.notNull).toBe(true);
-
-    // Better Auth declares `(issuer, accountId)` unique on the account model
-    // and resolves accounts by that pair.
-    const unique = config.indexes.find((index) => index.config.name === UNIQUE_INDEX);
-    expect(unique?.config.unique).toBe(true);
-    expect(unique?.config.columns.map((column) => (column as { name: string }).name)).toEqual([
-      "issuer",
-      "account_id",
-    ]);
+    expect(issuer?.notNull).toBe(false);
+    expect(config.indexes.some((index) => index.config.name === UNIQUE_INDEX)).toBe(false);
   });
 });
 
@@ -133,5 +125,35 @@ describeEmbeddedPostgres("account issuer migration", () => {
         VALUES (${`account-${randomUUID()}`}, ${CREDENTIAL_ISSUER}, ${credentialUserId}, 'credential', ${credentialUserId}, now(), now())
       `,
     ).rejects.toMatchObject({ code: "23505", constraint_name: UNIQUE_INDEX });
+
+    // Reapply the current compatibility migration over those real legacy rows.
+    const currentMigration = await fs.promises.readFile(
+      new URL("./migrations/0284_better_auth_issuer_optional.sql", import.meta.url), "utf8",
+    );
+    const currentHash = createHash("sha256").update(currentMigration).digest("hex");
+    await sql`DELETE FROM "drizzle"."__drizzle_migrations" WHERE "hash" = ${currentHash}`;
+    await applyPendingMigrations(database.connectionString);
+    const preserved = await sql<{ id: string; issuer: string }[]>`
+      SELECT "id", "issuer" FROM "account" ORDER BY "id"
+    `;
+    expect(preserved).toEqual(rows);
+    const [currentColumn] = await sql<{ is_nullable: string }[]>`
+      SELECT "is_nullable" FROM "information_schema"."columns"
+      WHERE "table_name" = 'account' AND "column_name" = 'issuer'
+    `;
+    expect(currentColumn?.is_nullable).toBe("YES");
+    const currentIndexes = await sql<{ indexname: string }[]>`
+      SELECT "indexname" FROM "pg_indexes"
+      WHERE "tablename" = 'account' AND "indexname" = ${UNIQUE_INDEX}
+    `;
+    expect(currentIndexes).toHaveLength(0);
+    // Current inserts omit issuer; the same subject at two providers stays valid.
+    await sql`
+      INSERT INTO "account"
+        ("id", "account_id", "provider_id", "user_id", "created_at", "updated_at")
+      VALUES
+        (${`account-${randomUUID()}`}, 'new-shared-subject', 'github', ${socialUserId}, now(), now()),
+        (${`account-${randomUUID()}`}, 'new-shared-subject', 'google', ${socialUserId}, now(), now())
+    `;
   }, 30_000);
 });

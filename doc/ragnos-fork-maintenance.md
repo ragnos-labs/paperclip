@@ -97,7 +97,7 @@ work. A manual or comment wake does not resolve a confirmation.
 The inherited dependency chains are repaired with supported parent updates and
 scoped overrides: Cursor SDK 1.0.36 removes old Undici/Busboy; Svix 1.99.1 removes
 UUID 10; Mermaid uses KaTeX 0.18.2; Typography uses selector-parser 7.1.6;
-body-parser uses 2.3.0; MCP SDK uses 1.32.0. The compatible library refresh selects
+body-parser uses 2.4.0; MCP SDK uses 1.32.0. The compatible library refresh selects
 follow-redirects 1.16.1, Vite 8.2.4, Runner's separate Vite 6.4.4 line, and aligned
 Vitest/mocker 4.1.12. The narrow Vitest-to-Vite override keeps its broad supported
 range on the selected 8.2.4 release instead of introducing another minor line.
@@ -116,6 +116,23 @@ requires both `expectedResource` and the verifier's `AuthInfo.resource` contract
 to enforce audience. Assess actual entrypoints and obtain the separate scoped
 configuration approval before changing either. A clean package audit does not
 prove these application-level mitigations or deployed reachability.
+
+The November 1 dependency repair pins the upstream fixes for Better Auth 1.7.7,
+Zod 4.6.6, Undici 6.29.1/8.12.2, body-parser 2.4.0, Multer 2.5.0,
+fast-uri 3.1.9, qs 6.16.1 and follow-redirects 1.16.2. The Teams dependency
+uses MSAL Node 7.1.0, and the Google client cleanup path uses Glob 14.0.2 with
+Minimatch 11.0.1. The existing scoped override mechanism applies these fixes;
+the original audit baseline is unchanged.
+
+Better Auth 1.7.3 removed the required account issuer introduced in 1.7.0–1.7.2.
+Migration `0284_better_auth_issuer_optional` follows the
+[upstream upgrade guide](https://www.better-auth.com/docs/guides/1-7-upgrade-guide#account-identity-keeps-the-provider-key):
+it relaxes the old issuer constraint and drops its obsolete unique index, retaining
+all issuer values and account rows. Existing accounts continue to sign in by
+provider/account identity; new accounts omit issuer. Apply the migration with
+the selected source before starting an upgraded runtime. Source qualification
+does not apply this migration to any installed database. A runtime upgrade needs
+the existing verified backup and compatibility review before activation.
 
 The production audit reports no critical, high or moderate findings. Its one low
 `cli@0.3.1` report has no dependency paths and refers to the unrelated npm `cli`
